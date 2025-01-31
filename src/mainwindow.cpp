@@ -133,50 +133,52 @@ void MainWindow::onToggleViewButtonClicked() {
 }
 
 void MainWindow::onListViewDoubleClicked(const QModelIndex &index) {
-  spdlog::info("List item double clicked");
-  QStandardItemModel *model =
-      qobject_cast<QStandardItemModel *>(treeView->model());
-  QStandardItem *item = model->itemFromIndex(index);
+  try {
+    spdlog::info("List item double clicked");
+    QString filePath = model->filePath(index);
+    QFileInfo fileInfo(filePath);
 
-  if (!item)
-    return;
-
-  QString path = currentFolderPath;
-  QModelIndex parent = index;
-  QStringList pathParts;
-
-  // 构建完整路径
-  while (parent.isValid()) {
-    pathParts.prepend(model->data(parent).toString());
-    parent = parent.parent();
-  }
-
-  for (const QString &part : pathParts) {
-    path = QDir(path).filePath(part);
-  }
-
-  QFileInfo fileInfo(path);
-  if (fileInfo.isDir()) {
-    // 如果是目录，更新当前路径并重新扫描
-    currentFolderPath = path;
-    try {
-      auto structure = parse_folder_structure(path.toStdString());
-      populateListView(structure);
-      populateGridView(structure);
-    } catch (const std::exception &e) {
-      spdlog::error("Error parsing folder: {}", e.what());
-      QMessageBox::warning(this, "错误",
-                           QString("无法打开目录: %1").arg(e.what()));
+    if (fileInfo.isDir()) {
+      // 如果是目录,进入目录
+      currentFolderPath = filePath;
+      treeView->setRootIndex(model->index(filePath));
+      updateNavigationControls();
+    } else if (fileInfo.isFile()) {
+      // 如果是文件,检查是否为图片
+      if (is_image_file(filePath.toStdString())) {
+        // 获取当前文件夹下的所有图片
+        QDir dir = fileInfo.dir();
+        QStringList filters;
+        filters << "*.jpg" << "*.jpeg" << "*.png" << "*.gif" << "*.bmp";
+        QFileInfoList files = dir.entryInfoList(filters, QDir::Files);
+        
+        // 构建图片列表
+        QVector<QString> imageList;
+        int currentIndex = 0;
+        for(int i = 0; i < files.size(); i++) {
+          imageList.append(files[i].filePath());
+          if(files[i].filePath() == filePath) {
+            currentIndex = i;
+          }
+        }
+        
+        // 打开图片预览对话框
+        if(imagePreviewDialog) {
+          imagePreviewDialog->setImageList(imageList, currentIndex); 
+          imagePreviewDialog->show();
+          spdlog::info("Image preview opened for: {}", filePath.toStdString());
+        } else {
+          throw std::runtime_error("图片预览对话框未初始化");
+        }
+      } else {
+        // 非图片文件,仅显示文件信息
+        showFileInfo(filePath);
+      }
     }
-  } else if (fileInfo.isFile()) {
-    // 如果是文件，显示文件信息
-    showFileInfo(path);
-    if (fileInfo.isFile() && is_image_file(path.toStdString())) {
-      QVector<QString> images = getImageListFromCurrentFolder();
-      int imageIndex = images.indexOf(path);
-      imagePreviewDialog->setImageList(images, imageIndex);
-      imagePreviewDialog->show();
-    }
+  } catch (const std::exception &e) {
+    spdlog::error("Error handling double click: {}", e.what());
+    QMessageBox::critical(this, "错误", 
+      QString("处理文件时出错：%1").arg(e.what()));
   }
 }
 

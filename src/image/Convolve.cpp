@@ -1,8 +1,12 @@
+#include "Convolve.hpp"
+#include "../utils/ThreadPool.hpp"
 #include <chrono>
 #include <fmt/format.h>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <spdlog/spdlog.h>
 #include <variant>
+
 
 namespace ImageProcessing {
 
@@ -17,7 +21,10 @@ struct ConvolutionConfig {
   BorderMode border_mode = BorderMode::REPLICATE;
   bool normalize_kernel = true;
   bool parallel_execution = true;
-  bool per_channel = false; // 是否对每个通道单独处理
+  bool per_channel = false;    // 是否对每个通道单独处理
+  int tile_size = 64;          // 分块大小
+  bool use_memory_pool = true; // 是否使用内存池
+  bool use_simd = true;        // 是否使用SIMD优化
 };
 
 struct DeconvolutionConfig {
@@ -27,6 +34,7 @@ struct DeconvolutionConfig {
   double regularization = 1e-6;
   BorderMode border_mode = BorderMode::REPLICATE;
   bool per_channel = false; // 是否对每个通道单独处理
+  int tile_size = 64;       // 分块大小
 };
 
 class ImageProcessor {
@@ -96,41 +104,49 @@ private:
   // 单通道卷积实现
   static cv::Mat convolveSingleChannel(const cv::Mat &input,
                                        const ConvolutionConfig &cfg) {
-    ScopedTimer timer("Convolution");
+    ScopedTimer timer("Optimized Convolution");
 
-    try {
-      validateConvolutionConfig(input, cfg);
+    const int tile_size = cfg.tile_size;
+    cv::Mat kernel = prepareKernel(cfg);
+    cv::Mat output =
+        cfg.use_memory_pool
+            ? MemoryPool::allocate(input.rows, input.cols, input.type())
+            : cv::Mat(input.rows, input.cols, input.type());
 
-      cv::Mat kernel = prepareKernel(cfg);
-      cv::Mat output;
-
-      const int borderType = getOpenCVBorderType(cfg.border_mode);
-      const cv::Point anchor(cfg.kernel_size / 2, cfg.kernel_size / 2);
-
-      // 使用ROI优化边界处理
-      cv::Mat padded;
-      const int pad = cfg.kernel_size / 2;
-      cv::copyMakeBorder(input, padded, pad, pad, pad, pad, borderType);
-
-      if (cfg.parallel_execution) {
-        const int threads = std::thread::hardware_concurrency();
-        cv::setNumThreads(threads);
-        cv::filter2D(padded, output, -1, kernel, anchor, 0,
-                     cv::BORDER_ISOLATED);
-        cv::setNumThreads(1);
-      } else {
-        cv::filter2D(padded, output, -1, kernel, anchor, 0,
-                     cv::BORDER_ISOLATED);
-      }
-
-      return output(cv::Rect(pad, pad, input.cols, input.rows));
-    } catch (const cv::Exception &e) {
-      spdlog::error("OpenCV error during convolution: {}", e.what());
-      throw;
-    } catch (const std::exception &e) {
-      spdlog::error("Error during convolution: {}", e.what());
-      throw;
+    // 预热缓存
+    if (cfg.use_memory_pool) {
+      cv::Mat warmup = input(
+          cv::Rect(0, 0, std::min(64, input.cols), std::min(64, input.rows)));
+      cv::filter2D(warmup, warmup, -1, kernel);
     }
+
+    // 使用线程池进行分块处理
+    static DynamicThreadPool threadPool;
+    std::vector<std::future<void>> futures;
+
+    for (int y = 0; y < input.rows; y += tile_size) {
+      for (int x = 0; x < input.cols; x += tile_size) {
+        futures.push_back(threadPool.enqueue([&, x, y]() {
+          cv::Rect roi(x, y, std::min(tile_size, input.cols - x),
+                       std::min(tile_size, input.rows - y));
+          cv::Mat inputTile = input(roi);
+          cv::Mat outputTile = output(roi);
+
+          if (cfg.use_simd) {
+            SIMDHelper::processImageTile(inputTile, outputTile, kernel, roi);
+          } else {
+            cv::filter2D(inputTile, outputTile, -1, kernel);
+          }
+        }));
+      }
+    }
+
+    // 等待所有任务完成
+    for (auto &future : futures) {
+      future.wait();
+    }
+
+    return output;
   }
 
   // 反卷积实现
@@ -176,59 +192,75 @@ private:
     cv::Mat imgEstimate = input.clone();
     cv::Mat psfFlip;
     cv::flip(psf, psfFlip, -1);
-
     const int borderType = getOpenCVBorderType(cfg.border_mode);
 
+    static DynamicThreadPool threadPool;
+
     for (int i = 0; i < cfg.iterations; ++i) {
-      cv::Mat convResult;
-      cv::filter2D(imgEstimate, convResult, -1, psf, cv::Point(-1, -1), 0,
-                   borderType);
+      cv::Mat convResult, relativeBlur, errorEstimate;
 
-      cv::Mat relativeBlur;
-      cv::divide(input, convResult, relativeBlur);
+      auto task1 = threadPool.enqueue([&]() {
+        cv::filter2D(imgEstimate, convResult, -1, psf, cv::Point(-1, -1), 0,
+                     borderType);
+      });
 
-      cv::Mat errorEstimate;
-      cv::filter2D(relativeBlur, errorEstimate, -1, psfFlip, cv::Point(-1, -1),
-                   0, borderType);
+      task1.wait(); // 等待第一步完成
 
-      cv::multiply(imgEstimate, errorEstimate, imgEstimate);
+      auto task2 = threadPool.enqueue(
+          [&]() { cv::divide(input, convResult, relativeBlur); });
+
+      auto task3 = threadPool.enqueue([&]() {
+        cv::filter2D(relativeBlur, errorEstimate, -1, psfFlip,
+                     cv::Point(-1, -1), 0, borderType);
+      });
+
+      task2.wait();
+      task3.wait();
+
+      auto task4 = threadPool.enqueue(
+          [&]() { cv::multiply(imgEstimate, errorEstimate, imgEstimate); });
+
+      task4.wait();
     }
 
     imgEstimate.convertTo(output, CV_8U);
   }
 
-  // 优化的Wiener反卷积
+  // 完整的Wiener反卷积实现
   static void wienerDeconv(const cv::Mat &input, const cv::Mat &psf,
                            cv::Mat &output, const DeconvolutionConfig &cfg) {
     ScopedTimer timer("Wiener Deconvolution");
 
-    const int optimal_rows = cv::getOptimalDFTSize(input.rows);
-    const int optimal_cols = cv::getOptimalDFTSize(input.cols);
+    // 准备输入
+    cv::Mat inputF, psfF;
+    input.convertTo(inputF, CV_32F);
+    psf.convertTo(psfF, CV_32F);
 
-    cv::Mat padded_input, padded_psf;
-    cv::copyMakeBorder(input, padded_input, 0, optimal_rows - input.rows, 0,
-                       optimal_cols - input.cols, cv::BORDER_CONSTANT, 0);
-    cv::copyMakeBorder(psf, padded_psf, 0, optimal_rows - psf.rows, 0,
-                       optimal_cols - psf.cols, cv::BORDER_CONSTANT, 0);
+    // 计算PSF的FFT
+    cv::Mat psfPadded;
+    int m = cv::getOptimalDFTSize(input.rows + psf.rows - 1);
+    int n = cv::getOptimalDFTSize(input.cols + psf.cols - 1);
+    cv::copyMakeBorder(psfF, psfPadded, 0, m - psf.rows, 0, n - psf.cols,
+                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
 
-    cv::Mat inputSpectrum, psfSpectrum;
-    cv::dft(padded_input, inputSpectrum, cv::DFT_COMPLEX_OUTPUT);
-    cv::dft(padded_psf, psfSpectrum, cv::DFT_COMPLEX_OUTPUT);
+    cv::Mat psfDFT, inputDFT;
+    cv::dft(psfPadded, psfDFT, cv::DFT_COMPLEX_OUTPUT);
+    cv::dft(inputF, inputDFT, cv::DFT_COMPLEX_OUTPUT);
 
-    // 添加噪声功率谱估计
-    const double nsr = std::max(cfg.noise_power, 1e-6);
-    cv::Mat psfPower;
-    cv::mulSpectrums(psfSpectrum, psfSpectrum, psfPower, 0, true);
+    // 计算维纳滤波器
+    cv::Mat complexH;
+    cv::mulSpectrums(psfDFT, psfDFT, complexH, 0, true);
 
     cv::Mat wienerFilter;
-    cv::divide(cv::abs(psfSpectrum), psfPower + nsr, wienerFilter);
+    cv::divide(cv::abs(psfDFT), complexH + cfg.noise_power, wienerFilter);
 
+    // 应用滤波器
     cv::Mat result;
-    cv::mulSpectrums(inputSpectrum, wienerFilter, result, 0);
+    cv::mulSpectrums(inputDFT, wienerFilter, result, 0);
 
-    cv::Mat restored;
-    cv::idft(result, restored, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
-    restored(cv::Rect(0, 0, input.cols, input.rows)).convertTo(output, CV_8U);
+    // 反变换
+    cv::idft(result, output, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+    cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, CV_8U);
   }
 
   // Tikhonov 正则化反卷积
@@ -375,6 +407,114 @@ private:
     cv::normalize(psf, psf, 1.0, 0.0, cv::NORM_L1);
     return psf(cv::Rect(0, 0, imgSize.width, imgSize.height));
   }
+
+  // 优化内存池管理
+  struct MemoryPool {
+    static std::mutex pool_mutex_;
+    static std::vector<cv::Mat> pool_;
+    static size_t max_pool_size_;
+
+    static cv::Mat allocate(int rows, int cols, int type) {
+      std::lock_guard<std::mutex> lock(pool_mutex_);
+
+      for (auto it = pool_.begin(); it != pool_.end(); ++it) {
+        if (it->rows == rows && it->cols == cols && it->type() == type) {
+          cv::Mat mat = *it;
+          pool_.erase(it);
+          return mat;
+        }
+      }
+      return cv::Mat(rows, cols, type);
+    }
+
+    static void deallocate(cv::Mat &mat) {
+      if (!mat.empty()) {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        if (pool_.size() < max_pool_size_) {
+          pool_.push_back(mat);
+        }
+        mat = cv::Mat();
+      }
+    }
+
+    static void clear() {
+      std::lock_guard<std::mutex> lock(pool_mutex_);
+      pool_.clear();
+    }
+
+    static void setMaxPoolSize(size_t size) { max_pool_size_ = size; }
+  };
+
+  // SIMD优化实现
+  struct SIMDHelper {
+    static void processImageTile(const cv::Mat &src, cv::Mat &dst,
+                                 const cv::Mat &kernel, const cv::Rect &roi) {
+#ifdef __AVX2__
+      if (src.type() == CV_32F && kernel.type() == CV_32F) {
+        convolve2D_AVX2(src, dst, kernel, roi);
+        return;
+      }
+#endif
+      cv::filter2D(src, dst, -1, kernel);
+    }
+
+  private:
+#ifdef __AVX2__
+    static void convolve2D_AVX2(const cv::Mat &src, cv::Mat &dst,
+                                const cv::Mat &kernel, const cv::Rect &roi) {
+      // AVX2优化的实现
+      const int ksize = kernel.rows;
+      const int radius = ksize / 2;
+
+      for (int y = roi.y; y < roi.y + roi.height; y++) {
+        for (int x = roi.x; x < roi.x + roi.width; x += 8) {
+          __m256 sum = _mm256_setzero_ps();
+
+          for (int ky = 0; ky < ksize; ky++) {
+            for (int kx = 0; kx < ksize; kx++) {
+              int sy = y + ky - radius;
+              int sx = x + kx - radius;
+
+              if (sy >= 0 && sy < src.rows && sx >= 0 && sx < src.cols) {
+                __m256 src_val = _mm256_loadu_ps(&src.at<float>(sy, sx));
+                __m256 kernel_val = _mm256_set1_ps(kernel.at<float>(ky, kx));
+                sum = _mm256_add_ps(sum, _mm256_mul_ps(src_val, kernel_val));
+              }
+            }
+          }
+
+          _mm256_storeu_ps(&dst.at<float>(y, x), sum);
+        }
+      }
+    }
+#endif
+  };
+
+  // 添加缓存友好的数据结构处理
+  class CacheAlignedBuffer {
+    static constexpr size_t CACHE_LINE = 64;
+    std::unique_ptr<float[]> data_;
+    size_t size_;
+
+  public:
+    explicit CacheAlignedBuffer(size_t size) : size_(size) {
+      size_t aligned_size = (size + CACHE_LINE - 1) & ~(CACHE_LINE - 1);
+      data_ = std::make_unique<float[]>(aligned_size);
+    }
+
+    float *data() { return data_.get(); }
+    const float *data() const { return data_.get(); }
+    size_t size() const { return size_; }
+
+    void prefetch(size_t index) const { __builtin_prefetch(&data_[index]); }
+
+    float &operator[](size_t index) { return data_[index]; }
+    const float &operator[](size_t index) const { return data_[index]; }
+  };
 };
+
+std::vector<cv::Mat> ImageProcessor::MemoryPool::pool_;
+std::mutex ImageProcessor::MemoryPool::pool_mutex_;
+size_t ImageProcessor::MemoryPool::max_pool_size_ = 100;
 
 } // namespace ImageProcessing

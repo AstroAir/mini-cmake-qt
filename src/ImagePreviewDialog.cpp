@@ -90,6 +90,12 @@ void ImagePreviewDialog::setupUI() {
   setupStarDetectionUI();
   setupImageProcessingToolBar();
   mainLayout->addWidget(imageProcessingToolBar);
+
+  // 添加卷积和EXIF工具栏
+  convolutionToolBar = createImageProcessingToolBar();
+  exifToolBar = createExifToolBar();
+  mainLayout->addWidget(convolutionToolBar);
+  mainLayout->addWidget(exifToolBar);
 }
 
 void ImagePreviewDialog::createToolBar() {
@@ -152,29 +158,73 @@ void ImagePreviewDialog::setImageList(const QVector<QString> &images,
 }
 
 void ImagePreviewDialog::loadImage(const QString &path) {
-  if (path.endsWith(".fits", Qt::CaseInsensitive)) {
-    loadFitsImage(path);
-  } else {
+  try {
+    spdlog::info("Loading image: {}", path.toStdString());
+    
+    if (path.isEmpty()) {
+      throw std::runtime_error("图片路径为空");
+    }
+
+    QFileInfo fileInfo(path);
+    if (!fileInfo.exists()) {
+      throw std::runtime_error("图片文件不存在");
+    }
+
+    if (!fileInfo.isReadable()) {
+      throw std::runtime_error("无法读取图片文件,请检查权限");
+    }
+
+    if (path.endsWith(".fits", Qt::CaseInsensitive)) {
+      loadFitsImage(path);
+      return;
+    }
+
     QImageReader reader(path);
     reader.setAutoTransform(true);
-    QImage image = reader.read();
-
-    if (!image.isNull()) {
-      originalImage = cv::imread(path.toStdString(), cv::IMREAD_UNCHANGED);
-      QFileInfo fileInfo(path);
-      infoLabel->setText(formatFileInfo(path));
-      imageLabel->setPixmap(QPixmap::fromImage(image));
-      updateImage();
-      if (autoDetectionEnabled) {
-        startStarDetection();
-      }
-      updateHistogram();
+    
+    if (!reader.canRead()) {
+      throw std::runtime_error("无法识别的图片格式: " + reader.errorString().toStdString());
     }
-  }
 
-  // 加载元信息
-  currentMetadata =
-      imageProcessor.load_image(path.toStdString()).value_or(ImageMetadata{});
+    QImage image = reader.read();
+    if (image.isNull()) {
+      throw std::runtime_error("读取图片失败: " + reader.errorString().toStdString());
+    }
+
+    // 读取原始图像用于处理
+    originalImage = cv::imread(path.toStdString(), cv::IMREAD_UNCHANGED);
+    if (originalImage.empty()) {
+      spdlog::warn("Failed to load original image for processing");
+    }
+
+    // 更新界面显示
+    infoLabel->setText(formatFileInfo(path));
+    imageLabel->setPixmap(QPixmap::fromImage(image));
+    updateImage();
+
+    // 更新窗口标题
+    setWindowTitle(QString("图片预览 - %1").arg(fileInfo.fileName()));
+
+    // 自动检测星点
+    if (autoDetectionEnabled) {
+      startStarDetection();
+    }
+
+    // 更新直方图
+    updateHistogram();
+
+    spdlog::info("Successfully loaded image: {}", path.toStdString());
+
+  } catch (const std::exception &e) {
+    spdlog::error("Error loading image: {}", e.what());
+    QMessageBox::critical(this, "加载错误",
+                         QString("无法加载图片：%1").arg(e.what()));
+                         
+    // 清除当前显示
+    imageLabel->clear();
+    infoLabel->clear();
+    originalImage.release();
+  }
 }
 
 void ImagePreviewDialog::loadFitsImage(const QString &path) {
@@ -334,19 +384,31 @@ void ImagePreviewDialog::saveImageAs() {
 
 void ImagePreviewDialog::showNext() {
   if (currentIndex < imageList.size() - 1) {
-    currentIndex++;
-    loadImage(imageList[currentIndex]);
-    updateNavigationButtons();
-    updateCountLabel();
+    try {
+      currentIndex++;
+      loadImage(imageList[currentIndex]);
+      updateNavigationButtons();
+      updateCountLabel();
+    } catch (const std::exception &e) {
+      spdlog::error("Error showing next image: {}", e.what());
+      QMessageBox::warning(this, "错误",
+        QString("无法显示下一张图片：%1").arg(e.what()));
+    }
   }
 }
 
 void ImagePreviewDialog::showPrevious() {
   if (currentIndex > 0) {
-    currentIndex--;
-    loadImage(imageList[currentIndex]);
-    updateNavigationButtons();
-    updateCountLabel();
+    try {
+      currentIndex--;
+      loadImage(imageList[currentIndex]);
+      updateNavigationButtons();
+      updateCountLabel(); 
+    } catch (const std::exception &e) {
+      spdlog::error("Error showing previous image: {}", e.what());
+      QMessageBox::warning(this, "错误",
+        QString("无法显示上一张图片：%1").arg(e.what()));
+    }
   }
 }
 
@@ -560,8 +622,22 @@ void ImagePreviewDialog::drawStarAnnotations(QImage &image) {
 void ImagePreviewDialog::showMetadataDialog() {
   if (!currentMetadata.path.empty()) {
     MetadataDialog dialog(currentMetadata, this);
-    dialog.exec();
+    if (dialog.exec() == QDialog::Accepted) {
+        updateMetadata(dialog.getMetadata());
+    }
   }
+}
+
+void ImagePreviewDialog::updateMetadata(const ImageMetadata& metadata) {
+    currentMetadata = metadata;
+    try {
+        // 保存更新后的元数据到文件
+        imageProcessor.save_metadata(currentMetadata);
+        QMessageBox::information(this, "成功", "元数据已保存到文件");
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, "错误", 
+            QString("保存元数据失败: %1").arg(e.what()));
+    }
 }
 
 void ImagePreviewDialog::setupImageProcessingToolBar() {
@@ -585,6 +661,26 @@ void ImagePreviewDialog::setupImageProcessingToolBar() {
       "导出星点数据", this, &ImagePreviewDialog::exportStarData);
   showHistogramAction = imageProcessingToolBar->addAction(
       "显示直方图", this, &ImagePreviewDialog::showHistogram);
+}
+
+QToolBar* ImagePreviewDialog::createImageProcessingToolBar() {
+  auto toolbar = new QToolBar("图像处理", this);
+  
+  applyConvolutionAction = toolbar->addAction("应用卷积", this, 
+      &ImagePreviewDialog::applyConvolution);
+  applyDeconvolutionAction = toolbar->addAction("应用反卷积", this,
+      &ImagePreviewDialog::applyDeconvolution);
+  
+  return toolbar;
+}
+
+QToolBar* ImagePreviewDialog::createExifToolBar() {
+  auto toolbar = new QToolBar("EXIF信息", this);
+  
+  showExifAction = toolbar->addAction("查看EXIF", this,
+      &ImagePreviewDialog::showExifInfo);
+      
+  return toolbar;
 }
 
 void ImagePreviewDialog::applyAutoStretch() {
@@ -773,4 +869,129 @@ double ImagePreviewDialog::calculateImageStatistics() {
                stddev[0], snr);
 
   return snr;
+}
+
+void ImagePreviewDialog::showExifInfo() {
+  if (exifData.empty()) {
+    QMessageBox::information(this, "EXIF信息", "该图像没有EXIF信息");
+    return;
+  }
+
+  QString info;
+  for (const auto& exif : exifData) {
+    info += QString("%1: %2\n").arg(
+      QString::fromStdString(exif.tag_name),
+      QString::fromStdString(std::visit([](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, std::string>) {
+          return arg;
+        } else if constexpr (std::is_arithmetic_v<T>) {
+          return std::to_string(arg);
+        } else {
+          return std::string("复合数据");
+        }
+      }, exif.value))
+    );
+  }
+  
+  QDialog dialog(this);
+  dialog.setWindowTitle("EXIF信息");
+  auto layout = new QVBoxLayout(&dialog);
+  auto text = new QTextEdit;
+  text->setPlainText(info);
+  text->setReadOnly(true);
+  layout->addWidget(text);
+  dialog.exec();
+}
+
+void ImagePreviewDialog::applyConvolution() {
+  // 创建卷积配置对话框
+  QDialog dialog(this);
+  dialog.setWindowTitle("卷积设置");
+  auto layout = new QVBoxLayout(&dialog);
+  
+  // 添加卷积参数控件
+  auto kernelSizeSpinBox = new QSpinBox(&dialog);
+  kernelSizeSpinBox->setRange(3, 15);
+  kernelSizeSpinBox->setSingleStep(2);
+  kernelSizeSpinBox->setValue(3);
+  layout->addWidget(new QLabel("核大小:"));
+  layout->addWidget(kernelSizeSpinBox);
+  
+  // 添加确定和取消按钮
+  auto buttonBox = new QDialogButtonBox(
+    QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+    Qt::Horizontal, &dialog);
+  layout->addWidget(buttonBox);
+  
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  
+  if (dialog.exec() == QDialog::Accepted) {
+    ConvolutionConfig config;
+    config.kernel_size = kernelSizeSpinBox->value();
+    config.kernel = std::vector<float>(config.kernel_size * config.kernel_size, 1.0f);
+    processConvolution(config);
+  }
+}
+
+void ImagePreviewDialog::processConvolution(const ConvolutionConfig& config) {
+  if (originalImage.empty()) return;
+  
+  try {
+    cv::Mat result = Convolve::process(originalImage, config);
+    QImage qImage(result.data, result.cols, result.rows, result.step,
+                 QImage::Format_Grayscale8);
+    imageLabel->setPixmap(QPixmap::fromImage(qImage));
+    updateImage();
+  } catch (const std::exception& e) {
+    QMessageBox::warning(this, "错误", QString("卷积处理失败: %1").arg(e.what()));
+  }
+}
+
+void ImagePreviewDialog::applyDeconvolution() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("反卷积设置");
+  auto layout = new QVBoxLayout(&dialog);
+  
+  auto methodCombo = new QComboBox(&dialog);
+  methodCombo->addItems({"Richardson-Lucy", "Wiener", "Tikhonov"});
+  layout->addWidget(new QLabel("方法:"));
+  layout->addWidget(methodCombo);
+  
+  auto iterSpinBox = new QSpinBox(&dialog);
+  iterSpinBox->setRange(1, 100);
+  iterSpinBox->setValue(30);
+  layout->addWidget(new QLabel("迭代次数:"));
+  layout->addWidget(iterSpinBox);
+  
+  auto buttonBox = new QDialogButtonBox(
+    QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+    Qt::Horizontal, &dialog);
+  layout->addWidget(buttonBox);
+  
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  
+  if (dialog.exec() == QDialog::Accepted) {
+    DeconvolutionConfig config;
+    config.method = static_cast<DeconvMethod>(methodCombo->currentIndex());
+    config.iterations = iterSpinBox->value();
+    processDeconvolution(config);
+  }
+}
+
+void ImagePreviewDialog::processDeconvolution(const DeconvolutionConfig& config) {
+  if (originalImage.empty()) return;
+  
+  try {
+    cv::Mat result = Convolve::process(originalImage, config);
+    QImage qImage(result.data, result.cols, result.rows, result.step,
+                 QImage::Format_Grayscale8);
+    imageLabel->setPixmap(QPixmap::fromImage(qImage));
+    updateImage();
+  } catch (const std::exception& e) {
+    QMessageBox::warning(this, "错误", 
+        QString("反卷积处理失败: %1").arg(e.what()));
+  }
 }

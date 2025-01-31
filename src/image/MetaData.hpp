@@ -177,6 +177,15 @@ public:
   bool import_tags_from_json(ImageMetadata &meta,
                              const fs::path &json_file) noexcept;
 
+  /**
+   * @brief 保存图像元数据到JSON文件
+   * @param meta 要保存的元数据
+   * @param output_path 输出路径（可选，默认使用meta.path对应的JSON文件）
+   * @return 保存是否成功
+   */
+  bool save_metadata(const ImageMetadata &meta,
+                      const std::optional<fs::path> &output_path = std::nullopt) noexcept;
+
 private:
   std::shared_ptr<spdlog::logger> logger; ///< Logger for logging messages.
 

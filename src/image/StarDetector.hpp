@@ -1,8 +1,13 @@
 #pragma once
 
 #include <filesystem>
-#include <opencv2/opencv.hpp>
 #include <vector>
+
+namespace cv {
+    template <typename T> class Point_;
+    typedef Point_<int> Point;
+    class Mat;
+}
 
 namespace fs = std::filesystem;
 
@@ -27,6 +32,8 @@ struct StarDetectionConfig {
   fs::path detected_stars_save_path; ///< Path to save detected stars.
   bool visualize = true;             ///< Flag to visualize detected stars.
   fs::path visualization_save_path;  ///< Path to save visualization.
+  int local_region_size = 32;     ///< Size of local region for metrics calculation
+  bool calculate_metrics = true;   ///< Whether to calculate FWHM and HFR
 };
 
 /**
@@ -47,6 +54,29 @@ public:
    * @return A vector of points representing the detected stars.
    */
   std::vector<cv::Point> multiscale_detect_stars(const cv::Mat &input_image);
+
+  /**
+   * @brief Calculates metrics (FWHM & HFR) for a star at specific location
+   * @param image Input image
+   * @param center Star center position
+   * @param region_size Size of the region around the star
+   * @return Pair of FWHM and HFR values
+   */
+  std::pair<double, double> calculate_star_metrics(const cv::Mat& image, 
+                                                   const cv::Point& center,
+                                                   int region_size) const;
+
+  /**
+   * @brief Batch calculates metrics for multiple stars
+   * @param image Input image
+   * @param centers Vector of star centers
+   * @param region_size Size of the region around each star
+   * @return Vector of FWHM and HFR pairs
+   */
+  std::vector<std::pair<double, double>> calculate_batch_metrics(
+      const cv::Mat& image,
+      const std::vector<cv::Point>& centers,
+      int region_size) const;
 
 private:
   StarDetectionConfig config_; ///< Configuration for star detection.
@@ -138,4 +168,15 @@ private:
    */
   void visualize_stars(const cv::Mat &image,
                        const std::vector<cv::Point> &stars) const;
+
+  /**
+   * @brief Extracts region of interest around a star
+   * @param image Input image
+   * @param center Star center
+   * @param size Region size
+   * @return ROI as Mat
+   */
+  cv::Mat extract_star_region(const cv::Mat& image, 
+                              const cv::Point& center,
+                              int size) const;
 };

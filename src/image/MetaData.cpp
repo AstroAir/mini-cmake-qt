@@ -196,3 +196,45 @@ void ImageProcessor::log_error(const std::string &function,
                                const std::string &msg) const {
   logger->error("[{}] {}", function, msg);
 }
+
+// 保存元数据
+bool ImageProcessor::save_metadata(const ImageMetadata &meta,
+                                 const std::optional<fs::path> &output_path) noexcept {
+    try {
+        fs::path json_path;
+        if (output_path.has_value()) {
+            json_path = *output_path;
+        } else {
+            json_path = meta.path;
+            json_path.replace_extension(".json");
+        }
+
+        // 创建要保存的JSON对象
+        json metadata_json = {
+            {"path", meta.path.string()},
+            {"size", {
+                {"width", meta.size.width},
+                {"height", meta.size.height}
+            }},
+            {"channels", meta.channels},
+            {"depth", meta.depth},
+            {"color_space", meta.color_space},
+            {"timestamp", std::chrono::system_clock::to_time_t(meta.timestamp)},
+            {"custom_data", meta.custom_data}
+        };
+
+        create_output_directory(json_path);
+        
+        std::ofstream f(json_path);
+        if (!f) {
+            throw std::runtime_error("无法打开文件进行写入: " + json_path.string());
+        }
+        f << metadata_json.dump(4);
+        
+        logger->info("元数据保存成功: {}", json_path.string());
+        return true;
+    } catch (const std::exception &e) {
+        log_error("save_metadata", e.what());
+        return false;
+    }
+}

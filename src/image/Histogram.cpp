@@ -1,8 +1,6 @@
 #include "Histogram.hpp"
 #include <algorithm>
-#include <atomic>
 #include <cmath>
-#include <execution>
 #include <opencv2/imgproc.hpp>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -15,63 +13,53 @@ constexpr int DEFAULT_LINE_TYPE = cv::LINE_AA;
 constexpr float DEFAULT_THRESHOLD = 4.0f;
 } // namespace
 
-auto calculateHist(const cv::Mat &img, int histSize, bool normalize,
-                   float threshold) -> std::vector<cv::Mat> {
-  spdlog::info("Calculating BGR histograms with histSize: {}", histSize);
-  if (img.empty()) {
-    spdlog::error("Input image for calculateHist is empty.");
-    throw std::invalid_argument("Input image for calculateHist is empty.");
-  }
-  if (img.channels() != 3) {
-    spdlog::error("Input image does not have 3 channels.");
-    throw std::invalid_argument("Input image does not have 3 channels.");
-  }
-  if (histSize <= 0) {
-    spdlog::error("Histogram size must be positive.");
-    throw std::invalid_argument("Histogram size must be positive.");
-  }
-
-  std::array<cv::Mat, 3> bgrPlanes;
-  cv::split(img, bgrPlanes);
-
-  const std::array<int, 1> channels{0};
-  const std::array<float, 2> range{0.0f, static_cast<float>(histSize)};
-  const float *ranges[] = {range.data()};
-  const int dims = 1;
-
-  std::vector<cv::Mat> histograms(3);
-  std::atomic<bool> calcHistFailed{false};
-
-  std::for_each(std::execution::par_unseq, bgrPlanes.begin(), bgrPlanes.end(),
-                [&](const cv::Mat &plane) {
-                  const int idx = &plane - bgrPlanes.data();
-                  try {
-                    cv::calcHist(&plane, 1, channels.data(), cv::Mat(),
-                                 histograms[idx], dims, &histSize, ranges);
-                  } catch (...) {
-                    calcHistFailed.store(true, std::memory_order_relaxed);
-                  }
-                });
-
-  if (calcHistFailed.load(std::memory_order_relaxed)) {
-    spdlog::error("Failed to calculate histogram for some channels.");
-    throw std::runtime_error("Histogram calculation failed.");
-  }
-
-  const auto applyPostProcessing = [&](cv::Mat &hist) {
-    if (threshold > 0) {
-      cv::threshold(hist, hist, threshold, 0, cv::THRESH_TOZERO);
+auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
+    -> std::vector<cv::Mat> {
+    spdlog::info("Calculating BGR histograms with histSize: {}", config.histSize);
+    if (img.empty()) {
+        spdlog::error("Input image for calculateHist is empty.");
+        throw std::invalid_argument("Input image for calculateHist is empty.");
     }
-    if (normalize) {
-      cv::normalize(hist, hist, 0, 1, cv::NORM_MINMAX);
+    if (img.channels() != 3) {
+        spdlog::error("Input image does not have 3 channels.");
+        throw std::invalid_argument("Input image does not have 3 channels.");
     }
-  };
+    if (config.histSize <= 0) {
+        spdlog::error("Histogram size must be positive.");
+        throw std::invalid_argument("Histogram size must be positive.");
+    }
 
-  std::for_each(std::execution::par_unseq, histograms.begin(), histograms.end(),
-                applyPostProcessing);
+    std::array<cv::Mat, 3> bgrPlanes;
+    cv::split(img, bgrPlanes);
 
-  spdlog::info("Completed BGR histogram calculation.");
-  return histograms;
+    const int dims = 1;
+    const std::array<int, 1> channels{0};
+    const std::array<float, 2> range{0.0f, 256.0f};
+    const float *ranges[] = {range.data()};
+
+    std::vector<cv::Mat> histograms(3);
+    
+    // 使用OpenMP加速直方图计算
+    #pragma omp parallel for num_threads(config.numThreads) if(config.numThreads != 1)
+    for (int i = 0; i < 3; ++i) {
+        try {
+            cv::calcHist(&bgrPlanes[i], 1, channels.data(), cv::Mat(),
+                        histograms[i], dims, &config.histSize, ranges);
+            
+            if (config.threshold > 0) {
+                cv::threshold(histograms[i], histograms[i], 
+                            config.threshold, 0, cv::THRESH_TOZERO);
+            }
+            if (config.normalize) {
+                cv::normalize(histograms[i], histograms[i], 0, 1, cv::NORM_MINMAX);
+            }
+        } catch (const cv::Exception &e) {
+            spdlog::error("OpenCV error in channel {}: {}", i, e.what());
+            throw;
+        }
+    }
+
+    return histograms;
 }
 
 auto calculateGrayHist(const cv::Mat &img, int histSize, bool normalize,
@@ -133,65 +121,94 @@ auto calculateCDF(const cv::Mat &hist) -> cv::Mat {
   return cdf;
 }
 
-auto equalizeHistogram(const cv::Mat &img, bool preserveColor) -> cv::Mat {
-  spdlog::info("Starting histogram equalization.");
-  if (img.empty()) {
-    spdlog::error("Input image for equalizeHistogram is empty.");
-    throw std::invalid_argument("Input image for equalizeHistogram is empty.");
-  }
-
-  cv::Mat equalized;
-  if (img.channels() == 1) {
-    cv::equalizeHist(img, equalized);
-  } else {
-    if (preserveColor) {
-      cv::Mat colorSpace;
-      cv::cvtColor(img, colorSpace, cv::COLOR_BGR2YCrCb);
-      std::vector<cv::Mat> channels;
-      cv::split(colorSpace, channels);
-      cv::equalizeHist(channels[0], channels[0]);
-      cv::merge(channels, colorSpace);
-      cv::cvtColor(colorSpace, equalized, cv::COLOR_YCrCb2BGR);
-    } else {
-      std::vector<cv::Mat> bgrPlanes;
-      cv::split(img, bgrPlanes);
-      std::for_each(std::execution::par_unseq, bgrPlanes.begin(),
-                    bgrPlanes.end(),
-                    [](cv::Mat &plane) { cv::equalizeHist(plane, plane); });
-      cv::merge(bgrPlanes, equalized);
+auto equalizeHistogram(const cv::Mat &img, const EqualizeConfig &config) -> cv::Mat {
+    spdlog::info("Starting histogram equalization with clip limit: {}", 
+                 config.clipLimit ? "enabled" : "disabled");
+    
+    if (img.empty()) {
+        spdlog::error("Input image is empty");
+        throw std::invalid_argument("Empty input image");
     }
-  }
-  spdlog::info("Completed histogram equalization.");
-  return equalized;
+
+    cv::Mat equalized;
+    if (img.channels() == 1) {
+        if (config.clipLimit) {
+            cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(config.clipValue);
+            clahe->apply(img, equalized);
+        } else {
+            cv::equalizeHist(img, equalized);
+        }
+    } else {
+        if (config.preserveColor) {
+            cv::Mat ycrcb;
+            cv::cvtColor(img, ycrcb, cv::COLOR_BGR2YCrCb);
+            std::vector<cv::Mat> channels;
+            cv::split(ycrcb, channels);
+
+            if (config.clipLimit) {
+                cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(config.clipValue);
+                clahe->apply(channels[0], channels[0]);
+            } else {
+                cv::equalizeHist(channels[0], channels[0]);
+            }
+
+            cv::merge(channels, ycrcb);
+            cv::cvtColor(ycrcb, equalized, cv::COLOR_YCrCb2BGR);
+        } else {
+            std::vector<cv::Mat> channels;
+            cv::split(img, channels);
+            
+            #pragma omp parallel for
+            for (int i = 0; i < 3; ++i) {
+                if (config.clipLimit) {
+                    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(config.clipValue);
+                    clahe->apply(channels[i], channels[i]);
+                } else {
+                    cv::equalizeHist(channels[i], channels[i]);
+                }
+            }
+            
+            cv::merge(channels, equalized);
+        }
+    }
+
+    return equalized;
 }
 
-auto drawHistogram(const cv::Mat &hist, int histSize, int width, int height,
-                   cv::Scalar color) -> cv::Mat {
-  spdlog::info("Drawing histogram.");
-  if (hist.empty()) {
-    spdlog::error("Input histogram for drawHistogram is empty.");
-    throw std::invalid_argument("Input histogram for drawHistogram is empty.");
-  }
-  if (width <= 0 || height <= 0) {
-    spdlog::error("Invalid output dimensions.");
-    throw std::invalid_argument("Invalid output dimensions.");
-  }
+auto drawHistogram(const cv::Mat &hist, int width, int height,
+                  cv::Scalar color, bool cumulative) -> cv::Mat {
+    cv::Mat histImage(height, width, CV_8UC3, cv::Scalar::all(0));
+    
+    cv::Mat displayHist;
+    if (cumulative) {
+        displayHist = calculateCDF(hist);
+    } else {
+        cv::normalize(hist, displayHist, 0, height, cv::NORM_MINMAX);
+    }
 
-  cv::Mat histImage(height, width, CV_8UC3, cv::Scalar::all(0));
-  cv::Mat histNorm;
-  cv::normalize(hist, histNorm, 0, height, cv::NORM_MINMAX);
+    const int binWidth = std::max(1, cvRound(static_cast<double>(width) / hist.rows));
+    std::vector<cv::Point> points;
+    points.reserve(hist.rows + 2);
 
-  const int binWidth = cvRound(static_cast<double>(width) / histSize);
-  std::vector<cv::Point> points;
-  points.reserve(histSize + 1);
+    points.emplace_back(0, height);
+    for (int i = 0; i < hist.rows; ++i) {
+        points.emplace_back(binWidth * i, 
+                          height - cvRound(displayHist.at<float>(i) * height));
+    }
+    points.emplace_back(width, height);
 
-  points.emplace_back(0, height);
-  for (int i = 0; i < histSize; ++i) {
-    points.emplace_back(binWidth * i, height - cvRound(histNorm.at<float>(i)));
-  }
-  points.emplace_back(width, height);
+    const std::vector<std::vector<cv::Point>> contours{points};
+    if (cumulative) {
+        cv::fillPoly(histImage, contours, color * 0.5);
+    }
+    cv::polylines(histImage, points, false, color, 2, cv::LINE_AA);
 
-  cv::polylines(histImage, points, false, color, 2, DEFAULT_LINE_TYPE);
-  spdlog::info("Completed drawing histogram.");
-  return histImage;
+    return histImage;
+}
+
+auto compareHistograms(const cv::Mat &hist1, const cv::Mat &hist2, int method) -> double {
+    if (hist1.empty() || hist2.empty()) {
+        throw std::invalid_argument("Empty histogram in comparison");
+    }
+    return cv::compareHist(hist1, hist2, method);
 }

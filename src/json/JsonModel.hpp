@@ -1,92 +1,195 @@
 #pragma once
 
 #include <QAbstractItemModel>
-
 #include <nlohmann/json.hpp>
 #include <shared_mutex>
+#include <variant>
+#include <vector>
 
 using Json = nlohmann::json;
 
+/**
+ * @class JsonModel
+ * @brief A model for representing JSON data in a tree structure.
+ *
+ * This class provides a model for displaying and editing JSON data in a tree
+ * view.
+ */
 class JsonModel : public QAbstractItemModel {
   struct Node {
-    // 存储指向原始 JSON 的指针或者新增节点名
+    /**
+     * @brief Data stored in the node.
+     *
+     * The data can be a pointer to the original JSON or a new node name.
+     */
     std::variant<Json *, QString> data;
-    Node *parent = nullptr;
-    std::vector<std::unique_ptr<Node>> children;
+    Node *parent = nullptr; ///< Pointer to the parent node.
+    std::vector<std::unique_ptr<Node>> children; ///< List of child nodes.
 
+    /**
+     * @brief Returns the display value of the node.
+     * @return The display value of the node.
+     */
     [[nodiscard]] QVariant display() const noexcept;
   };
 
-  std::unique_ptr<Node> root;
-  Json jsonData;
-  mutable std::shared_mutex dataMutex;
+  std::unique_ptr<Node> root; ///< Root node of the JSON tree.
+  Json jsonData;              ///< The JSON data.
+  mutable std::shared_mutex
+      dataMutex; ///< Mutex for thread-safe access to the data.
 
-  // 撤销/重做栈
+  /**
+   * @struct Command
+   * @brief Structure representing an undo/redo command.
+   */
   struct Command {
-    QModelIndex index;
-    QVariant oldValue;
-    QVariant newValue;
+    QModelIndex index; ///< The index of the modified item.
+    QVariant oldValue; ///< The old value before the modification.
+    QVariant newValue; ///< The new value after the modification.
   };
-  std::vector<Command> undoStack;
-  std::vector<Command> redoStack;
-  const size_t maxUndoSteps = 100;
+  std::vector<Command> undoStack;  ///< Stack of undo commands.
+  std::vector<Command> redoStack;  ///< Stack of redo commands.
+  const size_t maxUndoSteps = 100; ///< Maximum number of undo steps.
 
 public:
+  /**
+   * @brief Constructor for JsonModel.
+   * @param parent The parent object.
+   */
   explicit JsonModel(QObject *parent = nullptr);
 
-  // 供外界获取完整 JSON
+  /**
+   * @brief Returns the complete JSON data.
+   * @return The JSON data.
+   */
   [[nodiscard]] const Json &getJson() const noexcept;
 
-  // 创建并返回索引
+  /**
+   * @brief Creates and returns an index for the specified item.
+   * @param row The row number.
+   * @param column The column number.
+   * @param parent The parent index.
+   * @return The created index.
+   */
   QModelIndex index(int row, int column,
                     const QModelIndex &parent) const override;
 
-  // 返回父索引
+  /**
+   * @brief Returns the parent index of the specified item.
+   * @param index The index of the item.
+   * @return The parent index.
+   */
   QModelIndex parent(const QModelIndex &index) const override;
 
-  // 行数
+  /**
+   * @brief Returns the number of rows under the given parent.
+   * @param parent The parent index.
+   * @return The number of rows.
+   */
   int rowCount(const QModelIndex &parent) const override;
 
-  // 列数
-  int columnCount(const QModelIndex &) const override;
+  /**
+   * @brief Returns the number of columns for the children of the given parent.
+   * @param parent The parent index.
+   * @return The number of columns.
+   */
+  int columnCount(const QModelIndex &parent) const override;
 
-  // 获取不可编辑的显示数据
+  /**
+   * @brief Returns the data for the specified role and section in the header
+   * with the given orientation.
+   * @param index The index of the item.
+   * @param role The role of the data.
+   * @return The data for the specified role and section.
+   */
   QVariant data(const QModelIndex &index, int role) const override;
 
-  // 设置数据（仅第一列可编辑）
+  /**
+   * @brief Sets the role data for the item at the specified index.
+   * @param index The index of the item.
+   * @param value The value to set.
+   * @param role The role of the data.
+   * @return True if the data was set successfully, false otherwise.
+   */
   bool setData(const QModelIndex &index, const QVariant &value,
                int role) override;
 
-  // 添加撤销命令
+  /**
+   * @brief Adds an undo command to the stack.
+   * @param cmd The command to add.
+   */
   void addUndoCommand(const Command &cmd);
 
-  // 撤销操作
+  /**
+   * @brief Undoes the last command.
+   * @return True if the undo was successful, false otherwise.
+   */
   bool undo();
 
-  // 重做操作
+  /**
+   * @brief Redoes the last undone command.
+   * @return True if the redo was successful, false otherwise.
+   */
   bool redo();
 
-  // 设置列为可编辑
+  /**
+   * @brief Returns the item flags for the given index.
+   * @param index The index of the item.
+   * @return The item flags.
+   */
   Qt::ItemFlags flags(const QModelIndex &index) const override;
 
-  // 加载并解析新的 JSON 数据
+  /**
+   * @brief Loads and parses new JSON data.
+   * @param newData The new JSON data.
+   */
   void load(const Json &newData);
 
-  // JSON 数据验证
+  /**
+   * @brief Validates the JSON data.
+   * @param j The JSON data to validate.
+   */
   void validateJson(const Json &j);
 
-  // 获取 JSON 最大嵌套深度
+  /**
+   * @brief Returns the maximum depth of the JSON data.
+   * @param j The JSON data.
+   * @return The maximum depth.
+   */
   size_t getJsonDepth(const Json &j) const;
 
-  // 获取 JSON 节点总数
+  /**
+   * @brief Returns the total number of nodes in the JSON data.
+   * @param j The JSON data.
+   * @return The total number of nodes.
+   */
   size_t getJsonNodeCount(const Json &j) const;
 
+  /**
+   * @brief Sets the JSON data.
+   * @param json The JSON data to set.
+   */
+  void setJson(const nlohmann::json &json);
+
 private:
-  // 递归解析 JSON，构建树状结构
+  /**
+   * @brief Recursively parses the JSON data and builds the tree structure.
+   * @param j The JSON data.
+   * @return The root node of the parsed tree.
+   */
   std::unique_ptr<Node> parseJson(const Json &j);
 
-  // 查找节点在同级中的行号
+  /**
+   * @brief Finds the row number of the specified node among its siblings.
+   * @param node The node to find the row number for.
+   * @return The row number.
+   */
   [[nodiscard]] int findRow(Node *node) const noexcept;
-  // 根据节点的实际类型返回字符串
+
+  /**
+   * @brief Returns the type of the node as a string.
+   * @param node The node to get the type for.
+   * @return The type of the node as a string.
+   */
   [[nodiscard]] QString typeString(Node *node) const noexcept;
 };

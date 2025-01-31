@@ -36,6 +36,18 @@ public:
    */
   JsonEditor(QWidget *parent = nullptr);
 
+  /**
+   * @brief 加载JSON数据到编辑器
+   * @param json 要加载的JSON数据
+   */
+  void loadJson(const nlohmann::json& json);
+
+  /**
+   * @brief 获取当前编辑器中的JSON数据
+   * @return 当前的JSON数据
+   */
+  nlohmann::json getJson() const;
+
 private:
   /**
    * @brief Sets up the user interface.

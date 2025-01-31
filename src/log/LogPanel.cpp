@@ -1,25 +1,5 @@
 #include "LogPanel.hpp"
-
-// LogFilterModel implementation
-LogFilterModel::LogFilterModel(QObject *parent)
-    : QSortFilterProxyModel(parent) {
-  m_levelFilter.resize(spdlog::level::n_levels);
-  m_levelFilter.fill(true);
-}
-
-void LogFilterModel::setSearchText(const QString &text) {
-  m_searchText = text;
-  emit filterChanged();
-}
-
-bool LogFilterModel::filterAcceptsRow(int row,
-                                      const QModelIndex &parent) const {
-  const auto &idx = sourceModel()->index(row, 0, parent);
-  const bool levelMatch = m_levelFilter.testBit(idx.data(Qt::UserRole).toInt());
-  const bool textMatch =
-      idx.data().toString().contains(m_searchText, Qt::CaseInsensitive);
-  return levelMatch && textMatch;
-}
+#include <ranges>
 
 // LogTableModel implementation
 QVariant LogTableModel::headerData(int section, Qt::Orientation orientation,
@@ -480,55 +460,6 @@ void LogItemDelegate::updateColors(
   m_levelColors = colors;
 }
 
-// 实现LogAnalyzer
-LogAnalyzer::LogAnalyzer(QObject *parent) : QObject(parent) {}
-
-LogAnalyzer::Statistics
-LogAnalyzer::analyze(const QVector<QPair<QDateTime, QString>> &logs) {
-  Statistics stats;
-  stats.totalLogs = logs.size();
-
-  QMap<QString, int> messageFrequency;
-  qint64 totalLength = 0;
-
-  for (const auto &[time, message] : logs) {
-    QDateTime startOfHour = time;
-    startOfHour.setTime(QTime(time.time().hour(), 0));
-    stats.timeDistribution[startOfHour]++;
-    messageFrequency[message]++;
-    totalLength += message.length();
-  }
-
-  // 获取最频繁的消息
-  QVector<QPair<QString, int>> sortedMessages;
-  for (auto it = messageFrequency.begin(); it != messageFrequency.end(); ++it) {
-    sortedMessages.append({it.key(), it.value()});
-  }
-  std::sort(sortedMessages.begin(), sortedMessages.end(),
-            [](const auto &a, const auto &b) { return a.second > b.second; });
-
-  stats.mostFrequentMessages = QStringList();
-  for (int i = 0; i < qMin(5, sortedMessages.size()); ++i) {
-    stats.mostFrequentMessages << sortedMessages[i].first;
-  }
-
-  stats.averageMessageLength = totalLength / static_cast<double>(logs.size());
-  return stats;
-}
-
-// 实现LogSearchCompleter
-LogSearchCompleter::LogSearchCompleter(QObject *parent) : QCompleter(parent) {
-  setModelSorting(QCompleter::CaseInsensitivelySortedModel);
-  setFilterMode(Qt::MatchContains);
-  setCaseSensitivity(Qt::CaseInsensitive);
-}
-
-void LogSearchCompleter::updateSuggestions(const QStringList &messages) {
-  auto *model = new QStringListModel(messages, this);
-  setModel(model);
-}
-
-// 实现EnhancedLogPanel的缺失方法
 QWidget *EnhancedLogPanel::setupLogView() {
   auto *container = new QWidget(this);
   auto *layout = new QVBoxLayout(container);
@@ -814,72 +745,7 @@ void EnhancedLogPanel::applySettings(
   m_logTable->viewport()->update();
 }
 
-// LogChartModel implementation
-LogChartModel::LogChartModel(QObject *parent) : QObject(parent) {
-  m_chart = new QChart();
-  m_errorSeries = new QLineSeries();
-  m_warningSeries = new QLineSeries();
-  m_infoSeries = new QLineSeries();
 
-  m_errorSeries->setName(tr("错误"));
-  m_warningSeries->setName(tr("警告"));
-  m_infoSeries->setName(tr("信息"));
-
-  m_chart->addSeries(m_errorSeries);
-  m_chart->addSeries(m_warningSeries);
-  m_chart->addSeries(m_infoSeries);
-
-  m_chart->createDefaultAxes();
-  m_chart->setTitle(tr("日志趋势"));
-}
-
-void LogChartModel::updateChart(
-    const QVector<QPair<QDateTime, spdlog::level::level_enum>> &logs) {
-  // 清除旧数据
-  m_errorSeries->clear();
-  m_warningSeries->clear();
-  m_infoSeries->clear();
-
-  // 按时间统计各级别日志数量
-  QMap<QDateTime, int> errorCount;
-  QMap<QDateTime, int> warningCount;
-  QMap<QDateTime, int> infoCount;
-
-  for (const auto &[time, level] : logs) {
-    QDateTime hour = time;
-    hour.setTime(QTime(time.time().hour(), 0));
-
-    switch (level) {
-    case spdlog::level::err:
-      errorCount[hour]++;
-      break;
-    case spdlog::level::warn:
-      warningCount[hour]++;
-      break;
-    case spdlog::level::info:
-      infoCount[hour]++;
-      break;
-    default:
-      break;
-    }
-  }
-
-  // 更新图表数据
-  for (auto it = errorCount.begin(); it != errorCount.end(); ++it) {
-    m_errorSeries->append(it.key().toMSecsSinceEpoch(), it.value());
-  }
-  for (auto it = warningCount.begin(); it != warningCount.end(); ++it) {
-    m_warningSeries->append(it.key().toMSecsSinceEpoch(), it.value());
-  }
-  for (auto it = infoCount.begin(); it != infoCount.end(); ++it) {
-    m_infoSeries->append(it.key().toMSecsSinceEpoch(), it.value());
-  }
-
-  // 更新坐标轴
-  m_chart->axes(Qt::Horizontal)
-      .first()
-      ->setRange(logs.first().first, logs.last().first);
-}
 
 // LogSettingsDialog implementation
 LogSettingsDialog::LogSettingsDialog(QWidget *parent) : QDialog(parent) {

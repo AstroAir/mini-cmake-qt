@@ -1,9 +1,13 @@
 #pragma once
 
-#include <opencv2/core.hpp>
+#include <cmath>
 #include <optional>
 #include <span>
+#include <string_view>
 
+namespace cv {
+class Mat;
+}
 
 namespace GaussianFit {
 

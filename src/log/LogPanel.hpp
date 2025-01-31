@@ -1,79 +1,17 @@
 #pragma once
 
+#include <QtCharts>
 #include <QtConcurrent>
 #include <QtWidgets>
-#include <QtCharts>
-#include <array>
 #include <memory>
-#include <ranges>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <zlib.h>
 
-class LogFilterModel : public QSortFilterProxyModel {
-  Q_OBJECT
-public:
-  Q_PROPERTY(QString searchText MEMBER m_searchText NOTIFY filterChanged)
-  Q_PROPERTY(QBitArray levelFilter MEMBER m_levelFilter NOTIFY filterChanged)
-
-  explicit LogFilterModel(QObject *parent = nullptr);
-
-signals:
-  void filterChanged();
-
-public:
-  void setSearchText(const QString &text);
-  void highlightSearchText(const QString &text);
-  void setLevelFilter(spdlog::level::level_enum level, bool enabled);
-
-protected:
-  bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
-
-private:
-  QString m_searchText;
-  QBitArray m_levelFilter;
-  QStringList m_highlightTexts;
-};
-
-// 添加新的图表模型类
-class LogChartModel : public QObject {
-  Q_OBJECT
-public:
-  explicit LogChartModel(QObject *parent = nullptr);
-  void updateChart(const QVector<QPair<QDateTime, spdlog::level::level_enum>>& logs);
-  QChart* chart() const { return m_chart; }
-
-private:
-  QChart *m_chart;
-  QLineSeries *m_errorSeries;
-  QLineSeries *m_warningSeries;
-  QLineSeries *m_infoSeries;
-};
-
-// 添加新的日志分析器类
-class LogAnalyzer : public QObject {
-    Q_OBJECT
-public:
-    explicit LogAnalyzer(QObject *parent = nullptr);
-    struct Statistics {
-        int totalLogs;
-        QMap<QString, int> levelCounts;
-        QMap<QDateTime, int> timeDistribution;
-        QStringList mostFrequentMessages;
-        double averageMessageLength;
-    };
-    
-    Statistics analyze(const QVector<QPair<QDateTime, QString>>& logs);
-    QChart* createDistributionChart(const Statistics& stats);
-};
-
-// 添加搜索建议器
-class LogSearchCompleter : public QCompleter {
-    Q_OBJECT
-public:
-    explicit LogSearchCompleter(QObject *parent = nullptr);
-    void updateSuggestions(const QStringList& messages);
-};
+#include "LogAnalyzer.hpp"
+#include "LogChartModel.hpp"
+#include "LogFilterModel.hpp"
+#include "LogSearchCompleter.hpp"
 
 class LogTableModel : public QAbstractTableModel {
   Q_OBJECT
@@ -86,28 +24,28 @@ public:
 
 // 添加设置对话框类
 class LogSettingsDialog : public QDialog {
-    Q_OBJECT
+  Q_OBJECT
 public:
-    explicit LogSettingsDialog(QWidget* parent = nullptr);
-    
-    struct Settings {
-        int maxLogEntries;
-        QString logPath;
-        bool enableFileLogging;
-        QFont logFont;
-        QMap<spdlog::level::level_enum, QColor> levelColors;
-    };
-    
-    Settings getSettings() const;
-    void setSettings(const Settings& settings);
+  explicit LogSettingsDialog(QWidget *parent = nullptr);
+
+  struct Settings {
+    int maxLogEntries;
+    QString logPath;
+    bool enableFileLogging;
+    QFont logFont;
+    QMap<spdlog::level::level_enum, QColor> levelColors;
+  };
+
+  Settings getSettings() const;
+  void setSettings(const Settings &settings);
 
 private:
-    void setupUI();
-    QSpinBox* m_maxEntriesBox;
-    QLineEdit* m_logPathEdit;
-    QCheckBox* m_enableFileLogging;
-    QFontComboBox* m_fontComboBox;
-    QMap<spdlog::level::level_enum, QColorDialog*> m_colorDialogs;
+  void setupUI();
+  QSpinBox *m_maxEntriesBox;
+  QLineEdit *m_logPathEdit;
+  QCheckBox *m_enableFileLogging;
+  QFontComboBox *m_fontComboBox;
+  QMap<spdlog::level::level_enum, QColorDialog *> m_colorDialogs;
 };
 
 class EnhancedLogPanel : public QWidget {
@@ -147,13 +85,13 @@ private:
   void setupCharts();
   void setupToolbar();
   void setupStatusBar();
-  void exportToFormat(const QString& format);
+  void exportToFormat(const QString &format);
   void applyModernStyle();
   void updateHighlight();
-  void showLogDetails(const QModelIndex& index);
+  void showLogDetails(const QModelIndex &index);
   // 新增方法
   void setupSearchWidget();
-  QWidget* setupAnalysisPanel();
+  QWidget *setupAnalysisPanel();
   void setupShortcuts();
   void updateLayout();
   void saveState();
@@ -165,14 +103,14 @@ private:
   // 添加缺失的方法
   void findNext();
   void findPrevious();
-  QWidget* setupLogView();
-  void updateAnalysisPanel(const LogAnalyzer::Statistics& stats, QChart* chart);
+  QWidget *setupLogView();
+  void updateAnalysisPanel(const LogAnalyzer::Statistics &stats, QChart *chart);
   QVector<QPair<QDateTime, QString>> getCurrentLogs() const;
   void showSettingsDialog();
-  void applySettings(const LogSettingsDialog::Settings& settings);
-  void exportToHTML(const QString& path);
-  void exportToCSV(const QString& path);
-  void exportToTXT(const QString& path);
+  void applySettings(const LogSettingsDialog::Settings &settings);
+  void exportToHTML(const QString &path);
+  void exportToCSV(const QString &path);
+  void exportToTXT(const QString &path);
 
   QTableView *m_logTable;
   QDateTimeEdit *m_startDate;
@@ -201,21 +139,21 @@ private:
   QWidget *m_filterWidget;
   bool m_isDarkTheme = false;
   // 新增成员变量
-  LogAnalyzer* m_analyzer;
-  LogSearchCompleter* m_searchCompleter;
-  QDockWidget* m_analysisDock;
-  QTabWidget* m_analysisTabWidget;
-  QMap<QString, QDockWidget*> m_dockWidgets;
-  QSplitter* m_verticalSplitter;
-  QStackedWidget* m_contentStack;
-  QShortcut* m_findShortcut;
+  LogAnalyzer *m_analyzer;
+  LogSearchCompleter *m_searchCompleter;
+  QDockWidget *m_analysisDock;
+  QTabWidget *m_analysisTabWidget;
+  QMap<QString, QDockWidget *> m_dockWidgets;
+  QSplitter *m_verticalSplitter;
+  QStackedWidget *m_contentStack;
+  QShortcut *m_findShortcut;
   QSettings m_settings;
   bool m_isAnalysisPanelVisible = false;
   // 添加缺失的成员变量
   LogSettingsDialog::Settings m_currentSettings;
   int m_currentSearchIndex = -1;
   QVector<QModelIndex> m_searchResults;
-  QTimer* m_searchDebounceTimer;
+  QTimer *m_searchDebounceTimer;
 };
 
 class LogItemDelegate : public QStyledItemDelegate {
@@ -226,7 +164,7 @@ public:
   void paint(QPainter *painter, const QStyleOptionViewItem &option,
              const QModelIndex &index) const override;
 
-  void updateColors(const QMap<spdlog::level::level_enum, QColor>& colors);
+  void updateColors(const QMap<spdlog::level::level_enum, QColor> &colors);
 
 private:
   QColor colorForLevel(spdlog::level::level_enum level) const;

@@ -4,6 +4,8 @@
 #include "image/MetaData.hpp"
 #include "image/StarDetector.hpp"
 #include "HistogramDialog.hpp"
+#include "image/Convolve.hpp"
+#include "image/Exif.hpp"
 
 #include <QDialog>
 #include <QFuture>
@@ -25,6 +27,12 @@ public:
   void showImage(const QString &path);
   void updateImagePreview(const QString &imagePath);
   void updateImagePreview(QLabel *label, const QString &imagePath);
+
+public slots:
+  void updateMetadata(const ImageMetadata& metadata);
+  void applyConvolution();
+  void applyDeconvolution();
+  void showExifInfo();
 
 protected:
   void keyPressEvent(QKeyEvent *event) override;
@@ -97,6 +105,20 @@ private:
   bool autoDetectionEnabled;
   cv::Mat originalImage;
   HistogramDialog* histogramDialog;
+
+  QToolBar* createImageProcessingToolBar();
+  QToolBar* createExifToolBar();
+  void setupConvolutionUI();
+  void processConvolution(const ConvolutionConfig& config);
+  void processDeconvolution(const DeconvolutionConfig& config);
+
+  ExifParser* exifParser;
+  std::vector<ExifValue> exifData;
+  QAction* showExifAction;
+  QAction* applyConvolutionAction;
+  QAction* applyDeconvolutionAction;
+  QToolBar* convolutionToolBar;
+  QToolBar* exifToolBar;
 
   void setupUI();
   void createToolBar();

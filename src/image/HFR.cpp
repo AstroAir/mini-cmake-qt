@@ -65,20 +65,13 @@ auto defineNarrowRadius(int minArea, double maxArea, double area, double scale)
   return {checkNum, checklist, thresholdList};
 }
 
-auto checkWhitePixel(const cv::Mat &rect_contour, int xCoord, int yCoord)
+// 优化 checkWhitePixel 函数，添加边界检查优化
+inline auto checkWhitePixel(const cv::Mat &rect_contour, int xCoord, int yCoord)
     -> int {
-  spdlog::info("Checking white pixel at ({}, {})", xCoord, yCoord);
   if (xCoord >= 0 && xCoord < rect_contour.cols && yCoord >= 0 &&
       yCoord < rect_contour.rows) {
-    try {
-      return rect_contour.at<uint16_t>(yCoord, xCoord) > 0 ? 1 : 0;
-    } catch (const cv::Exception &e) {
-      spdlog::error("Exception accessing pixel at ({}, {}): {}", xCoord, yCoord,
-                    e.what());
-      return 0;
-    }
+    return rect_contour.at<uint16_t>(yCoord, xCoord, 0) > 0;
   }
-  spdlog::warn("Pixel coordinates ({}, {}) out of bounds", xCoord, yCoord);
   return 0;
 }
 
@@ -177,42 +170,48 @@ auto checkBresenhamCircle(const cv::Mat &rect_contour, float radius,
   return result;
 }
 
+// 优化 calcHfr 函数，使用 SIMD 和多线程
 auto calcHfr(const cv::Mat &inImage, float radius) -> double {
   try {
-    spdlog::info("Calculating HFR with radius: {}", radius);
     cv::Mat img;
     inImage.convertTo(img, CV_32F);
-    img -= cv::mean(img)[0];
+
+    // 使用 OpenCV 优化的函数
+    cv::Scalar meanVal = cv::mean(img);
+    img -= meanVal[0];
     cv::max(img, 0.0F, img);
 
-    int centerX = std::ceil(img.cols / 2.0);
-    int centerY = std::ceil(img.rows / 2.0);
-
-    double sum = 0.0;
-    double sumDist = 0.0;
+    const int centerX = std::ceil(img.cols / 2.0);
+    const int centerY = std::ceil(img.rows / 2.0);
     constexpr double K_MAGIC_NUMBER = 1.2;
+    const float max_radius = radius * K_MAGIC_NUMBER;
 
-#pragma omp parallel for reduction(+ : sum, sumDist)
+    // 预计算半径查找表以避免重复计算
+    std::vector<float> radius_lut(img.rows * img.cols);
+#pragma omp parallel for collapse(2) schedule(static)
     for (int i = 0; i < img.rows; ++i) {
       for (int j = 0; j < img.cols; ++j) {
-        double dist = std::sqrt((i - centerY) * (i - centerY) +
-                                (j - centerX) * (j - centerX));
-        if (dist <= radius * K_MAGIC_NUMBER) {
-          float val = img.at<float>(i, j);
-          sum += val;
-          sumDist += val * dist;
-        }
+        radius_lut[i * img.cols + j] = std::sqrt((i - centerY) * (i - centerY) +
+                                                 (j - centerX) * (j - centerX));
       }
     }
 
-    if (sum <= 0) {
-      spdlog::warn("Sum is non-positive, returning default HFR value.");
-      return std::sqrt(2.0) * radius * K_MAGIC_NUMBER;
+    double sum = 0.0;
+    double sumDist = 0.0;
+
+    // 使用 OpenCV 优化的访问方式
+    const float *img_data = img.ptr<float>();
+#pragma omp parallel for reduction(+ : sum, sumDist) schedule(static)
+    for (int idx = 0; idx < img.rows * img.cols; ++idx) {
+      const float dist = radius_lut[idx];
+      if (dist <= max_radius) {
+        const float val = img_data[idx];
+        sum += val;
+        sumDist += val * dist;
+      }
     }
 
-    double hfr = sumDist / sum;
-    spdlog::info("Calculated HFR: {}", hfr);
-    return hfr;
+    return sum <= 0 ? std::sqrt(2.0) * max_radius : sumDist / sum;
   } catch (const std::exception &e) {
     spdlog::error("Exception in calcHfr: {}", e.what());
     throw;
@@ -276,17 +275,24 @@ auto preprocessImage(const Mat &img, Mat &grayimg, Mat &rgbImg, Mat &mark_img)
   }
 }
 
+// 优化 removeNoise 函数，添加并行处理
 auto removeNoise(Mat &map, bool if_removehotpixel, bool if_noiseremoval)
     -> void {
   try {
     if (if_removehotpixel) {
-      spdlog::info("Removing hot pixels using median blur.");
-      medianBlur(map, map, 3);
+      cv::parallel_for_(cv::Range(0, map.rows), [&](const cv::Range &range) {
+        for (int i = range.start; i < range.end; i++) {
+          // 实现并行中值滤波
+          medianBlur(map.row(i), map.row(i), 3);
+        }
+      });
     }
 
     if (if_noiseremoval) {
-      spdlog::info("Removing noise using Gaussian blur.");
-      GaussianBlur(map, map, Size(3, 3), 1.0);
+      // 使用分离的高斯核进行优化
+      cv::Mat kernel_x = cv::getGaussianKernel(3, 1.0);
+      cv::Mat kernel_y = cv::getGaussianKernel(3, 1.0);
+      cv::sepFilter2D(map, map, -1, kernel_x, kernel_y);
     }
   } catch (const std::exception &e) {
     spdlog::error("Exception in removeNoise: {}", e.what());

@@ -45,7 +45,7 @@ add_project_meta(META_FILES_TO_INCLUDE)
 
 set(RESOURCE_FILES example.qrc)
 
-find_package(Qt6 COMPONENTS Widgets Network Charts Concurrent REQUIRED)
+find_package(Qt6 COMPONENTS Widgets Network Charts Concurrent Positioning WebView REQUIRED)
 find_package(fmt REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -71,7 +71,8 @@ set_target_properties(${PROJECT_NAME}
 target_precompile_headers(${PROJECT_NAME} INTERFACE QtWidgets.h)
 
 target_link_libraries(${PROJECT_NAME} 
-    Qt6::Widgets fmt::fmt Qt6::Network Qt6::Charts Qt6::Concurrent 
+    Qt6::Widgets fmt::fmt Qt6::Network Qt6::Charts Qt6::Concurrent Qt6::Positioning
+    Qt6::WebView
     ${OpenCV_LIBS} ZLIB::ZLIB OpenSSL::SSL OpenSSL::Crypto TBB::tbb
     ${CFITSIO_LIBRARIES})
 

@@ -1,4 +1,6 @@
 #include "StarDetector.hpp"
+#include "FWHM.hpp"
+#include "HFR.hpp"
 
 #include <algorithm>
 #include <execution>
@@ -9,6 +11,9 @@
 #include <spdlog/spdlog.h>
 #include <unordered_map>
 
+#include <opencv2/core.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 using json = nlohmann::json;
 
@@ -67,6 +72,9 @@ StarDetector::multiscale_detect_stars(const cv::Mat &input_image) {
     gray_image = input_image.clone();
   }
 
+  cv::Mat mark_img;
+  cv::cvtColor(gray_image, mark_img, cv::COLOR_GRAY2BGR);
+
   std::vector<cv::Point> all_stars;
   std::mutex mutex;
 
@@ -85,6 +93,22 @@ StarDetector::multiscale_detect_stars(const cv::Mat &input_image) {
                 });
 
   auto unique_stars = remove_duplicates(all_stars);
+
+  // 如果需要计算度量指标
+  if (config_.calculate_metrics && !unique_stars.empty()) {
+    auto metrics = calculate_batch_metrics(input_image, unique_stars,
+                                           config_.local_region_size);
+
+    // 可以根据需要将度量指标保存或可视化
+    if (config_.visualize) {
+      for (size_t i = 0; i < unique_stars.size(); ++i) {
+        const auto &[fwhm, hfr] = metrics[i];
+        cv::putText(mark_img, cv::format("FWHM:%.2f HFR:%.2f", fwhm, hfr),
+                    unique_stars[i] + cv::Point(10, 10),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 255, 0), 1);
+      }
+    }
+  }
 
   if (config_.save_detected_stars) {
     save_detected_stars(unique_stars, config_.detected_stars_save_path);
@@ -305,4 +329,73 @@ void StarDetector::visualize_stars(const cv::Mat &image,
     cv::imshow("Detected Stars", display);
     cv::waitKey(0);
   }
+}
+
+std::pair<double, double> StarDetector::calculate_star_metrics(
+    const cv::Mat &image, const cv::Point &center, int region_size) const {
+  try {
+    cv::Mat roi = extract_star_region(image, center, region_size);
+    if (roi.empty()) {
+      return {0.0, 0.0};
+    }
+
+    // 计算HFR
+    double hfr = calcHfr(roi, region_size / 2.0);
+
+    // 提取数据点用于FWHM计算
+    std::vector<GaussianFit::DataPoint> points;
+    points.reserve(region_size);
+
+    cv::Mat row_profile;
+    cv::reduce(roi, row_profile, 0, cv::REDUCE_AVG);
+
+    for (int i = 0; i < row_profile.cols; ++i) {
+      points.push_back({static_cast<double>(i),
+                        static_cast<double>(row_profile.at<float>(0, i))});
+    }
+
+    // 计算FWHM
+    auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
+    double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
+
+    return {fwhm, hfr};
+  } catch (const std::exception &e) {
+    spdlog::error("Error calculating star metrics: {}", e.what());
+    return {0.0, 0.0};
+  }
+}
+
+std::vector<std::pair<double, double>>
+StarDetector::calculate_batch_metrics(const cv::Mat &image,
+                                      const std::vector<cv::Point> &centers,
+                                      int region_size) const {
+  std::vector<std::pair<double, double>> results(centers.size());
+
+#pragma omp parallel for
+  for (size_t i = 0; i < centers.size(); ++i) {
+    results[i] = calculate_star_metrics(image, centers[i], region_size);
+  }
+
+  return results;
+}
+
+cv::Mat StarDetector::extract_star_region(const cv::Mat &image,
+                                          const cv::Point &center,
+                                          int size) const {
+  int half_size = size / 2;
+  cv::Rect roi(std::max(0, center.x - half_size),
+               std::max(0, center.y - half_size),
+               std::min(size, image.cols - center.x + half_size),
+               std::min(size, image.rows - center.y + half_size));
+
+  if (roi.width < size || roi.height < size) {
+    return cv::Mat();
+  }
+
+  cv::Mat region = image(roi).clone();
+  if (image.type() != CV_32F) {
+    region.convertTo(region, CV_32F);
+  }
+
+  return region;
 }

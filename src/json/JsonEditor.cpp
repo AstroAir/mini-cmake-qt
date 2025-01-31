@@ -279,3 +279,12 @@ void JsonEditor::saveFile() {
     QMessageBox::critical(this, "Error", e.what());
   }
 }
+
+void JsonEditor::loadJson(const nlohmann::json& json) {
+    model.load(json);
+    updateStats();
+}
+
+nlohmann::json JsonEditor::getJson() const {
+    return model.getJson();
+}

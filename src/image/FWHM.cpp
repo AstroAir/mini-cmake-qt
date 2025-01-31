@@ -106,6 +106,18 @@ Statistics calculate_statistics(std::span<const DataPoint> points) {
           .mean = mean_x,
           .stddev = std::sqrt(variance)};
 }
+
+#ifdef __AVX2__
+inline __m256d gaussian_avx(__m256d x, __m256d center, __m256d width,
+                            __m256d base, __m256d peak) {
+  const __m256d t = _mm256_div_pd(_mm256_sub_pd(x, center), width);
+  const __m256d neg_half = _mm256_set1_pd(-0.5);
+  const __m256d exp_term = _mm256_exp_pd(_mm256_mul_pd(neg_half, 
+                          _mm256_mul_pd(t, t)));
+  return _mm256_add_pd(base, _mm256_mul_pd(peak, exp_term));
+}
+#endif
+
 } // namespace detail
 
 std::optional<GaussianParams>
@@ -129,9 +141,13 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
     cv::Mat residuals = detail::create_optimization_matrix(points.size(), 1);
     double prev_error = std::numeric_limits<double>::max();
 
+    const double tau = 1e-3;
+    double lambda = 1e-3;
+    cv::Mat prev_params;
+
     for (int iter = 0; iter < max_iterations; ++iter) {
       compute_residuals(params, points, residuals);
-      const double current_error = cv::norm(residuals);
+      double current_error = cv::norm(residuals);
 
       SPDLOG_DEBUG("Iteration {:03d} - Error: {:.4e}", iter, current_error);
 
@@ -148,13 +164,25 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
       cv::Mat jacobian = detail::create_optimization_matrix(points.size(), 4);
       compute_jacobian(params, points, jacobian);
 
+      cv::Mat JtJ = jacobian.t() * jacobian;
+      cv::Mat JtR = jacobian.t() * residuals;
+
+      cv::Mat diag = JtJ.diag();
+      diag *= (1.0 + lambda);
+
       cv::Mat delta;
-      if (!cv::solve(jacobian, residuals, delta, cv::DECOMP_SVD)) {
-        SPDLOG_ERROR("Matrix solve failure at iteration {}", iter);
-        return std::nullopt;
+      if (cv::solve(JtJ, -JtR, delta, cv::DECOMP_CHOLESKY)) {
+        prev_params = params.clone();
+        params += delta;
+
+        if (current_error < prev_error) {
+          lambda = std::max(lambda / tau, 1e-7);
+        } else {
+          params = prev_params;
+          lambda = std::min(lambda * tau, 1e7);
+        }
       }
 
-      params -= delta;
       prev_error = current_error;
 
       if (!validate_parameters(params)) {
@@ -187,6 +215,22 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
 
 double GaussianFitter::evaluate(const GaussianParams &params,
                                 double x) noexcept {
+  #ifdef __AVX2__
+  if (std::abs(params.width) > detail::EPSILON) {
+    __m256d x_vec = _mm256_set1_pd(x);
+    __m256d center_vec = _mm256_set1_pd(params.center);
+    __m256d width_vec = _mm256_set1_pd(params.width);
+    __m256d base_vec = _mm256_set1_pd(params.base);
+    __m256d peak_vec = _mm256_set1_pd(params.peak);
+    
+    __m256d result = detail::gaussian_avx(x_vec, center_vec, width_vec, 
+                                          base_vec, peak_vec);
+    double results[4];
+    _mm256_store_pd(results, result);
+    return results[0];
+  }
+  #endif
+
   const double t = detail::safe_division(x - params.center, params.width);
   return params.base + params.peak * std::exp(-0.5 * t * t);
 }
