@@ -16,6 +16,8 @@
 #include <QSlider>
 #include <QToolBar>
 #include <QtConcurrent>
+#include <QCache>
+#include <QThreadPool>
 
 
 class ImagePreviewDialog : public QDialog {
@@ -63,6 +65,16 @@ private slots:
   void toggleAutoDetection();
   void exportStarData();
   void showHistogram();
+  void applyCustomFilter();
+  void applyBatchOperations();
+  void showStatistics();
+  void cropImage();
+  void resizeImage();
+  void adjustColors();
+  void applyWatershed();
+  void detectEdges();
+  void applyNoise();
+  void denoise();
 
 private:
   QScrollArea *scrollArea;
@@ -137,6 +149,25 @@ private:
   void updateHistogram();
   double calculateImageStatistics();
   void exportDetectedStarsToCSV(const QString& path);
+
+  QToolBar* createFilterToolBar();
+  QToolBar* createBatchToolBar();
+  void setupBatchProcessingUI();
+  void processImageWithFilter(const QString& filterType);
+  void updateImageCache();
+
+  // 图像处理缓存
+  QCache<QString, QImage> imageCache;
+  // 批处理配置
+  struct BatchConfig {
+      bool autoStretch;
+      bool denoising;
+      bool edgeDetection;
+      std::vector<QString> filterTypes;
+  } batchConfig;
+
+  // 图像处理线程池
+  QThreadPool processingPool;
 };
 
 #endif // IMAGEPREVIEWDIALOG_H

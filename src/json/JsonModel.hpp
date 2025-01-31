@@ -5,6 +5,9 @@
 #include <shared_mutex>
 #include <variant>
 #include <vector>
+#include <unordered_map>
+#include <QFuture>
+#include <QtConcurrent>
 
 using Json = nlohmann::json;
 
@@ -50,6 +53,30 @@ class JsonModel : public QAbstractItemModel {
   std::vector<Command> undoStack;  ///< Stack of undo commands.
   std::vector<Command> redoStack;  ///< Stack of redo commands.
   const size_t maxUndoSteps = 100; ///< Maximum number of undo steps.
+
+  // 内存池优化
+  struct MemoryPool {
+    static constexpr size_t BLOCK_SIZE = 1024;
+    std::vector<std::unique_ptr<char[]>> blocks;
+    size_t currentIndex = 0;
+    
+    void* allocate(size_t size);
+    void clear();
+  };
+  MemoryPool nodePool;
+
+  // 节点缓存
+  struct NodeCache {
+    std::unordered_map<std::string, Node*> cache;
+    void add(const std::string& path, Node* node);
+    Node* get(const std::string& path);
+    void clear();
+  };
+  NodeCache nodeCache;
+
+  // 异步加载支持
+  QFuture<void> loadFuture;
+  bool isLoading = false;
 
 public:
   /**
@@ -171,6 +198,24 @@ public:
    */
   void setJson(const nlohmann::json &json);
 
+  // 新增公共方法
+  bool validateSchema(const std::string& schemaStr);
+  QString compressJson() const;
+  QString beautifyJson(int indent = 4) const;
+  bool findAndReplace(const QString& find, const QString& replace, 
+                      Qt::CaseSensitivity cs = Qt::CaseSensitive);
+  QStringList findAll(const QString& text, 
+                      Qt::CaseSensitivity cs = Qt::CaseSensitive) const;
+  
+  // 异步加载支持
+  void loadAsync(const Json& newData);
+  bool isLoadingData() const { return isLoading; }
+
+signals:
+  void loadProgress(int percent);
+  void loadCompleted();
+  void loadError(const QString& error);
+
 private:
   /**
    * @brief Recursively parses the JSON data and builds the tree structure.
@@ -192,4 +237,27 @@ private:
    * @return The type of the node as a string.
    */
   [[nodiscard]] QString typeString(Node *node) const noexcept;
+
+  /**
+   * @brief 进度回调函数类型
+   */
+  using ProgressCallback = std::function<void(const Json&)>;
+
+  /**
+   * @brief Recursively parses the JSON data and builds the tree structure.
+   * @param j The JSON data to parse
+   * @param callback Optional callback for progress reporting
+   * @param depth Current recursion depth
+   * @return The root node of the parsed tree
+   */
+  std::unique_ptr<Node> parseJson(
+      const Json &j, 
+      const ProgressCallback& callback,
+      int depth = 0
+  );
+
+  /**
+   * @brief Maximum recursion depth for parsing
+   */
+  static constexpr int MAX_PARSE_DEPTH = 1000;
 };

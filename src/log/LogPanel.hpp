@@ -111,6 +111,12 @@ private:
   void exportToHTML(const QString &path);
   void exportToCSV(const QString &path);
   void exportToTXT(const QString &path);
+  // 新增方法
+  void setupHighlightWidget();
+  void updateHighlightRules();
+  void saveHighlightRules();
+  void loadHighlightRules();
+  void applyHighlight(const QString &pattern);
 
   QTableView *m_logTable;
   QDateTimeEdit *m_startDate;
@@ -154,6 +160,10 @@ private:
   int m_currentSearchIndex = -1;
   QVector<QModelIndex> m_searchResults;
   QTimer *m_searchDebounceTimer;
+  // 新增成员
+  QListWidget *m_highlightList;
+  QMap<QString, QString> m_savedHighlights;
+  QMenu *m_highlightMenu;
 };
 
 class LogItemDelegate : public QStyledItemDelegate {

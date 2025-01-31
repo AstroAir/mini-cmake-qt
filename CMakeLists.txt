@@ -31,6 +31,7 @@ set(SOURCE_FILES
     src/MetaDataDialog.cpp
     src/UpdateCheck.cpp
 
+    src/image/Convolve.cpp
     src/image/Exif.cpp
     src/image/FWHM.cpp
     src/image/HFR.cpp
@@ -39,6 +40,9 @@ set(SOURCE_FILES
     src/image/MetaData.cpp
     src/image/StarDetector.cpp
     src/image/VersionControl.cpp
+
+    src/json/JsonEditor.cpp
+    src/json/JsonModel.cpp
 )
 
 add_project_meta(META_FILES_TO_INCLUDE)

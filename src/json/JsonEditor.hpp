@@ -1,7 +1,9 @@
 #pragma once
 
 #include "JsonModel.hpp"
+#include "JsonSyntaxHighlighter.hpp"
 #include <QWidget>
+#include <QCompleter>
 
 class QTreeView;
 class QLineEdit;
@@ -9,6 +11,8 @@ class QStatusBar;
 class QToolBar;
 class QPushButton;
 class QLabel;
+class QProgressBar;
+class QDialog;
 
 /**
  * @class JsonEditor
@@ -28,6 +32,15 @@ class JsonEditor : public QWidget {
   QPushButton *themeBtn; ///< Button for toggling theme.
   bool isDarkTheme = false; ///< Flag indicating if dark theme is enabled.
   QLabel *statsLabel;       ///< Label for displaying statistics.
+  JsonSyntaxHighlighter *highlighter; ///< JSON语法高亮器
+  QCompleter *completer;              ///< 自动补全器
+  QStringList wordList;               ///< 自动补全词列表
+  QProgressBar* progressBar; ///< Progress bar for loading progress.
+  QDialog* findReplaceDialog; ///< Dialog for find and replace.
+  QLineEdit* findEdit; ///< Line edit for find text.
+  QLineEdit* replaceEdit; ///< Line edit for replace text.
+  QPushButton* replaceBtn; ///< Button for replace.
+  QPushButton* replaceAllBtn; ///< Button for replace all.
 
 public:
   /**
@@ -105,4 +118,70 @@ private:
    * @brief Saves the JSON content to a file.
    */
   void saveFile();
+
+  /**
+   * @brief 设置自动补全
+   */
+  void setupCompleter();
+
+  /**
+   * @brief 更新自动补全词列表
+   */
+  void updateCompleterWordList();
+
+  /**
+   * @brief Sets up the find and replace functionality.
+   */
+  void setupFindReplace();
+
+  /**
+   * @brief Sets up the drag and drop functionality.
+   */
+  void setupDragDrop();
+
+  /**
+   * @brief Creates the recent files menu.
+   */
+  void createRecentFilesMenu();
+
+  /**
+   * @brief Adds a file to the recent files list.
+   * @param path The path of the file to add.
+   */
+  void addToRecentFiles(const QString& path);
+
+  /**
+   * @brief Handles a dropped file.
+   * @param path The path of the dropped file.
+   */
+  void handleDroppedFile(const QString& path);
+
+  /**
+   * @brief Shows the loading progress.
+   * @param percent The loading progress percentage.
+   */
+  void showLoadingProgress(int percent);
+
+  /**
+   * @brief Shows the JSON schema.
+   */
+  void showJsonSchema();
+
+  /**
+   * @brief Validates the JSON schema.
+   */
+  void validateJsonSchema();
+
+protected:
+  /**
+   * @brief Handles the drag enter event.
+   * @param event The drag enter event.
+   */
+  void dragEnterEvent(QDragEnterEvent* event) override;
+
+  /**
+   * @brief Handles the drop event.
+   * @param event The drop event.
+   */
+  void dropEvent(QDropEvent* event) override;
 };

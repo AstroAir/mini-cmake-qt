@@ -14,6 +14,10 @@
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
+#include <QCompleter>
+#include <QStringListModel>
+#include <QProgressBar>
+#include <QDialog>
 
 #include <fstream>
 
@@ -27,7 +31,11 @@ JsonEditor::JsonEditor(QWidget *parent) : QWidget(parent) {
   setupToolbar();
   setupStatusBar();
   setupConnections();
+  setupCompleter();
   applyStyle();
+
+  // 创建并设置语法高亮器
+  highlighter = new JsonSyntaxHighlighter(treeView->viewport());
 }
 
 void JsonEditor::setupUI() {
@@ -50,6 +58,25 @@ void JsonEditor::setupUI() {
   treeView->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
 
   searchBar->setPlaceholderText(tr("搜索 (Ctrl+F)"));
+
+  // 添加进度条
+  progressBar = new QProgressBar(this);
+  progressBar->setVisible(false);
+  statusBar->addWidget(progressBar);
+
+  // 设置拖放支持
+  setAcceptDrops(true);
+
+  // 连接异步加载信号
+  connect(&model, &JsonModel::loadProgress, this, &JsonEditor::showLoadingProgress);
+  connect(&model, &JsonModel::loadCompleted, this, [this]() {
+    progressBar->setVisible(false);
+    statusBar->showMessage(tr("加载完成"), 2000);
+  });
+  connect(&model, &JsonModel::loadError, this, [this](const QString& error) {
+    progressBar->setVisible(false);
+    QMessageBox::critical(this, tr("错误"), error);
+  });
 }
 
 void JsonEditor::setupToolbar() {
@@ -259,6 +286,7 @@ void JsonEditor::openFile() {
     std::ifstream file(path.toStdString());
     Json data = Json::parse(file);
     model.load(data);
+    updateCompleterWordList(); // 更新自动补全词列表
   } catch (const std::exception &e) {
     spdlog::error("Open file failed: {}", e.what());
     QMessageBox::critical(this, "Error", e.what());
@@ -283,8 +311,75 @@ void JsonEditor::saveFile() {
 void JsonEditor::loadJson(const nlohmann::json& json) {
     model.load(json);
     updateStats();
+    updateCompleterWordList(); // 更新自动补全词列表
 }
 
 nlohmann::json JsonEditor::getJson() const {
     return model.getJson();
+}
+
+void JsonEditor::setupCompleter() {
+    completer = new QCompleter(this);
+    completer->setModelSorting(QCompleter::CaseInsensitivelySortedModel);
+    completer->setCaseSensitivity(Qt::CaseInsensitive);
+    completer->setWrapAround(false);
+    
+    // 初始化基础关键字
+    wordList << "true" << "false" << "null" << "{" << "}" << "[" << "]" << ":"
+             << "," << "\"\"";
+    
+    completer->setModel(new QStringListModel(wordList, completer));
+    
+    // 将自动补全器设置给编辑器
+    QLineEdit *editor = qobject_cast<QLineEdit*>(treeView->itemDelegate()->createEditor(
+        treeView, QStyleOptionViewItem(), QModelIndex()));
+    if (editor) {
+        editor->setCompleter(completer);
+    }
+}
+
+void JsonEditor::updateCompleterWordList() {
+    // 从当前JSON数据中提取关键词
+    std::function<void(const Json&)> extractWords = [&](const Json& j) {
+        if (j.is_object()) {
+            for (auto& [key, value] : j.items()) {
+                wordList << QString::fromStdString(key);
+                extractWords(value);
+            }
+        } else if (j.is_array()) {
+            for (auto& element : j) {
+                extractWords(element);
+            }
+        } else if (j.is_string()) {
+            wordList << QString::fromStdString(j.get<std::string>());
+        }
+    };
+
+    extractWords(model.getJson());
+    wordList.removeDuplicates();
+    completer->setModel(new QStringListModel(wordList, completer));
+}
+
+void JsonEditor::setupFindReplace() {
+    findReplaceDialog = new QDialog(this);
+    auto* layout = new QVBoxLayout(findReplaceDialog);
+    
+    findEdit = new QLineEdit(findReplaceDialog);
+    replaceEdit = new QLineEdit(findReplaceDialog);
+    replaceBtn = new QPushButton(tr("替换"), findReplaceDialog);
+    replaceAllBtn = new QPushButton(tr("全部替换"), findReplaceDialog);
+    
+    // ...设置查找替换对话框UI...
+}
+
+void JsonEditor::handleDroppedFile(const QString& path) {
+    try {
+        std::ifstream file(path.toStdString());
+        Json data = Json::parse(file);
+        model.loadAsync(data);
+        progressBar->setVisible(true);
+        addToRecentFiles(path);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, tr("错误"), e.what());
+    }
 }
