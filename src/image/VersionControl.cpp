@@ -1,5 +1,7 @@
 #include "VersionControl.hpp"
 
+#include <fstream>
+
 #include <spdlog/spdlog.h>
 
 ImageVersionControl::ImageVersionControl(const fs::path &repo_path)

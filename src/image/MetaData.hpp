@@ -12,34 +12,57 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// 定义 OpenCV 图像类型概念
+/**
+ * @brief Concept to define OpenCV image types.
+ */
 template <typename T>
 concept OpenCVImageType = std::same_as<T, cv::Mat> || std::same_as<T, cv::UMat>;
 
-// 图像元数据结构体
+/**
+ * @struct ImageMetadata
+ * @brief Structure representing metadata for an image.
+ */
 struct ImageMetadata {
-  fs::path path;
-  cv::Size size;
-  int channels;
-  int depth;
-  std::string color_space;
-  std::chrono::system_clock::time_point timestamp;
-  json custom_data;
+  fs::path path;           ///< Path to the image file.
+  cv::Size size;           ///< Size of the image.
+  int channels;            ///< Number of channels in the image.
+  int depth;               ///< Bit depth of the image.
+  std::string color_space; ///< Color space of the image.
+  std::chrono::system_clock::time_point timestamp; ///< Timestamp of the image.
+  json custom_data; ///< Custom metadata in JSON format.
 
-  // 添加标签
+  /**
+   * @brief Adds a custom tag to the metadata.
+   * @tparam T The type of the value.
+   * @param key The key for the tag.
+   * @param value The value for the tag.
+   */
   template <typename T> void add_tag(const std::string &key, T &&value) {
     custom_data[key] = std::forward<T>(value);
   }
 
-  // 移除标签
+  /**
+   * @brief Removes a custom tag from the metadata.
+   * @param key The key for the tag to remove.
+   */
   void remove_tag(const std::string &key) { custom_data.erase(key); }
 
-  // 检查是否存在标签
+  /**
+   * @brief Checks if a custom tag exists in the metadata.
+   * @param key The key for the tag to check.
+   * @return True if the tag exists, false otherwise.
+   */
   bool has_tag(const std::string &key) const noexcept {
     return custom_data.contains(key);
   }
 
-  // 获取标签值
+  /**
+   * @brief Gets the value of a custom tag.
+   * @tparam T The type of the value.
+   * @param key The key for the tag.
+   * @return An optional containing the value if the tag exists, std::nullopt
+   * otherwise.
+   */
   template <typename T>
   std::optional<T> get_tag(const std::string &key) const noexcept {
     try {
@@ -49,24 +72,50 @@ struct ImageMetadata {
     }
   }
 
-  // 合并标签
+  /**
+   * @brief Merges custom tags from another JSON object.
+   * @param other The JSON object containing the tags to merge.
+   */
   void merge_tags(const json &other) { custom_data.update(other); }
 
-  // 清空所有标签
+  /**
+   * @brief Clears all custom tags from the metadata.
+   */
   void clear_tags() noexcept { custom_data.clear(); }
 };
 
-// 图像处理器类
+/**
+ * @class ImageProcessor
+ * @brief Class for processing images and managing their metadata.
+ */
 class ImageProcessor {
 public:
+  /**
+   * @brief Constructor for ImageProcessor.
+   */
   ImageProcessor();
 
-  // 图像加载
+  /**
+   * @brief Loads an image and its metadata from a file.
+   * @param img_path The path to the image file.
+   * @param flags The flags for loading the image (default is
+   * cv::IMREAD_ANYCOLOR).
+   * @return An optional containing the image metadata if the image was loaded
+   * successfully, std::nullopt otherwise.
+   */
   [[nodiscard]] std::optional<ImageMetadata>
   load_image(const fs::path &img_path,
              int flags = cv::IMREAD_ANYCOLOR) noexcept;
 
-  // 图像保存
+  /**
+   * @brief Saves an image and its metadata to a file.
+   * @tparam ImageT The type of the image (cv::Mat or cv::UMat).
+   * @param output_path The path to the output image file.
+   * @param image The image to save.
+   * @param meta The metadata to save with the image.
+   * @param quality The quality of the saved image (default is 95).
+   * @return True if the image was saved successfully, false otherwise.
+   */
   template <OpenCVImageType ImageT>
   bool save_image(const fs::path &output_path, const ImageT &image,
                   const ImageMetadata &meta, int quality = 95) noexcept {
@@ -75,11 +124,11 @@ public:
       create_output_directory(output_path);
 
       if (!write_image_file(output_path, image, quality)) {
-        throw std::runtime_error("图像写入操作失败");
+        throw std::runtime_error("Failed to write image file");
       }
 
       save_associated_json(output_path, meta.custom_data);
-      logger->info("保存图像成功: {}", output_path.string());
+      logger->info("Image saved successfully: {}", output_path.string());
       return true;
     } catch (const std::exception &e) {
       log_error("save_image", e.what());
@@ -87,14 +136,21 @@ public:
     }
   }
 
-  // 添加自定义标签
+  /**
+   * @brief Adds a custom tag to the image metadata.
+   * @tparam T The type of the value.
+   * @param meta The image metadata.
+   * @param key The key for the tag.
+   * @param value The value for the tag.
+   * @return True if the tag was added successfully, false otherwise.
+   */
   template <typename T>
   bool add_custom_tag(ImageMetadata &meta, const std::string &key,
                       T &&value) noexcept {
     try {
       validate_tag_key(key);
       meta.add_tag(key, std::forward<T>(value));
-      logger->info("添加标签成功: {} -> {}", key, value);
+      logger->info("Tag added successfully: {} -> {}", key, value);
       return true;
     } catch (const std::exception &e) {
       log_error("add_custom_tag", e.what());
@@ -102,43 +158,116 @@ public:
     }
   }
 
-  // 批量添加标签
+  /**
+   * @brief Adds multiple custom tags to the image metadata.
+   * @param meta The image metadata.
+   * @param tags The vector of key-value pairs representing the tags to add.
+   * @return True if the tags were added successfully, false otherwise.
+   */
   bool batch_add_tags(
       ImageMetadata &meta,
       const std::vector<std::pair<std::string, json>> &tags) noexcept;
 
-  // 从 JSON 文件导入标签
+  /**
+   * @brief Imports custom tags from a JSON file.
+   * @param meta The image metadata.
+   * @param json_file The path to the JSON file.
+   * @return True if the tags were imported successfully, false otherwise.
+   */
   bool import_tags_from_json(ImageMetadata &meta,
                              const fs::path &json_file) noexcept;
 
 private:
-  std::shared_ptr<spdlog::logger> logger;
+  std::shared_ptr<spdlog::logger> logger; ///< Logger for logging messages.
 
-  // 校验工具方法
+  /**
+   * @brief Validates if a file exists.
+   * @param path The path to the file.
+   */
   void validate_file_exists(const fs::path &path) const;
+
+  /**
+   * @brief Validates if an image is not empty.
+   * @param img The image to validate.
+   */
   void validate_image_not_empty(const cv::Mat &img) const;
+
+  /**
+   * @brief Validates the parameters for saving an image.
+   * @param path The path to the output image file.
+   * @param image The image to save.
+   */
   void validate_save_parameters(const fs::path &path, const auto &image) const;
+
+  /**
+   * @brief Validates a custom tag key.
+   * @param key The key to validate.
+   */
   void validate_tag_key(const std::string &key) const;
 
-  // 元数据创建
+  /**
+   * @brief Creates metadata for an image.
+   * @param path The path to the image file.
+   * @param img The image.
+   * @return The created metadata.
+   */
   ImageMetadata create_metadata(const fs::path &path, const cv::Mat &img) const;
 
-  // 图像分析
+  /**
+   * @brief Detects the color space of an image.
+   * @param img The image.
+   * @return The detected color space.
+   */
   std::string detect_color_space(const cv::Mat &img) const;
 
-  // 文件操作
+  /**
+   * @brief Creates the output directory if it does not exist.
+   * @param path The path to the output directory.
+   */
   void create_output_directory(const fs::path &path) const;
+
+  /**
+   * @brief Writes an image file to disk.
+   * @param path The path to the output image file.
+   * @param image The image to save.
+   * @param quality The quality of the saved image.
+   * @return True if the image was saved successfully, false otherwise.
+   */
   bool write_image_file(const fs::path &path, const auto &image,
                         int quality) const;
 
-  // FITS保存专用方法
+  /**
+   * @brief Saves a FITS image file to disk.
+   * @param path The path to the output FITS file.
+   * @param image The image to save.
+   * @return True if the image was saved successfully, false otherwise.
+   */
   bool save_fits_image(const fs::path &path, const cv::Mat &image) const;
 
-  // JSON处理
+  /**
+   * @brief Loads associated JSON metadata for an image.
+   * @param meta The image metadata.
+   */
   void load_associated_json(ImageMetadata &meta) const;
+
+  /**
+   * @brief Saves associated JSON metadata for an image.
+   * @param img_path The path to the image file.
+   * @param data The JSON data to save.
+   */
   void save_associated_json(const fs::path &img_path, const json &data) const;
+
+  /**
+   * @brief Reads a JSON file from disk.
+   * @param path The path to the JSON file.
+   * @return The parsed JSON data.
+   */
   json read_json_file(const fs::path &path) const;
 
-  // 日志记录
+  /**
+   * @brief Logs an error message.
+   * @param function The name of the function where the error occurred.
+   * @param msg The error message.
+   */
   void log_error(const std::string &function, const std::string &msg) const;
 };
