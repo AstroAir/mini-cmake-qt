@@ -476,4 +476,80 @@ std::string getStackTrace() {
   return ss.str();
 }
 
+std::string getStackTrace(size_t maxFrames) {
+  std::stringstream ss;
+
+#if defined(USE_BOOST_STACKTRACE)
+  ss << boost::stacktrace::stacktrace();
+#else
+#if defined(_WIN32)
+  HANDLE process = GetCurrentProcess();
+  SymInitialize(process, NULL, TRUE);
+
+  void *stack[256];
+  WORD frames = CaptureStackBackTrace(
+      0, (DWORD)std::min(maxFrames, (size_t)256), stack, NULL);
+
+  SYMBOL_INFO *symbol =
+      (SYMBOL_INFO *)calloc(sizeof(SYMBOL_INFO) + 256 * sizeof(char), 1);
+  symbol->MaxNameLen = 255;
+  symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+
+  IMAGEHLP_LINE64 line;
+  line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+  DWORD displacement;
+
+  for (WORD i = 0; i < frames; i++) {
+    DWORD64 address = (DWORD64)stack[i];
+    SymFromAddr(process, address, 0, symbol);
+
+    ss << std::dec << i << ": " << symbol->Name;
+
+    // 尝试获取文件和行号信息
+    if (SymGetLineFromAddr64(process, address, &displacement, &line)) {
+      ss << " at " << line.FileName << ":" << line.LineNumber;
+    }
+
+    ss << " [0x" << std::hex << symbol->Address << "]\n";
+  }
+
+  free(symbol);
+  SymCleanup(process);
+
+#elif defined(__APPLE__) || defined(__linux__)
+  void *array[256];
+  int size = backtrace(array, std::min(maxFrames, (size_t)256));
+  char **messages = backtrace_symbols(array, size);
+
+  for (int i = 0; i < size && messages != NULL; i++) {
+    Dl_info info;
+    if (dladdr(array[i], &info)) {
+      int status;
+      char *demangled =
+          abi::__cxa_demangle(info.dli_sname, NULL, NULL, &status);
+
+      ss << i << ": ";
+      if (demangled) {
+        ss << demangled << " in ";
+        free(demangled);
+      } else if (info.dli_sname) {
+        ss << info.dli_sname << " in ";
+      }
+
+      if (info.dli_fname) {
+        ss << info.dli_fname;
+      }
+
+      ss << " at " << array[i] << "\n";
+    } else {
+      ss << i << ": " << messages[i] << "\n";
+    }
+  }
+  free(messages);
+#endif
+#endif
+
+  return ss.str();
+}
+
 } // namespace CrashHandler

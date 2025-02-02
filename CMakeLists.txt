@@ -32,12 +32,15 @@ set(SOURCE_FILES
     src/UpdateCheck.cpp
 
     src/image/Convolve.cpp
+    src/image/Denoise.cpp
     src/image/Exif.cpp
+    src/image/Filter.cpp
     src/image/FWHM.cpp
     src/image/HFR.cpp
     src/image/Histogram.cpp
     src/image/ImageIO.cpp
     src/image/MetaData.cpp
+    src/image/SIMDHelper.cpp
     src/image/Stack.cpp
     src/image/StarDetector.cpp
     src/image/VersionControl.cpp

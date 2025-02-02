@@ -88,7 +88,7 @@ void ImagePreviewDialog::setupUI() {
 
   // 添加星点检测和元信息相关按钮
   setupStarDetectionUI();
-  setupImageProcessingToolBar();
+  setupImageProcessingUI();
   mainLayout->addWidget(imageProcessingToolBar);
 
   // 添加卷积和EXIF工具栏
@@ -647,6 +647,162 @@ void ImagePreviewDialog::updateMetadata(const ImageMetadata &metadata) {
   }
 }
 
+void ImagePreviewDialog::setupImageProcessingUI() {
+  imageProcessingToolBar = new QToolBar("图像处理", this);
+
+  // 降噪相关按钮
+  auto denoiseButton = imageProcessingToolBar->addAction("降噪");
+  connect(denoiseButton, &QAction::triggered, this,
+          &ImagePreviewDialog::configureDenoising);
+
+  // 滤镜相关按钮
+  auto filterButton = imageProcessingToolBar->addAction("滤镜");
+  connect(filterButton, &QAction::triggered, this,
+          &ImagePreviewDialog::configureFilters);
+
+  imageProcessingToolBar->addSeparator();
+
+  // 直方图按钮
+  showHistogramAction = imageProcessingToolBar->addAction(
+      "显示直方图", this, &ImagePreviewDialog::showHistogram);
+}
+
+void ImagePreviewDialog::configureDenoising() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("降噪设置");
+  auto layout = new QVBoxLayout(&dialog);
+
+  // 创建降噪方法选择下拉框
+  auto methodCombo = new QComboBox(&dialog);
+  methodCombo->addItems(
+      {"自动", "中值滤波", "高斯滤波", "双边滤波", "NLM", "小波"});
+  layout->addWidget(new QLabel("降噪方法:"));
+  layout->addWidget(methodCombo);
+
+  // 参数设置控件
+  auto strengthSlider = new QSlider(Qt::Horizontal, &dialog);
+  strengthSlider->setRange(1, 100);
+  strengthSlider->setValue(50);
+  layout->addWidget(new QLabel("强度:"));
+  layout->addWidget(strengthSlider);
+
+  // 确定取消按钮
+  auto buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addWidget(buttonBox);
+
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() == QDialog::Accepted) {
+    // 配置降噪参数
+    denoiseParams.method =
+        static_cast<DenoiseMethod>(methodCombo->currentIndex());
+    double strength = strengthSlider->value() / 50.0;
+
+    denoiseParams.nlm_h = 3.0 * strength;
+    denoiseParams.bilateral_d = static_cast<int>(9 * strength);
+    denoiseParams.wavelet_threshold = 15.0f * strength;
+
+    applyDenoising();
+  }
+}
+
+void ImagePreviewDialog::applyDenoising() {
+  if (originalImage.empty())
+    return;
+
+  try {
+    QProgressDialog progress("正在降噪...", "取消", 0, 100, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.show();
+
+    if (!denoiser) {
+      denoiser = std::make_unique<ImageDenoiser>();
+    }
+
+    cv::Mat result = denoiser->denoise(originalImage, denoiseParams);
+
+    QImage qImage;
+    if (result.channels() == 1) {
+      qImage = QImage(result.data, result.cols, result.rows, result.step,
+                      QImage::Format_Grayscale8);
+    } else {
+      qImage = QImage(result.data, result.cols, result.rows, result.step,
+                      QImage::Format_BGR888);
+    }
+
+    imageLabel->setPixmap(QPixmap::fromImage(qImage));
+    updateImage();
+
+  } catch (const std::exception &e) {
+    QMessageBox::warning(this, "错误",
+                         QString("降噪处理失败: %1").arg(e.what()));
+  }
+}
+
+void ImagePreviewDialog::configureFilters() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("滤镜设置");
+  auto layout = new QVBoxLayout(&dialog);
+
+  // 滤镜选择列表
+  auto filterList = new QListWidget(&dialog);
+  filterList->addItems(
+      {"高斯模糊", "边缘检测", "锐化", "HSV调整", "对比度亮度"});
+  filterList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  layout->addWidget(new QLabel("选择滤镜:"));
+  layout->addWidget(filterList);
+
+  // 确定取消按钮
+  auto buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+  layout->addWidget(buttonBox);
+
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() == QDialog::Accepted) {
+    // 创建选中的滤镜链
+    std::vector<std::unique_ptr<IFilterStrategy>> filters;
+
+    for (auto item : filterList->selectedItems()) {
+      if (item->text() == "高斯模糊") {
+        filters.push_back(std::make_unique<GaussianBlurFilter>());
+      } else if (item->text() == "边缘检测") {
+        filters.push_back(std::make_unique<CannyEdgeFilter>());
+      } else if (item->text() == "锐化") {
+        filters.push_back(std::make_unique<SharpenFilter>());
+      } else if (item->text() == "HSV调整") {
+        filters.push_back(std::make_unique<HSVAdjustFilter>());
+      } else if (item->text() == "对比度亮度") {
+        filters.push_back(std::make_unique<ContrastBrightnessFilter>());
+      }
+    }
+
+    if (!filters.empty()) {
+      chainProcessor =
+          std::make_unique<ChainImageFilterProcessor>(std::move(filters));
+      applyChainFilters();
+    }
+  }
+}
+
+void ImagePreviewDialog::applyChainFilters() {
+  if (!chainProcessor || !imageLabel->pixmap())
+    return;
+
+  try {
+    QImage currentImage = imageLabel->pixmap().toImage();
+    QImage processed = chainProcessor->process(currentImage);
+    imageLabel->setPixmap(QPixmap::fromImage(processed));
+    updateImage();
+  } catch (const std::exception &e) {
+    QMessageBox::warning(this, "错误",
+                         QString("滤镜处理失败: %1").arg(e.what()));
+  }
+}
+
 void ImagePreviewDialog::setupImageProcessingToolBar() {
   imageProcessingToolBar = new QToolBar("图像处理", this);
 
@@ -1042,4 +1198,172 @@ void ImagePreviewDialog::createThumbnailGrid() {
   }
 
   gridDialog.exec();
+}
+
+void ImagePreviewDialog::applyBatchOperations() {
+  // 创建批处理设置对话框
+  QDialog dialog(this);
+  dialog.setWindowTitle("批处理设置");
+  auto layout = new QVBoxLayout(&dialog);
+
+  // 创建批处理选项
+  QCheckBox *autoStretchCheck = new QCheckBox("自动拉伸", &dialog);
+  QCheckBox *denoisingCheck = new QCheckBox("降噪", &dialog);
+  QCheckBox *edgeDetectionCheck = new QCheckBox("边缘检测", &dialog);
+  QCheckBox *starDetectionCheck = new QCheckBox("星点检测", &dialog);
+
+  layout->addWidget(autoStretchCheck);
+  layout->addWidget(denoisingCheck);
+  layout->addWidget(edgeDetectionCheck);
+  layout->addWidget(starDetectionCheck);
+
+  // 添加确定和取消按钮
+  auto buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+  layout->addWidget(buttonBox);
+
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  if (dialog.exec() == QDialog::Accepted) {
+    // 更新批处理配置
+    batchConfig.autoStretch = autoStretchCheck->isChecked();
+    batchConfig.denoising = denoisingCheck->isChecked();
+    batchConfig.edgeDetection = edgeDetectionCheck->isChecked();
+
+    // 显示进度对话框
+    QProgressDialog progress("正在批处理...", "取消", 0, imageList.size(),
+                             this);
+    progress.setWindowModality(Qt::WindowModal);
+
+    // 对每个图像执行批处理
+    for (int i = 0; i < imageList.size(); ++i) {
+      if (progress.wasCanceled())
+        break;
+
+      progress.setValue(i);
+      QString currentImage = imageList[i];
+
+      try {
+        // 加载图像
+        cv::Mat img =
+            cv::imread(currentImage.toStdString(), cv::IMREAD_UNCHANGED);
+        if (img.empty())
+          continue;
+
+        // 应用选中的处理操作
+        if (batchConfig.autoStretch) {
+          double minVal, maxVal;
+          cv::minMaxLoc(img, &minVal, &maxVal);
+          img.convertTo(img, -1, 255.0 / (maxVal - minVal),
+                        -minVal * 255.0 / (maxVal - minVal));
+        }
+
+        if (batchConfig.denoising) {
+          cv::Mat denoised;
+          cv::fastNlMeansDenoising(img, denoised);
+          img = denoised;
+        }
+
+        if (batchConfig.edgeDetection) {
+          cv::Mat edges;
+          cv::Canny(img, edges, 100, 200);
+          img = edges;
+        }
+
+        // 保存处理后的图像
+        QString outputPath = currentImage;
+        outputPath.insert(outputPath.lastIndexOf('.'), "_processed");
+        cv::imwrite(outputPath.toStdString(), img);
+
+        // 如果选择了星点检测
+        if (starDetectionCheck->isChecked()) {
+          StarDetectionConfig config;
+          auto stars = starDetector.multiscale_detect_stars(img);
+          QString starDataPath = outputPath;
+          starDataPath.replace(starDataPath.lastIndexOf('.'), 4, "_stars.csv");
+          exportDetectedStarsToCSV(starDataPath);
+        }
+
+      } catch (const std::exception &e) {
+        spdlog::error("处理图像失败 {}: {}", currentImage.toStdString(),
+                      e.what());
+        continue;
+      }
+    }
+
+    progress.setValue(imageList.size());
+    QMessageBox::information(this, "完成", "批处理操作已完成");
+  }
+}
+
+void ImagePreviewDialog::showStatistics() {
+  if (originalImage.empty()) {
+    QMessageBox::warning(this, "错误", "没有可用的图像");
+    return;
+  }
+
+  try {
+    // 计算基本统计信息
+    cv::Scalar mean, stddev;
+    cv::meanStdDev(originalImage, mean, stddev);
+
+    // 计算最大最小值
+    double minVal, maxVal;
+    cv::minMaxLoc(originalImage, &minVal, &maxVal);
+
+    // 计算直方图
+    cv::Mat hist;
+    int histSize = 256;
+    float range[] = {0, 256};
+    const float *histRange = {range};
+    cv::calcHist(&originalImage, 1, 0, cv::Mat(), hist, 1, &histSize,
+                 &histRange);
+
+    // 找到直方图峰值
+    double maxHistVal;
+    cv::minMaxLoc(hist, nullptr, &maxHistVal);
+
+    // 计算信噪比
+    double snr = mean[0] / stddev[0];
+
+    // 创建统计信息对话框
+    QDialog statsDialog(this);
+    statsDialog.setWindowTitle("图像统计信息");
+    auto layout = new QVBoxLayout(&statsDialog);
+
+    // 显示统计数据
+    QString statsText =
+        QString("图像尺寸: %1 x %2\n"
+                "位深度: %3\n"
+                "均值: %.2f\n"
+                "标准差: %.2f\n"
+                "最小值: %.2f\n"
+                "最大值: %.2f\n"
+                "信噪比(SNR): %.2f\n"
+                "直方图峰值: %.0f")
+            .arg(originalImage.cols)
+            .arg(originalImage.rows)
+            .arg(originalImage.depth() * originalImage.channels())
+            .arg(mean[0])
+            .arg(stddev[0])
+            .arg(minVal)
+            .arg(maxVal)
+            .arg(snr)
+            .arg(maxHistVal);
+
+    auto statsLabel = new QLabel(statsText);
+    layout->addWidget(statsLabel);
+
+    // 添加关闭按钮
+    auto closeButton = new QPushButton("关闭", &statsDialog);
+    connect(closeButton, &QPushButton::clicked, &statsDialog, &QDialog::accept);
+    layout->addWidget(closeButton);
+
+    statsDialog.exec();
+
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, "错误",
+                          QString("计算统计信息失败: %1").arg(e.what()));
+  }
 }

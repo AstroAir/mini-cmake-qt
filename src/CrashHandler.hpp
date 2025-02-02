@@ -2,6 +2,11 @@
 #include <string>
 #include <functional>
 
+#if defined(USE_BOOST_STACKTRACE)
+#define BOOST_STACKTRACE_USE_BACKTRACE
+#include <boost/stacktrace.hpp>
+#endif
+
 namespace CrashHandler {
 struct Config {
     bool enableMinidump = true;
@@ -12,7 +17,7 @@ struct Config {
 
 void init(const Config& config = Config());
 void setCustomHandler(std::function<void(const std::string&)> handler);
-std::string getStackTrace(int maxFrames = 62);
+std::string getStackTrace(size_t maxFrames = 62);
 std::string getPlatformInfo();
 std::string getMemoryInfo();
 std::string getCpuInfo();

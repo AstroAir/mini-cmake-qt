@@ -27,9 +27,9 @@ struct ConvolutionConfig {
   bool normalize_kernel = true;   ///< Flag to normalize the kernel.
   bool parallel_execution = true; ///< Flag to enable parallel execution.
   bool per_channel = false;       ///< Flag to process each channel separately.
-  bool use_simd = true;        ///< 启用SIMD优化
-  bool use_memory_pool = true; ///< 使用内存池
-  int tile_size = 256;        ///< 分块处理大小，用于缓存优化
+  bool use_simd = true;           ///< 启用SIMD优化
+  bool use_memory_pool = true;    ///< 使用内存池
+  int tile_size = 256;            ///< 分块处理大小，用于缓存优化
 };
 
 /**
@@ -44,10 +44,10 @@ struct DeconvolutionConfig {
   double regularization =
       1e-6; ///< Regularization parameter for Tikhonov deconvolution.
   BorderMode border_mode = BorderMode::REPLICATE; ///< Border handling mode.
-  bool per_channel = false; ///< Flag to process each channel separately.
+  bool per_channel = false;    ///< Flag to process each channel separately.
   bool use_simd = true;        ///< 启用SIMD优化
   bool use_memory_pool = true; ///< 使用内存池
-  int tile_size = 256;        ///< 分块处理大小
+  int tile_size = 256;         ///< 分块处理大小
 };
 
 /**
@@ -207,19 +207,12 @@ private:
   class MemoryPool {
   public:
     static cv::Mat allocate(int rows, int cols, int type);
-    static void deallocate(cv::Mat& mat);
+    static void deallocate(cv::Mat &mat);
     static void clear();
+
   private:
     static std::vector<cv::Mat> pool_;
-  };
-
-  // 新增SIMD优化接口
-  class SIMDHelper {
-  public:
-    static void convolve2D(const cv::Mat& src, cv::Mat& dst, 
-                          const cv::Mat& kernel);
-    static void processImageTile(const cv::Mat& src, cv::Mat& dst, 
-                               const cv::Mat& kernel, 
-                               const cv::Rect& roi);
+    static std::mutex pool_mutex_;
+    static const int max_pool_size_ = 100;
   };
 };

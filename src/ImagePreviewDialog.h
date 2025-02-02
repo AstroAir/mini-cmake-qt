@@ -6,6 +6,8 @@
 #include "HistogramDialog.hpp"
 #include "image/Convolve.hpp"
 #include "image/Exif.hpp"
+#include "image/Denoise.hpp"
+#include "image/Filter.hpp"
 
 #include <QDialog>
 #include <QFuture>
@@ -74,8 +76,6 @@ private slots:
   void adjustColors();
   void applyWatershed();
   void detectEdges();
-  void applyNoise();
-  void denoise();
 
 private:
   QScrollArea *scrollArea;
@@ -169,6 +169,20 @@ private:
 
   // 图像处理线程池
   QThreadPool processingPool;
+
+  // 图像处理相关成员
+  std::unique_ptr<ImageDenoiser> denoiser;
+  std::unique_ptr<ImageFilterProcessor> filterProcessor;
+  std::unique_ptr<ChainImageFilterProcessor> chainProcessor;
+  DenoiseParameters denoiseParams;
+
+  // 图像处理相关方法
+  void setupImageProcessingUI();
+  void applyDenoising();
+  void applyFilter();
+  void applyChainFilters();
+  void configureDenoising();
+  void configureFilters();
 };
 
 #endif // IMAGEPREVIEWDIALOG_H

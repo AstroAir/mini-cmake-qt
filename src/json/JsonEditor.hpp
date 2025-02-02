@@ -24,6 +24,7 @@ class QDialog;
  * messages.
  */
 class JsonEditor : public QWidget {
+  Q_OBJECT
   QTreeView *treeView;   ///< Tree view for displaying JSON structure.
   QLineEdit *searchBar;  ///< Search bar for filtering JSON content.
   JsonModel model;       ///< Model for managing JSON data.
@@ -60,6 +61,9 @@ public:
    * @return 当前的JSON数据
    */
   nlohmann::json getJson() const;
+
+signals:
+  void recentFilesChanged(const QStringList& files);
 
 private:
   /**

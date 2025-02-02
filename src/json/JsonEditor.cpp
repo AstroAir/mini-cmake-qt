@@ -383,3 +383,33 @@ void JsonEditor::handleDroppedFile(const QString& path) {
         QMessageBox::critical(this, tr("错误"), e.what());
     }
 }
+
+void JsonEditor::showLoadingProgress(int progress) {
+    progressBar->setVisible(true);
+    progressBar->setValue(progress);
+    statusBar->showMessage(tr("正在加载... %1%").arg(progress));
+}
+
+void JsonEditor::addToRecentFiles(const QString& filePath) {
+    const int maxRecentFiles = 5;  // 最多保存5个最近文件
+    
+    QSettings settings;
+    QStringList recentFiles = settings.value("recentFiles").toStringList();
+    
+    // 移除已存在的相同路径（如果有）
+    recentFiles.removeAll(filePath);
+    
+    // 在开头插入新路径
+    recentFiles.prepend(filePath);
+    
+    // 如果超过最大数量，移除多余的
+    while (recentFiles.size() > maxRecentFiles) {
+        recentFiles.removeLast();
+    }
+    
+    // 保存更新后的列表
+    settings.setValue("recentFiles", recentFiles);
+    
+    // 更新最近文件菜单（如果需要）
+    emit recentFilesChanged(recentFiles);
+}
