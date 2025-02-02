@@ -33,23 +33,29 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
 
   const int dims = 1;
   const std::array<int, 1> channels{0};
-  const std::array<float, 2> range{0.0f, 256.0f};
-  const float *ranges[] = {range.data()};
+  const float *ranges[] = {config.range.data()};
 
   std::vector<cv::Mat> histograms(3);
 
-// 使用OpenMP加速直方图计算
-#pragma omp parallel for num_threads(                                          \
-        config.numThreads) if (config.numThreads != 1)
+#pragma omp parallel for num_threads(config.numThreads) if (config.numThreads != 1)
   for (int i = 0; i < 3; ++i) {
     try {
       cv::calcHist(&bgrPlanes[i], 1, channels.data(), cv::Mat(), histograms[i],
                    dims, &config.histSize, ranges);
 
+      if (config.useLog) {
+        cv::log(histograms[i] + 1, histograms[i]);
+      }
+
+      if (config.gamma != 1.0) {
+        cv::pow(histograms[i], config.gamma, histograms[i]);
+      }
+
       if (config.threshold > 0) {
         cv::threshold(histograms[i], histograms[i], config.threshold, 0,
-                      cv::THRESH_TOZERO);
+                     cv::THRESH_TOZERO);
       }
+
       if (config.normalize) {
         cv::normalize(histograms[i], histograms[i], 0, 1, cv::NORM_MINMAX);
       }
@@ -62,9 +68,9 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
   return histograms;
 }
 
-auto calculateGrayHist(const cv::Mat &img, int histSize, bool normalize,
-                       float threshold) -> cv::Mat {
-  spdlog::info("Calculating grayscale histogram with histSize: {}", histSize);
+auto calculateGrayHist(const cv::Mat &img, const HistogramConfig &config)
+    -> cv::Mat {
+  spdlog::info("Calculating grayscale histogram with histSize: {}", config.histSize);
   if (img.empty()) {
     spdlog::error("Input image for calculateGrayHist is empty.");
     throw std::invalid_argument("Input image for calculateGrayHist is empty.");
@@ -73,23 +79,31 @@ auto calculateGrayHist(const cv::Mat &img, int histSize, bool normalize,
     spdlog::error("Input image is not grayscale.");
     throw std::invalid_argument("Input image is not grayscale.");
   }
-  if (histSize <= 0) {
+  if (config.histSize <= 0) {
     spdlog::error("Histogram size must be positive.");
     throw std::invalid_argument("Histogram size must be positive.");
   }
 
-  const std::array<int, 1> channels{0};
-  const std::array<float, 2> range{0.0f, static_cast<float>(histSize)};
-  const float *ranges[] = {range.data()};
+  const std::array<int, 1> channels{config.channel};
+  const float *ranges[] = {config.range.data()};
 
   cv::Mat grayHist;
-  cv::calcHist(&img, 1, channels.data(), cv::Mat(), grayHist, 1, &histSize,
+  cv::calcHist(&img, 1, channels.data(), cv::Mat(), grayHist, 1, &config.histSize,
                ranges);
 
-  if (threshold > 0) {
-    cv::threshold(grayHist, grayHist, threshold, 0, cv::THRESH_TOZERO);
+  if (config.useLog) {
+    cv::log(grayHist + 1, grayHist);
   }
-  if (normalize) {
+
+  if (config.gamma != 1.0) {
+    cv::pow(grayHist, config.gamma, grayHist);
+  }
+
+  if (config.threshold > 0) {
+    cv::threshold(grayHist, grayHist, config.threshold, 0, cv::THRESH_TOZERO);
+  }
+
+  if (config.normalize) {
     cv::normalize(grayHist, grayHist, 0, 1, cv::NORM_MINMAX);
   }
 
@@ -111,6 +125,7 @@ auto calculateCDF(const cv::Mat &hist) -> cv::Mat {
   cv::Mat cdf;
   hist.copyTo(cdf);
 
+  // 累加求和为顺序过程，无法并行化，但是后续归一化处理已优化
   auto *cdf_ptr = cdf.ptr<float>();
   for (int i = 1; i < hist.rows; ++i) {
     cdf_ptr[i] += cdf_ptr[i - 1];
@@ -159,6 +174,7 @@ auto equalizeHistogram(const cv::Mat &img, const EqualizeConfig &config)
       std::vector<cv::Mat> channels;
       cv::split(img, channels);
 
+// 使用OpenMP并行化三个通道的直方图均衡化
 #pragma omp parallel for
       for (int i = 0; i < 3; ++i) {
         if (config.clipLimit) {
@@ -203,7 +219,7 @@ auto drawHistogram(const cv::Mat &hist, int width, int height, cv::Scalar color,
   if (cumulative) {
     cv::fillPoly(histImage, contours, color * 0.5);
   }
-  cv::polylines(histImage, points, false, color, 2, cv::LINE_AA);
+  cv::polylines(histImage, points, false, color, 2, DEFAULT_LINE_TYPE);
 
   return histImage;
 }
@@ -216,6 +232,7 @@ auto compareHistograms(const cv::Mat &hist1, const cv::Mat &hist2, int method)
   return cv::compareHist(hist1, hist2, method);
 }
 
+// 优化：使用OpenMP并行归约计算均值及高阶矩，提升直方图统计精度
 auto calculateHistogramStats(const cv::Mat &hist) -> HistogramStats {
   HistogramStats stats;
   if (hist.empty())
@@ -228,15 +245,15 @@ auto calculateHistogramStats(const cv::Mat &hist) -> HistogramStats {
     normHist = hist;
   }
 
-  // 计算均值
   double sum = 0.0;
+#pragma omp parallel for reduction(+ : sum)
   for (int i = 0; i < normHist.rows; ++i) {
     sum += i * normHist.at<float>(i);
   }
   stats.mean = sum;
 
-  // 计算高阶矩
   double m2 = 0.0, m3 = 0.0, m4 = 0.0;
+#pragma omp parallel for reduction(+ : m2, m3, m4)
   for (int i = 0; i < normHist.rows; ++i) {
     double diff = i - stats.mean;
     double diff2 = diff * diff;
@@ -246,8 +263,8 @@ auto calculateHistogramStats(const cv::Mat &hist) -> HistogramStats {
   }
 
   stats.stdDev = std::sqrt(m2);
-  stats.skewness = m3 / (std::pow(stats.stdDev, 3));
-  stats.kurtosis = (m4 / (m2 * m2)) - 3.0;
+  stats.skewness = (stats.stdDev != 0) ? m3 / (std::pow(stats.stdDev, 3)) : 0;
+  stats.kurtosis = (m2 != 0) ? (m4 / (m2 * m2)) - 3.0 : 0;
 
   stats.entropy = calculateEntropy(normHist);
   stats.uniformity = calculateUniformity(normHist);
@@ -257,6 +274,7 @@ auto calculateHistogramStats(const cv::Mat &hist) -> HistogramStats {
 
 auto calculateEntropy(const cv::Mat &hist) -> double {
   double entropy = 0.0;
+#pragma omp parallel for reduction(+ : entropy)
   for (int i = 0; i < hist.rows; ++i) {
     float p = hist.at<float>(i);
     if (p > 0) {
@@ -268,6 +286,7 @@ auto calculateEntropy(const cv::Mat &hist) -> double {
 
 auto calculateUniformity(const cv::Mat &hist) -> double {
   double uniformity = 0.0;
+#pragma omp parallel for reduction(+ : uniformity)
   for (int i = 0; i < hist.rows; ++i) {
     float p = hist.at<float>(i);
     uniformity += p * p;
@@ -312,9 +331,9 @@ auto matchHistograms(const cv::Mat &source, const cv::Mat &reference,
     cv::Mat srcHist = calculateGrayHist(channels[0]);
     cv::Mat refHist = calculateGrayHist(refChannels[0]);
 
-    cv::Mat lut = cv::Mat::zeros(1, 256, CV_8U);
     cv::Mat srcCdf = calculateCDF(srcHist);
     cv::Mat refCdf = calculateCDF(refHist);
+    cv::Mat lut = cv::Mat::zeros(1, 256, CV_8U);
 
     for (int i = 0; i < 256; ++i) {
       int j = 0;

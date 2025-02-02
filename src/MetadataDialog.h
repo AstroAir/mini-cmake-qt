@@ -38,6 +38,7 @@ private:
     void filterTreeItems(const QString& searchText);
     void saveMetadataToFile(const QString& filePath);
     void loadMetadataFromFile(const QString& filePath);
+    bool filterTreeItem(QTreeWidgetItem* item, const QString& searchText);
 };
 
 #endif

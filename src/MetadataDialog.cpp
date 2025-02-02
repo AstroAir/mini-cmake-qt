@@ -6,6 +6,7 @@
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QLineEdit>
 
 MetadataDialog::MetadataDialog(const ImageMetadata& meta, QWidget* parent)
@@ -167,14 +168,36 @@ void MetadataDialog::filterTreeItems(const QString& searchText) {
     }
 }
 
+bool MetadataDialog::filterTreeItem(QTreeWidgetItem* item, const QString& searchText) {
+    bool matched = false;
+    
+    // 检查当前项
+    if (searchText.isEmpty() || 
+        item->text(0).toLower().contains(searchText) ||
+        item->text(1).toLower().contains(searchText)) {
+        matched = true;
+    }
+    
+    // 递归检查子项
+    for (int i = 0; i < item->childCount(); ++i) {
+        if (filterTreeItem(item->child(i), searchText)) {
+            matched = true;
+        }
+    }
+    
+    item->setHidden(!matched);
+    return matched;
+}
+
 void MetadataDialog::saveMetadataToFile(const QString& filePath) {
     QFile file(filePath);
     if (!file.open(QIODevice::WriteOnly)) {
         throw std::runtime_error("无法打开文件进行写入");
     }
     
-    QJsonDocument doc = QJsonDocument::fromJson(
-        QJsonDocument::fromVariant(metadata.toVariant()).toJson());
+    // 直接将 metadata 转换为 JSON
+    nlohmann::json j = metadata.to_json();
+    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromStdString(j.dump()));
     file.write(doc.toJson());
 }
 
@@ -185,5 +208,6 @@ void MetadataDialog::loadMetadataFromFile(const QString& filePath) {
     }
     
     QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    metadata.fromVariant(doc.toVariant().toMap());
+    nlohmann::json j = nlohmann::json::parse(doc.toJson().toStdString());
+    metadata = ImageMetadata::from_json(j);
 }

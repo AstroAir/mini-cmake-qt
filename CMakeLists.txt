@@ -38,11 +38,21 @@ set(SOURCE_FILES
     src/image/Histogram.cpp
     src/image/ImageIO.cpp
     src/image/MetaData.cpp
+    src/image/Stack.cpp
     src/image/StarDetector.cpp
     src/image/VersionControl.cpp
 
     src/json/JsonEditor.cpp
     src/json/JsonModel.cpp
+    src/json/JsonSyntaxHighlighter.cpp
+
+    src/log/LogAnalyzer.cpp
+    src/log/LogChartModel.cpp
+    src/log/LogFilterModel.cpp
+    src/log/LogPanel.cpp
+    src/log/LogSearchCompleter.cpp
+
+    src/utils/ThreadPool.cpp
 )
 
 add_project_meta(META_FILES_TO_INCLUDE)

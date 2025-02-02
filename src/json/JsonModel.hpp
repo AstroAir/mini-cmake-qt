@@ -2,6 +2,7 @@
 
 #include <QAbstractItemModel>
 #include <nlohmann/json.hpp>
+#include <qtmetamacros.h>
 #include <shared_mutex>
 #include <variant>
 #include <vector>
@@ -19,6 +20,7 @@ using Json = nlohmann::json;
  * view.
  */
 class JsonModel : public QAbstractItemModel {
+  Q_OBJECT
   struct Node {
     /**
      * @brief Data stored in the node.

@@ -1,27 +1,127 @@
 #include "mainwindow.h"
+#include "image/ImageIO.hpp"
 #include <QDateTime>
 #include <QFileInfo>
 #include <QImageReader>
 #include <QLabel>
 #include <QScrollArea>
 #include <spdlog/spdlog.h>
+#include <unordered_set>
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   spdlog::info("Initializing MainWindow");
   setWindowTitle("File Scan Tool");
-  resize(800, 600);
+  resize(1024, 768);  // 增加默认窗口大小
 
   model = new QFileSystemModel(this);
   model->setRootPath("");
 
-  treeView = new QTreeView(this);
-  gridView = new QWidget(this);
-  gridLayout = new QGridLayout(gridView);
+  // 创建主布局容器
+  auto centralWidget = new QWidget(this);
+  auto mainLayout = new QVBoxLayout(centralWidget);
+  mainLayout->setContentsMargins(10, 10, 10, 10);  // 添加边距
+  mainLayout->setSpacing(10);  // 增加组件间距
 
+  // 创建工具栏容器
+  auto toolbarContainer = new QWidget;
+  auto toolbarLayout = new QHBoxLayout(toolbarContainer);
+  toolbarLayout->setContentsMargins(0, 0, 0, 0);
+  toolbarLayout->setSpacing(8);
+
+  // 优化按钮样式和布局
   scanButton = new QPushButton("选择文件夹", this);
   listButton = new QPushButton("列表显示", this);
   gridButton = new QPushButton("网格显示", this);
-  toggleViewButton = new QPushButton("切换模式 (简略/详细)", this);
+  toggleViewButton = new QPushButton("切换显示模式", this);
+
+  // 设置按钮固定高度和最小宽度
+  const int buttonHeight = 32;
+  const int buttonMinWidth = 100;
+  for (auto* btn : {scanButton, listButton, gridButton, toggleViewButton}) {
+      btn->setFixedHeight(buttonHeight);
+      btn->setMinimumWidth(buttonMinWidth);
+      btn->setStyleSheet(R"(
+          QPushButton {
+              background-color: #f0f0f0;
+              border: none;
+              border-radius: 4px;
+              padding: 6px 12px;
+              color: #333333;
+          }
+          QPushButton:hover {
+              background-color: #e0e0e0;
+          }
+          QPushButton:pressed {
+              background-color: #d0d0d0;
+          }
+      )");
+  }
+
+  toolbarLayout->addWidget(scanButton);
+  toolbarLayout->addWidget(listButton);
+  toolbarLayout->addWidget(gridButton);
+  toolbarLayout->addWidget(toggleViewButton);
+  toolbarLayout->addStretch();  // 添加弹性空间
+
+  // 创建视图容器
+  auto viewContainer = new QWidget;
+  auto viewLayout = new QStackedLayout(viewContainer);
+  viewLayout->setContentsMargins(0, 0, 0, 0);
+
+  // 优化树形视图
+  treeView = new QTreeView;
+  treeView->setStyleSheet(R"(
+      QTreeView {
+          background-color: white;
+          border: 1px solid #cccccc;
+          border-radius: 4px;
+      }
+      QTreeView::item {
+          padding: 4px;
+      }
+      QTreeView::item:hover {
+          background-color: #f5f5f5;
+      }
+      QTreeView::item:selected {
+          background-color: #0078d4;
+          color: white;
+      }
+  )");
+
+  // 优化网格视图
+  gridView = new QWidget;
+  gridLayout = new QGridLayout(gridView);
+  gridLayout->setContentsMargins(0, 0, 0, 0);
+  gridLayout->setSpacing(12);  // 增加网格间距
+
+  viewLayout->addWidget(treeView);
+  viewLayout->addWidget(gridView);
+
+  // 组装主布局
+  mainLayout->addWidget(toolbarContainer);
+  mainLayout->addWidget(viewContainer, 1);  // 添加拉伸因子
+
+  setCentralWidget(centralWidget);
+  
+  // 设置主窗口样式
+  setStyleSheet(R"(
+      QMainWindow {
+          background-color: #f8f9fa;
+      }
+      QScrollBar {
+          background-color: #f0f0f0;
+          width: 12px;
+          border-radius: 6px;
+      }
+      QScrollBar::handle {
+          background-color: #c0c0c0;
+          border-radius: 5px;
+          min-height: 20px;
+      }
+      QScrollBar::handle:hover {
+          background-color: #a0a0a0;
+      }
+  )");
 
   connect(scanButton, &QPushButton::clicked, this,
           &MainWindow::onScanButtonClicked);
@@ -33,21 +133,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
           &MainWindow::onToggleViewButtonClicked);
   connect(treeView, &QTreeView::doubleClicked, this,
           &MainWindow::onListViewDoubleClicked);
-
-  QVBoxLayout *mainLayout = new QVBoxLayout();
-  QHBoxLayout *buttonLayout = new QHBoxLayout();
-  buttonLayout->addWidget(scanButton);
-  buttonLayout->addWidget(listButton);
-  buttonLayout->addWidget(gridButton);
-  buttonLayout->addWidget(toggleViewButton);
-
-  mainLayout->addLayout(buttonLayout);
-  mainLayout->addWidget(treeView);
-  mainLayout->addWidget(gridView);
-
-  QWidget *centralWidget = new QWidget(this);
-  centralWidget->setLayout(mainLayout);
-  setCentralWidget(centralWidget);
 
   treeView->hide();
   gridView->hide();
@@ -80,6 +165,9 @@ void MainWindow::onScanButtonClicked() {
 
     currentPath = folderPath;
     currentFolderPath = folderPath;
+
+    // 更新图片列表
+    updateImageList();
 
     // 设置文件系统模型
     model->setRootPath(folderPath);
@@ -146,29 +234,11 @@ void MainWindow::onListViewDoubleClicked(const QModelIndex &index) {
     } else if (fileInfo.isFile()) {
       // 如果是文件,检查是否为图片
       if (is_image_file(filePath.toStdString())) {
-        // 获取当前文件夹下的所有图片
-        QDir dir = fileInfo.dir();
-        QStringList filters;
-        filters << "*.jpg" << "*.jpeg" << "*.png" << "*.gif" << "*.bmp";
-        QFileInfoList files = dir.entryInfoList(filters, QDir::Files);
-        
-        // 构建图片列表
-        QVector<QString> imageList;
-        int currentIndex = 0;
-        for(int i = 0; i < files.size(); i++) {
-          imageList.append(files[i].filePath());
-          if(files[i].filePath() == filePath) {
-            currentIndex = i;
-          }
-        }
-        
-        // 打开图片预览对话框
-        if(imagePreviewDialog) {
-          imagePreviewDialog->setImageList(imageList, currentIndex); 
+        // 查找当前图片在imageList中的索引
+        int currentIndex = imageList.indexOf(filePath);
+        if (currentIndex >= 0) {
+          imagePreviewDialog->setImageList(imageList, currentIndex);
           imagePreviewDialog->show();
-          spdlog::info("Image preview opened for: {}", filePath.toStdString());
-        } else {
-          throw std::runtime_error("图片预览对话框未初始化");
         }
       } else {
         // 非图片文件,仅显示文件信息
@@ -177,8 +247,8 @@ void MainWindow::onListViewDoubleClicked(const QModelIndex &index) {
     }
   } catch (const std::exception &e) {
     spdlog::error("Error handling double click: {}", e.what());
-    QMessageBox::critical(this, "错误", 
-      QString("处理文件时出错：%1").arg(e.what()));
+    QMessageBox::critical(this, "错误",
+                          QString("处理文件时出错：%1").arg(e.what()));
   }
 }
 
@@ -199,10 +269,11 @@ void MainWindow::showFileInfo(const QString &filePath) {
 
   if (is_image_file(filePath.toStdString())) {
     // 使用新的 ImagePreviewDialog 显示图片
-    QVector<QString> images = getImageListFromCurrentFolder();
-    int index = images.indexOf(filePath);
-    imagePreviewDialog->setImageList(images, index);
-    imagePreviewDialog->show();
+    int index = imageList.indexOf(filePath);
+    if (index >= 0) {
+      imagePreviewDialog->setImageList(imageList, index);
+      imagePreviewDialog->show();
+    }
   }
 
   QMessageBox::information(this, "文件信息", info);
@@ -361,32 +432,27 @@ void MainWindow::populateListView(const FolderStructure &structure) {
 
 void MainWindow::setupGridItemStyle(QPushButton *button) {
   button->setFixedSize(GRID_ITEM_WIDTH, GRID_ITEM_HEIGHT);
-
-  // Windows 11风格的样式表
   button->setStyleSheet(R"(
-        QPushButton {
-            background-color: transparent;
-            border: none;
-            border-radius: 8px;
-            padding: 8px;
-            text-align: center;
-            color: #000000;
-        }
-        QPushButton:hover {
-            background-color: rgba(0, 0, 0, 0.05);
-        }
-        QPushButton:pressed {
-            background-color: rgba(0, 0, 0, 0.1);
-        }
-    )");
+      QPushButton {
+          background-color: white;
+          border: 1px solid #e0e0e0;
+          border-radius: 8px;
+          padding: 8px;
+          text-align: center;
+          color: #333333;
+      }
+      QPushButton:hover {
+          background-color: #f5f5f5;
+          border-color: #0078d4;
+      }
+      QPushButton:pressed {
+          background-color: #e0e0e0;
+      }
+  )");
 
-  // 设置文本对齐和换行
-  button->setStyleSheet(button->styleSheet() +
-                        "\nQPushButton { white-space: normal; }");
-
-  // 添加阴影效果
-  auto *shadow = new QGraphicsDropShadowEffect(button);
-  shadow->setBlurRadius(10);
+  // 现代化阴影效果
+  auto shadow = new QGraphicsDropShadowEffect(button);
+  shadow->setBlurRadius(15);
   shadow->setColor(QColor(0, 0, 0, 30));
   shadow->setOffset(0, 2);
   button->setGraphicsEffect(shadow);
@@ -428,10 +494,11 @@ void MainWindow::createGridItem(const QFileInfo &fileInfo, int row, int col) {
   // 修改点击事件连接
   if (is_image_file(fileInfo.filePath().toStdString())) {
     connect(button, &QPushButton::clicked, [this, fileInfo]() {
-      QVector<QString> images = getImageListFromCurrentFolder();
-      int index = images.indexOf(fileInfo.filePath());
-      imagePreviewDialog->setImageList(images, index);
-      imagePreviewDialog->show();
+      int index = imageList.indexOf(fileInfo.filePath());
+      if (index >= 0) {
+        imagePreviewDialog->setImageList(imageList, index);
+        imagePreviewDialog->show();
+      }
     });
   } else {
     connect(button, &QPushButton::clicked, this,
@@ -554,6 +621,9 @@ void MainWindow::loadCurrentDirectory() {
       throw std::runtime_error("无法访问文件夹，请检查权限");
     }
 
+    // 更新图片列表
+    updateImageList();
+
     // 更新树形视图
     treeView->setRootIndex(model->index(currentPath));
 
@@ -582,15 +652,6 @@ void MainWindow::updateNavigationControls() {
 }
 
 QVector<QString> MainWindow::getImageListFromCurrentFolder() {
-  QVector<QString> imageList;
-  QDir dir(currentPath);
-  QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
-
-  for (const QFileInfo &fileInfo : entries) {
-    if (is_image_file(fileInfo.filePath().toStdString())) {
-      imageList.append(fileInfo.filePath());
-    }
-  }
   return imageList;
 }
 
@@ -665,10 +726,11 @@ void MainWindow::openSelectedFile() {
     return;
 
   if (is_image_file(filePath.toStdString())) {
-    QVector<QString> images = getImageListFromCurrentFolder();
-    int index = images.indexOf(filePath);
-    imagePreviewDialog->setImageList(images, index);
-    imagePreviewDialog->show();
+    int index = imageList.indexOf(filePath);
+    if (index >= 0) {
+      imagePreviewDialog->setImageList(imageList, index);
+      imagePreviewDialog->show();
+    }
   }
 }
 
@@ -744,4 +806,188 @@ QString MainWindow::getSelectedFilePath() {
     }
   }
   return QString();
+}
+
+void MainWindow::createThumbnailGrid() {
+  // 新增：采用网格布局展示缩略图
+  QDialog *gridDialog = new QDialog(this);
+  gridDialog->setWindowTitle("缩略图网格");
+  QGridLayout *gridLayout = new QGridLayout(gridDialog);
+
+  // 假设存在成员变量 imageList，存放所有图片路径
+  int cols = 4;
+  int row = 0, col = 0;
+  for (const QString &imgPath : imageList) {
+    QLabel *thumbLabel = new QLabel;
+    QPixmap pix;
+    // 如果是 FITS 文件调用现有io模块加载
+    if (imgPath.endsWith(".fits", Qt::CaseInsensitive)) {
+      // 利用 ImageIO 接口加载 FITS 文件（需要自行封装 QImage 从 cv::Mat 转换）
+      cv::Mat mat = loadImage(imgPath.toStdString());
+      if (!mat.empty()) {
+        QImage qImg(mat.data, mat.cols, mat.rows, mat.step,
+                    QImage::Format_Grayscale8);
+        pix = QPixmap::fromImage(qImg).scaled(100, 100, Qt::KeepAspectRatio,
+                                              Qt::SmoothTransformation);
+      }
+    } else {
+      pix.load(imgPath);
+      if (!pix.isNull())
+        pix =
+            pix.scaled(100, 100, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    }
+    thumbLabel->setPixmap(pix);
+    gridLayout->addWidget(thumbLabel, row, col);
+    if (++col >= cols) {
+      col = 0;
+      row++;
+    }
+  }
+  gridDialog->setLayout(gridLayout);
+  gridDialog->exec();
+}
+
+void MainWindow::addImageOverlay(const QPixmap &overlay) {
+  // 获取当前显示的图片
+  QString currentPath = getSelectedFilePath();
+  if (currentPath.isEmpty() || !imagePreviewDialog) {
+    QMessageBox::warning(this, "错误", "请先选择一张图片");
+    return;
+  }
+
+  // 创建叠加设置对话框
+  QDialog settingsDialog(this);
+  settingsDialog.setWindowTitle("图像叠加设置");
+  auto layout = new QVBoxLayout(&settingsDialog);
+
+  // 添加透明度设置
+  auto opacitySlider = new QSlider(Qt::Horizontal);
+  opacitySlider->setRange(0, 100);
+  opacitySlider->setValue(50);
+  layout->addWidget(new QLabel("透明度:"));
+  layout->addWidget(opacitySlider);
+
+  // 添加位置调整
+  auto posXSpinBox = new QSpinBox;
+  auto posYSpinBox = new QSpinBox;
+  posXSpinBox->setRange(-1000, 1000);
+  posYSpinBox->setRange(-1000, 1000);
+
+  auto posLayout = new QHBoxLayout;
+  posLayout->addWidget(new QLabel("X:"));
+  posLayout->addWidget(posXSpinBox);
+  posLayout->addWidget(new QLabel("Y:"));
+  posLayout->addWidget(posYSpinBox);
+  layout->addLayout(posLayout);
+
+  // 添加预览功能
+  auto previewLabel = new QLabel;
+  previewLabel->setMinimumSize(200, 200);
+  layout->addWidget(previewLabel);
+
+  // 添加确定和取消按钮
+  auto buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal);
+  layout->addWidget(buttonBox);
+
+  // 实时预览效果
+  auto updatePreview = [&]() {
+    QImage baseImage(currentPath);
+    if (baseImage.isNull())
+      return;
+
+    // 创建预览图
+    QImage preview = baseImage.scaled(200, 200, Qt::KeepAspectRatio);
+    QImage overlayScaled =
+        overlay.toImage().scaled(preview.size(), Qt::KeepAspectRatio);
+
+    // 应用透明度和位置偏移
+    double opacity = opacitySlider->value() / 100.0;
+    QPainter painter(&preview);
+    painter.setOpacity(opacity);
+    painter.drawImage(posXSpinBox->value(), posYSpinBox->value(),
+                      overlayScaled);
+
+    previewLabel->setPixmap(QPixmap::fromImage(preview));
+  };
+
+  // 连接信号槽
+  connect(opacitySlider, &QSlider::valueChanged, updatePreview);
+  connect(posXSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+          updatePreview);
+  connect(posYSpinBox, QOverload<int>::of(&QSpinBox::valueChanged),
+          updatePreview);
+  connect(buttonBox, &QDialogButtonBox::accepted, &settingsDialog,
+          &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &settingsDialog,
+          &QDialog::reject);
+
+  // 初始预览
+  updatePreview();
+
+  // 如果用户确认设置
+  if (settingsDialog.exec() == QDialog::Accepted) {
+    try {
+      // 加载原始图像
+      QImage baseImage(currentPath);
+      if (baseImage.isNull()) {
+        throw std::runtime_error("无法加载基础图像");
+      }
+
+      // 创建新的图像用于叠加
+      QImage result = baseImage;
+      QPainter painter(&result);
+
+      // 应用透明度设置
+      painter.setOpacity(opacitySlider->value() / 100.0);
+
+      // 调整叠加图像大小以匹配原图
+      QImage overlayScaled =
+          overlay.toImage().scaled(baseImage.size(), Qt::KeepAspectRatio);
+
+      // 在指定位置绘制叠加图像
+      painter.drawImage(posXSpinBox->value(), posYSpinBox->value(),
+                        overlayScaled);
+
+      // 保存结果
+      QString savePath = currentPath;
+      savePath.insert(savePath.lastIndexOf('.'), "_overlay");
+
+      if (result.save(savePath)) {
+        QMessageBox::information(this, "成功", "叠加图像已保存至: " + savePath);
+
+        // 刷新图像列表和显示
+        updateImageList();
+        loadCurrentDirectory();
+      } else {
+        throw std::runtime_error("保存结果图像失败");
+      }
+
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, "错误",
+                            QString("图像叠加处理失败: %1").arg(e.what()));
+    }
+  }
+}
+
+void MainWindow::updateImageList() {
+  imageList.clear();
+  QDir dir(currentPath);
+  filterImageFiles(dir);
+
+  // 更新UI状态
+  if (!imageList.isEmpty()) {
+    spdlog::info("Found {} images in directory", imageList.size());
+  }
+}
+
+void MainWindow::filterImageFiles(const QDir &dir) {
+  QStringList filters;
+  filters << "*.jpg" << "*.jpeg" << "*.png" << "*.gif" << "*.bmp" << "*.fits";
+
+  QFileInfoList entries =
+      dir.entryInfoList(filters, QDir::Files | QDir::NoDotAndDotDot);
+  for (const QFileInfo &fileInfo : entries) {
+    imageList.append(fileInfo.absoluteFilePath());
+  }
 }

@@ -1,5 +1,6 @@
 #include "CrashHandler.hpp"
 
+#include <cpuid.h>
 #include <ctime>
 #include <iomanip>
 #include <sstream>
@@ -24,6 +25,26 @@
 #endif
 
 namespace {
+CrashHandler::Config g_config;
+std::function<void(const std::string &)> g_customHandler;
+
+#ifdef _WIN32
+void createMiniDump(EXCEPTION_POINTERS *exceptionPointers) {
+  HANDLE hFile = CreateFileA("crash.dmp", GENERIC_WRITE, FILE_SHARE_READ, 0,
+                             CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
+  if (hFile == INVALID_HANDLE_VALUE)
+    return;
+
+  MINIDUMP_EXCEPTION_INFORMATION exInfo;
+  exInfo.ThreadId = GetCurrentThreadId();
+  exInfo.ExceptionPointers = exceptionPointers;
+  exInfo.ClientPointers = FALSE;
+
+  MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+                    MiniDumpNormal, &exInfo, nullptr, nullptr);
+  CloseHandle(hFile);
+}
+#endif
 
 // 公共工具函数
 std::string timestamp() {
@@ -73,6 +94,8 @@ LONG WINAPI exceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) {
     fwrite(ss.str().c_str(), 1, ss.str().size(), f);
     fclose(f);
   }
+
+  createMiniDump(pExceptionInfo);
 
   return EXCEPTION_EXECUTE_HANDLER;
 }
@@ -149,13 +172,185 @@ void signalHandler(int sig) {
   exit(1);
 }
 
+// 新增：获取CPU信息
+std::string getCpuInfoImpl() {
+  std::stringstream ss;
+#ifdef _WIN32
+  int cpuInfo[4] = {-1};
+  __cpuid(cpuInfo, 0x80000000);
+  unsigned int nExIds = cpuInfo[0];
+  char brand[64] = {0};
+
+  for (unsigned int i = 0x80000000; i <= nExIds; ++i) {
+    __cpuid(cpuInfo, i);
+    if (i == 0x80000002)
+      memcpy(brand, cpuInfo, sizeof(cpuInfo));
+    else if (i == 0x80000003)
+      memcpy(brand + 16, cpuInfo, sizeof(cpuInfo));
+    else if (i == 0x80000004)
+      memcpy(brand + 32, cpuInfo, sizeof(cpuInfo));
+  }
+  ss << "CPU: " << brand;
 #endif
+  return ss.str();
+}
+
+// 新增：获取内存信息
+std::string getMemoryInfoImpl() {
+  std::stringstream ss;
+#ifdef _WIN32
+  MEMORYSTATUSEX memInfo;
+  memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+  GlobalMemoryStatusEx(&memInfo);
+  ss << "Total Physical Memory: " << memInfo.ullTotalPhys / (1024 * 1024)
+     << " MB\n";
+  ss << "Available Memory: " << memInfo.ullAvailPhys / (1024 * 1024) << " MB\n";
+  ss << "Memory Load: " << memInfo.dwMemoryLoad << "%\n";
+#endif
+  return ss.str();
+}
+
+#endif
+
+std::string getCpuInfoImpl() {
+  std::stringstream ss;
+#if defined(_WIN32)
+  int cpuInfo[4] = {-1};
+  char brand[64] = {0};
+
+  __cpuidex(cpuInfo, 0x80000002, 0);
+  memcpy(brand, cpuInfo, sizeof(cpuInfo));
+  __cpuidex(cpuInfo, 0x80000003, 0);
+  memcpy(brand + 16, cpuInfo, sizeof(cpuInfo));
+  __cpuidex(cpuInfo, 0x80000004, 0);
+  memcpy(brand + 32, cpuInfo, sizeof(cpuInfo));
+
+  SYSTEM_INFO sysInfo;
+  GetSystemInfo(&sysInfo);
+
+  ss << "CPU Brand: " << brand << "\n"
+     << "Number of Cores: " << sysInfo.dwNumberOfProcessors << "\n"
+     << "Page Size: " << sysInfo.dwPageSize << " bytes\n";
+
+#elif defined(__APPLE__)
+  char buffer[1024];
+  size_t size = sizeof(buffer);
+
+  if (sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nullptr, 0) ==
+      0) {
+    ss << "CPU Brand: " << buffer << "\n";
+  }
+
+  if (sysctlbyname("hw.physicalcpu", &buffer, &size, nullptr, 0) == 0) {
+    ss << "Physical CPUs: " << buffer << "\n";
+  }
+
+  if (sysctlbyname("hw.logicalcpu", &buffer, &size, nullptr, 0) == 0) {
+    ss << "Logical CPUs: " << buffer << "\n";
+  }
+
+#else // Linux
+  FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
+  if (cpuinfo) {
+    char line[1024];
+    while (fgets(line, sizeof(line), cpuinfo)) {
+      if (strncmp(line, "model name", 10) == 0) {
+        char *model = strchr(line, ':');
+        if (model) {
+          ss << "CPU Model:" << (model + 2);
+          break;
+        }
+      }
+    }
+    fclose(cpuinfo);
+  }
+
+  // 获取CPU核心数
+  if (sysconf(_SC_NPROCESSORS_ONLN) != -1) {
+    ss << "Number of CPUs: " << sysconf(_SC_NPROCESSORS_ONLN) << "\n";
+  }
+#endif
+  return ss.str();
+}
+
+std::string getMemoryInfoImpl() {
+  std::stringstream ss;
+#if defined(_WIN32)
+  MEMORYSTATUSEX memInfo;
+  memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+  if (GlobalMemoryStatusEx(&memInfo)) {
+    ss << "Total Physical Memory: " << (memInfo.ullTotalPhys / (1024 * 1024))
+       << " MB\n"
+       << "Available Physical Memory: "
+       << (memInfo.ullAvailPhys / (1024 * 1024)) << " MB\n"
+       << "Memory Load: " << memInfo.dwMemoryLoad << "%\n"
+       << "Total Virtual Memory: " << (memInfo.ullTotalVirtual / (1024 * 1024))
+       << " MB\n"
+       << "Available Virtual Memory: "
+       << (memInfo.ullAvailVirtual / (1024 * 1024)) << " MB\n";
+  }
+
+#elif defined(__APPLE__)
+  int mib[2];
+  size_t size;
+  struct vm_statistics64 vm_stats;
+
+  mib[0] = CTL_HW;
+  mib[1] = HW_MEMSIZE;
+  uint64_t total_memory;
+  size = sizeof(total_memory);
+  if (sysctl(mib, 2, &total_memory, &size, NULL, 0) == 0) {
+    ss << "Total Physical Memory: " << (total_memory / (1024 * 1024))
+       << " MB\n";
+  }
+
+  mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+  if (host_statistics64(mach_host_self(), HOST_VM_INFO64,
+                        (host_info64_t)&vm_stats, &count) == KERN_SUCCESS) {
+    uint64_t free_memory = vm_stats.free_count * 4096;
+    uint64_t used_memory = (vm_stats.active_count + vm_stats.inactive_count +
+                            vm_stats.wire_count) *
+                           4096;
+
+    ss << "Free Memory: " << (free_memory / (1024 * 1024)) << " MB\n"
+       << "Used Memory: " << (used_memory / (1024 * 1024)) << " MB\n";
+  }
+
+#else // Linux
+  FILE *meminfo = fopen("/proc/meminfo", "r");
+  if (meminfo) {
+    char line[256];
+    unsigned long total_mem = 0, free_mem = 0, buffers = 0, cached = 0;
+
+    while (fgets(line, sizeof(line), meminfo)) {
+      if (strncmp(line, "MemTotal:", 9) == 0)
+        sscanf(line, "MemTotal: %lu", &total_mem);
+      else if (strncmp(line, "MemFree:", 8) == 0)
+        sscanf(line, "MemFree: %lu", &free_mem);
+      else if (strncmp(line, "Buffers:", 8) == 0)
+        sscanf(line, "Buffers: %lu", &buffers);
+      else if (strncmp(line, "Cached:", 7) == 0)
+        sscanf(line, "Cached: %lu", &cached);
+    }
+    fclose(meminfo);
+
+    unsigned long used_mem = total_mem - free_mem - buffers - cached;
+    ss << "Total Memory: " << (total_mem / 1024) << " MB\n"
+       << "Used Memory: " << (used_mem / 1024) << " MB\n"
+       << "Free Memory: " << (free_mem / 1024) << " MB\n"
+       << "Buffers: " << (buffers / 1024) << " MB\n"
+       << "Cached: " << (cached / 1024) << " MB\n";
+  }
+#endif
+  return ss.str();
+}
 
 } // namespace
 
 namespace CrashHandler {
 
-void init() {
+void init(const Config &config) {
+  g_config = config;
 #if defined(_WIN32)
   SetUnhandledExceptionFilter(exceptionHandler);
 #else
@@ -166,6 +361,14 @@ void init() {
   signal(SIGBUS, signalHandler);
 #endif
 }
+
+void setCustomHandler(std::function<void(const std::string &)> handler) {
+  g_customHandler = handler;
+}
+
+std::string getMemoryInfo() { return getMemoryInfoImpl(); }
+
+std::string getCpuInfo() { return getCpuInfoImpl(); }
 
 std::string getPlatformInfo() {
   std::stringstream ss;

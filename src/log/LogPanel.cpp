@@ -1,6 +1,9 @@
 #include "LogPanel.hpp"
 #include <ranges>
 
+#include <QPushButton>
+#include <QToolButton>
+
 // LogTableModel implementation
 QVariant LogTableModel::headerData(int section, Qt::Orientation orientation,
                                    int role) const {
@@ -60,35 +63,332 @@ void EnhancedLogPanel::updateLevelFilter(int index) {
 }
 
 void EnhancedLogPanel::setupUI() {
-  auto *mainLayout = new QVBoxLayout(this);
-  mainLayout->setContentsMargins(3, 3, 3, 3);
-  mainLayout->setSpacing(2);
+  setContentsMargins(8, 8, 8, 8);
 
-  // 设置搜索工具栏
-  setupSearchWidget();
+  // 创建主容器
+  m_mainContainer = new QWidget(this);
+  m_containerLayout = new QVBoxLayout(m_mainContainer);
+  m_containerLayout->setSpacing(12);
+  m_containerLayout->setContentsMargins(0, 0, 0, 0);
 
-  // 主分割器
+  // 设置现代化布局
+  setupModernLayout();
+
+  // 设置响应式工具栏
+  setupResponsiveToolbar();
+
+  // 创建弹性布局
+  setupFlexibleLayout();
+
+  // 应用现代化样式
+  applyModernStyle(this);
+
+  // 设置主布局
+  auto mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
+  mainLayout->addWidget(m_mainContainer);
+}
+
+void EnhancedLogPanel::setupModernLayout() {
+  // 创建卡片式容器
+  createModernContainers();
+
+  // 创建堆叠式视图
+  m_viewStack = new QStackedWidget(this);
+  m_viewStack->addWidget(m_cards["log"]);
+  m_viewStack->addWidget(m_cards["analysis"]);
+
+  m_containerLayout->addWidget(m_viewStack);
+}
+
+void EnhancedLogPanel::createModernContainers() {
+  // 日志视图卡片
+  auto logView = setupLogView();
+  m_cards["log"] = wrapInCard(logView, tr("日志"));
+
+  // 分析视图卡片
+  auto analysisView = setupAnalysisPanel();
+  m_cards["analysis"] = wrapInCard(analysisView, tr("分析"));
+
+  // 搜索过滤卡片
+  auto filterWidget = new QWidget;
+  auto filterLayout = new QVBoxLayout(filterWidget);
+  filterLayout->addWidget(m_searchBox);
+  filterLayout->addWidget(m_levelCombo);
+  m_cards["filter"] = wrapInCard(filterWidget, tr("过滤"));
+}
+
+QWidget *EnhancedLogPanel::wrapInCard(QWidget *widget, const QString &title) {
+  auto card = new QWidget;
+  card->setProperty("class", "card");
+
+  auto layout = new QVBoxLayout(card);
+  layout->setContentsMargins(12, 12, 12, 12);
+
+  auto header = new QLabel(title);
+  header->setProperty("class", "card-header");
+
+  layout->addWidget(header);
+  layout->addWidget(widget);
+
+  return card;
+}
+
+void EnhancedLogPanel::setupResponsiveToolbar() {
+  auto toolbar = new QWidget;
+  auto toolbarLayout = new QHBoxLayout(toolbar);
+  toolbarLayout->setContentsMargins(0, 0, 0, 0);
+  toolbarLayout->setSpacing(8);
+
+  // 添加弹性占位
+  toolbarLayout->addStretch();
+
+  // 工具按钮使用 QToolButton
+  auto addToolButton = [&](const QString &iconName, const QString &text) {
+    auto btn = new QPushButton;
+    btn->setIcon(QIcon::fromTheme(iconName));
+    btn->setToolTip(text);
+    btn->setIconSize(QSize(20, 20));
+    toolbarLayout->addWidget(btn);
+    return btn;
+  };
+
+  // 修改变量声明类型为 QToolButton*
+  m_exportBtn = addToolButton("document-save", tr("导出"));
+  m_clearBtn = addToolButton("edit-clear", tr("清除"));
+  m_settingsBtn = addToolButton("configure", tr("设置"));
+  m_themeBtn = addToolButton("preferences-desktop-theme", tr("主题"));
+
+  m_containerLayout->addWidget(toolbar);
+}
+
+void EnhancedLogPanel::setupFlexibleLayout() {
+  // 使用 resizeEvent 代替不存在的 resized 信号
+  installEventFilter(this);
+}
+
+bool EnhancedLogPanel::eventFilter(QObject *obj, QEvent *event) {
+  if (event->type() == QEvent::Resize) {
+    bool shouldBeCompact = width() < 800;
+    if (m_isCompactMode != shouldBeCompact) {
+      updateLayoutMode(shouldBeCompact);
+    }
+  }
+  return QWidget::eventFilter(obj, event);
+}
+
+void EnhancedLogPanel::updateLayoutMode(bool isCompact) {
+  m_isCompactMode = isCompact;
+
+  if (isCompact) {
+    // 垂直布局模式
+    for (auto card : m_cards) {
+      card->setMaximumWidth(QWIDGETSIZE_MAX);
+    }
+    // 调整工具栏为垂直布局
+  } else {
+    // 水平布局模式
+    for (auto card : m_cards) {
+      card->setMaximumWidth(300);
+    }
+    // 调整工具栏为水平布局
+  }
+}
+
+void EnhancedLogPanel::applyModernStyle(QWidget *widget) {
+  QString style = R"(
+    .card {
+      background: white;
+      border-radius: 8px;
+      border: 1px solid #e0e0e0;
+    }
+    
+    .card-header {
+      font-size: 16px;
+      font-weight: bold;
+      color: #333;
+      padding-bottom: 8px;
+    }
+    
+    QToolButton {
+      border: none;
+      border-radius: 4px;
+      padding: 4px;
+      background: transparent;
+    }
+    
+    QToolButton:hover {
+      background: #f0f0f0;
+    }
+    
+    QToolButton:pressed {
+      background: #e0e0e0;
+    }
+    
+    QLineEdit, QComboBox {
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 6px;
+    }
+    
+    QLineEdit:focus, QComboBox:focus {
+      border-color: #2196F3;
+    }
+    
+    QTableView {
+      border: none;
+      border-radius: 4px;
+      background: white;
+    }
+    
+    QTableView::item:selected {
+      background: #e3f2fd;
+      color: #1976D2;
+    }
+  )";
+
+  widget->setStyleSheet(style);
+}
+
+void EnhancedLogPanel::setupContainers() {
+  // 日志区域容器
+  auto logContainer = new QWidget(this);
+  auto logLayout = new QVBoxLayout(logContainer);
+  logLayout->setContentsMargins(0, 0, 0, 0);
+  logLayout->addWidget(m_logTable);
+  m_containers["log"] = logContainer;
+
+  // 分析区域容器
+  auto analysisContainer = new QWidget(this);
+  auto analysisLayout = new QVBoxLayout(analysisContainer);
+  analysisLayout->setContentsMargins(0, 0, 0, 0);
+  analysisLayout->addWidget(m_analysisTabWidget);
+  m_containers["analysis"] = analysisContainer;
+
+  // 搜索和过滤容器
+  auto filterContainer = new QWidget(this);
+  auto filterLayout = new QVBoxLayout(filterContainer);
+  filterLayout->setContentsMargins(0, 0, 0, 0);
+  filterLayout->addWidget(m_filterWidget);
+  m_containers["filter"] = filterContainer;
+}
+
+void EnhancedLogPanel::setupSplitters() {
+  // 垂直分割器
   m_verticalSplitter = new QSplitter(Qt::Vertical, this);
+  m_verticalSplitter->addWidget(m_containers["log"]);
+  m_verticalSplitter->addWidget(m_containers["analysis"]);
+  m_verticalSplitter->setStretchFactor(0, 3);
+  m_verticalSplitter->setStretchFactor(1, 1);
   m_verticalSplitter->setChildrenCollapsible(false);
 
-  // 内容区域
-  m_contentStack = new QStackedWidget(this);
-  auto *logView = setupLogView();
-  auto *analysisView = setupAnalysisPanel();
-  m_contentStack->addWidget(logView);
-  m_contentStack->addWidget(analysisView);
+  // 水平分割器
+  auto horizontalSplitter = new QSplitter(Qt::Horizontal, this);
+  horizontalSplitter->addWidget(m_containers["filter"]);
+  horizontalSplitter->addWidget(m_verticalSplitter);
+  horizontalSplitter->setStretchFactor(0, 1);
+  horizontalSplitter->setStretchFactor(1, 4);
+  horizontalSplitter->setChildrenCollapsible(false);
 
-  // 设置停靠窗口
-  setupDockWidgets();
+  m_contentLayout->addWidget(horizontalSplitter);
+}
 
-  mainLayout->addWidget(m_filterToolbar);
-  mainLayout->addWidget(m_verticalSplitter);
+void EnhancedLogPanel::createResponsiveLayout() {
+  // Connect resize event to adjust layout
+  auto resizeEventFilter = new QObject(this);
+  resizeEventFilter->installEventFilter(this);
+  connect(resizeEventFilter, &QObject::eventFilter, this,
+          [this](QObject *obj, QEvent *event) {
+            if (event->type() == QEvent::Resize) {
+              adjustLayoutForSize(static_cast<QResizeEvent *>(event)->size());
+            }
+            return false;
+          });
+}
 
-  // 恢复上次布局状态
-  restoreState();
+void EnhancedLogPanel::adjustLayoutForSize(const QSize &size) {
+  bool shouldBeCompact = size.width() < 800;
+  if (m_isCompactMode != shouldBeCompact) {
+    m_isCompactMode = shouldBeCompact;
 
-  // 设置快捷键
-  setupShortcuts();
+    if (m_isCompactMode) {
+      // 压缩模式：工具栏垂直排列
+      m_toolbarLayout->setDirection(QBoxLayout::TopToBottom);
+      m_filterWidget->setMaximumWidth(150);
+    } else {
+      // 正常模式：工具栏水平排列
+      m_toolbarLayout->setDirection(QBoxLayout::LeftToRight);
+      m_filterWidget->setMaximumWidth(QWIDGETSIZE_MAX);
+    }
+
+    // 更新停靠窗口状态
+    for (auto dock : m_dockWidgets) {
+      if (m_isCompactMode) {
+        dock->setFloating(true);
+      }
+    }
+  }
+}
+
+void EnhancedLogPanel::applyModernStyle() {
+  QString style = R"(
+    QWidget {
+      font-family: "Segoe UI", "Microsoft YaHei";
+      font-size: 13px;
+    }
+    QToolBar {
+      border: none;
+      spacing: 5px;
+      background: transparent;
+    }
+    QPushButton {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      background-color: #f0f0f0;
+      min-width: 80px;
+    }
+    QPushButton:hover {
+      background-color: #e0e0e0;
+    }
+    QPushButton:pressed {
+      background-color: #d0d0d0;
+    }
+    QLineEdit, QComboBox {
+      padding: 6px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: white;
+    }
+    QLineEdit:focus, QComboBox:focus {
+      border-color: #0078d4;
+    }
+    QTableView {
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: white;
+      gridline-color: #f0f0f0;
+    }
+    QTableView::item:selected {
+      background: #e5f3ff;
+    }
+    QSplitter::handle {
+      background: #f0f0f0;
+    }
+    QSplitter::handle:hover {
+      background: #e0e0e0;
+    }
+    QDockWidget {
+      border: 1px solid #ddd;
+      border-radius: 4px;
+    }
+    QDockWidget::title {
+      padding: 6px;
+      background: #f8f9fa;
+    }
+  )";
+
+  setStyleSheet(style);
 }
 
 void EnhancedLogPanel::setupSearchWidget() {
@@ -153,11 +453,11 @@ void EnhancedLogPanel::setupShortcuts() {
   connect(m_findShortcut, &QShortcut::activated, this,
           &EnhancedLogPanel::handleSearchShortcut);
 
-  // 添加其他快捷键
-  new QShortcut(QKeySequence(Qt::CTRL + Qt::Key_E), this,
+  // 使用 operator| 替代已弃用的 operator+
+  new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_E), this,
                 [this] { m_exportBtn->click(); });
 
-  new QShortcut(QKeySequence(Qt::CTRL + Qt::Key_R), this,
+  new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_R), this,
                 [this] { showAnalysisResults(); });
 }
 
@@ -238,32 +538,6 @@ void EnhancedLogPanel::setupCharts() {
   m_chartView = new QChartView(m_chartModel->chart(), this);
   m_chartView->setRenderHint(QPainter::Antialiasing);
   m_chartView->setMinimumHeight(150);
-}
-
-void EnhancedLogPanel::applyModernStyle() {
-  QString style = R"(
-        QWidget {
-            font-family: "Segoe UI", "Microsoft YaHei";
-        }
-        QPushButton {
-            padding: 5px 15px;
-            border-radius: 4px;
-            background-color: #f0f0f0;
-        }
-        QPushButton:hover {
-            background-color: #e0e0e0;
-        }
-        QLineEdit {
-            padding: 5px;
-            border-radius: 4px;
-            border: 1px solid #ccc;
-        }
-        QTableView {
-            border: none;
-            gridline-color: #ddd;
-        }
-    )";
-  setStyleSheet(style);
 }
 
 void EnhancedLogPanel::toggleTheme() {
@@ -380,7 +654,7 @@ bool EnhancedLogPanel::compressAndSave(const QVector<QString> &logs,
   struct GzFileCloser {
     void operator()(gzFile f) { gzclose(f); }
   };
-  std::unique_ptr<void, GzFileCloser> closer(file);
+  std::unique_ptr<gzFile_s, GzFileCloser> closer(file);
 
   try {
     for (const auto &log : logs) {
@@ -745,8 +1019,6 @@ void EnhancedLogPanel::applySettings(
   m_logTable->viewport()->update();
 }
 
-
-
 // LogSettingsDialog implementation
 LogSettingsDialog::LogSettingsDialog(QWidget *parent) : QDialog(parent) {
   setupUI();
@@ -845,5 +1117,71 @@ void LogSettingsDialog::setSettings(const Settings &settings) {
     if (m_colorDialogs.contains(it.key())) {
       m_colorDialogs[it.key()]->setCurrentColor(it.value());
     }
+  }
+}
+
+void EnhancedLogPanel::updateAnalysisPanel(const LogAnalyzer::Statistics &stats,
+                                           QChart *chart) {
+  // 更新统计信息标签
+  QString statsText = tr("统计信息:\n");
+  statsText += tr("总日志数: %1\n").arg(stats.totalLogs);
+  statsText += tr("错误数: %1\n").arg(stats.levelCounts.value("ERROR", 0));
+  statsText += tr("警告数: %1\n").arg(stats.levelCounts.value("WARNING", 0));
+  statsText += tr("信息数: %1\n").arg(stats.levelCounts.value("INFO", 0));
+  statsText += tr("调试数: %1\n").arg(stats.levelCounts.value("DEBUG", 0));
+
+  // 计算每小时平均日志数
+  double logsPerHour = 0.0;
+  if (!stats.timeDistribution.isEmpty()) {
+    int totalLogs = 0;
+    for (auto count : stats.timeDistribution.values()) {
+      totalLogs += count;
+    }
+    double hours = stats.timeDistribution.size();
+    if (hours > 0) {
+      logsPerHour = totalLogs / hours;
+    }
+  }
+  statsText += tr("平均每小时日志数: %1").arg(logsPerHour, 0, 'f', 2);
+
+  // 更新统计标签
+  if (auto statsLabel = m_analysisDock->findChild<QLabel *>("statsLabel")) {
+    statsLabel->setText(statsText);
+  }
+
+  // 更新图表
+  if (chart && m_analysisTabWidget) {
+    // 移除旧图表
+    if (auto oldChartView = m_analysisTabWidget->findChild<QChartView *>()) {
+      oldChartView->deleteLater();
+    }
+
+    // 添加新图表
+    auto chartView = new QChartView(chart);
+    chartView->setRenderHint(QPainter::Antialiasing);
+    chartView->chart()->setTheme(m_isDarkTheme ? QChart::ChartThemeDark
+                                               : QChart::ChartThemeLight);
+
+    // 设置图表外观
+    chart->setAnimationOptions(QChart::SeriesAnimations);
+    chart->legend()->setVisible(true);
+    chart->legend()->setAlignment(Qt::AlignBottom);
+
+    // 替换或添加图表页
+    int chartTabIndex = m_analysisTabWidget->indexOf(
+        m_analysisTabWidget->findChild<QChartView *>());
+    if (chartTabIndex != -1) {
+      m_analysisTabWidget->removeTab(chartTabIndex);
+    }
+    m_analysisTabWidget->addTab(chartView, tr("趋势图"));
+  }
+
+  // 确保分析面板可见
+  m_analysisDock->setVisible(true);
+  m_isAnalysisPanelVisible = true;
+
+  // 更新状态栏
+  if (m_statusBar) {
+    m_statusBar->showMessage(tr("分析已更新"), 3000);
   }
 }

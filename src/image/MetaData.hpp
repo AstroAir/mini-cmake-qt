@@ -82,6 +82,31 @@ struct ImageMetadata {
    * @brief Clears all custom tags from the metadata.
    */
   void clear_tags() noexcept { custom_data.clear(); }
+
+  json to_json() const {
+    json j;
+    j["path"] = path.string();
+    j["size"] = {size.width, size.height};
+    j["channels"] = channels;
+    j["depth"] = depth;
+    j["color_space"] = color_space;
+    j["timestamp"] = std::chrono::system_clock::to_time_t(timestamp);
+    j["custom_data"] = custom_data;
+    return j;
+  }
+
+  static ImageMetadata from_json(const json &j) {
+    ImageMetadata meta;
+    meta.path = j.at("path").get<std::string>();
+    meta.size = {j["size"][0], j["size"][1]};
+    meta.channels = j.at("channels").get<int>();
+    meta.depth = j.at("depth").get<int>();
+    meta.color_space = j.at("color_space").get<std::string>();
+    meta.timestamp =
+        std::chrono::system_clock::from_time_t(j.at("timestamp").get<time_t>());
+    meta.custom_data = j.at("custom_data");
+    return meta;
+  }
 };
 
 /**
@@ -183,8 +208,9 @@ public:
    * @param output_path 输出路径（可选，默认使用meta.path对应的JSON文件）
    * @return 保存是否成功
    */
-  bool save_metadata(const ImageMetadata &meta,
-                      const std::optional<fs::path> &output_path = std::nullopt) noexcept;
+  bool save_metadata(
+      const ImageMetadata &meta,
+      const std::optional<fs::path> &output_path = std::nullopt) noexcept;
 
 private:
   std::shared_ptr<spdlog::logger> logger; ///< Logger for logging messages.

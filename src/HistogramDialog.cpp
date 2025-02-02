@@ -170,37 +170,87 @@ void HistogramDialog::changeBinCount(int bins) {
 }
 
 void HistogramDialog::setupUI() {
-  // 创建工具栏
-  QToolBar *toolBar = new QToolBar(this);
+    setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint | Qt::WindowMinimizeButtonHint);
+    
+    // 创建主布局
+    auto mainLayout = new QVBoxLayout(this);
+    mainLayout->setContentsMargins(10, 10, 10, 10);
+    mainLayout->setSpacing(10);
 
-  // 添加控件
-  logScaleCheckBox = new QCheckBox("对数刻度", this);
-  binCountSpinner = new QSpinBox(this);
-  binCountSpinner->setRange(8, 512);
-  binCountSpinner->setValue(256);
-  binCountSpinner->setSingleStep(8);
+    // 创建工具栏
+    auto toolBar = new QWidget(this);
+    auto toolBarLayout = new QHBoxLayout(toolBar);
+    toolBarLayout->setContentsMargins(0, 0, 0, 0);
+    toolBarLayout->setSpacing(8);
 
-  exportButton = new QPushButton("导出数据", this);
-  saveImageButton = new QPushButton("保存图像", this);
+    // 优化工具栏控件样式
+    const QString buttonStyle = R"(
+        QPushButton {
+            background-color: #f0f0f0;
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            min-width: 80px;
+            color: #333333;
+        }
+        QPushButton:hover {
+            background-color: #e0e0e0;
+        }
+        QPushButton:pressed {
+            background-color: #d0d0d0;
+        }
+    )";
 
-  toolBar->addWidget(new QLabel("直方图区间:", this));
-  toolBar->addWidget(binCountSpinner);
-  toolBar->addWidget(logScaleCheckBox);
-  toolBar->addWidget(exportButton);
-  toolBar->addWidget(saveImageButton);
+    logScaleCheckBox = new QCheckBox("对数刻度", this);
+    logScaleCheckBox->setStyleSheet("QCheckBox { padding: 4px; }");
 
-  // 设置布局
-  layout.insertWidget(0, toolBar);
+    binCountSpinner = new QSpinBox(this);
+    binCountSpinner->setRange(8, 512);
+    binCountSpinner->setValue(256);
+    binCountSpinner->setSingleStep(8);
+    binCountSpinner->setStyleSheet(R"(
+        QSpinBox {
+            padding: 4px;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+        }
+    )");
 
-  // 连接信号
-  connect(logScaleCheckBox, &QCheckBox::toggled, this,
-          &HistogramDialog::toggleLogScale);
-  connect(binCountSpinner, QOverload<int>::of(&QSpinBox::valueChanged), this,
-          &HistogramDialog::changeBinCount);
-  connect(exportButton, &QPushButton::clicked, this,
-          &HistogramDialog::exportHistogramData);
-  connect(saveImageButton, &QPushButton::clicked, this,
-          &HistogramDialog::saveHistogramAsImage);
+    exportButton = new QPushButton("导出数据", this);
+    saveImageButton = new QPushButton("保存图像", this);
+    exportButton->setStyleSheet(buttonStyle);
+    saveImageButton->setStyleSheet(buttonStyle);
+
+    toolBarLayout->addWidget(new QLabel("直方图区间:", this));
+    toolBarLayout->addWidget(binCountSpinner);
+    toolBarLayout->addWidget(logScaleCheckBox);
+    toolBarLayout->addStretch();
+    toolBarLayout->addWidget(exportButton);
+    toolBarLayout->addWidget(saveImageButton);
+
+    // 优化图表视图
+    chartView->setRenderHint(QPainter::Antialiasing);
+    chartView->setStyleSheet(R"(
+        QChartView {
+            background-color: white;
+            border: 1px solid #cccccc;
+            border-radius: 4px;
+        }
+    )");
+
+    // 组装布局
+    mainLayout->addWidget(toolBar);
+    mainLayout->addWidget(chartView, 1);  // 添加拉伸因子
+
+    // 连接信号
+    connect(logScaleCheckBox, &QCheckBox::toggled, this,
+            &HistogramDialog::toggleLogScale);
+    connect(binCountSpinner, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            &HistogramDialog::changeBinCount);
+    connect(exportButton, &QPushButton::clicked, this,
+            &HistogramDialog::exportHistogramData);
+    connect(saveImageButton, &QPushButton::clicked, this,
+            &HistogramDialog::saveHistogramAsImage);
 }
 
 void HistogramDialog::calculateStatistics() {

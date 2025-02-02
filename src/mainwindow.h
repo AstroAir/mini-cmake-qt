@@ -17,10 +17,7 @@
 #include <QTreeView>
 #include <QVBoxLayout>
 
-#include <chrono>
 #include <filesystem>
-#include <sstream>
-#include <unordered_set>
 
 #include "ImagePreviewDialog.h"
 
@@ -63,6 +60,8 @@ private slots:
   void deleteSelectedFile();
   void renameSelectedFile();
   void showFileProperties();
+  void createThumbnailGrid();    // 新增：自动创建网格模式缩略图
+  void addImageOverlay(const QPixmap &overlay);  // 新增：叠加图像（用于功能扩展）
 
 private:
   QListView *listView;
@@ -103,6 +102,9 @@ private:
 
   // 添加新的成员变量
   ImagePreviewDialog *imagePreviewDialog;
+  QVector<QString> imageList;  // 当前目录下的所有图片文件列表
+  void updateImageList();      // 更新图片列表
+  void filterImageFiles(const QDir &dir); // 过滤图片文件
 
   // 添加新的成员变量
   QVector<QString> currentImageList; // 当前文件夹中的所有图片

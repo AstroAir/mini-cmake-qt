@@ -117,6 +117,20 @@ private:
   void saveHighlightRules();
   void loadHighlightRules();
   void applyHighlight(const QString &pattern);
+  void setupLayout();
+  void createResponsiveLayout();
+  void adjustLayoutForSize(const QSize &size);
+  void setupSplitters();
+  void setupContainers();
+  // 新增布局相关方法
+  void setupModernLayout();
+  void setupFlexibleLayout();
+  void setupResponsiveToolbar();
+  void createModernContainers();
+  void updateLayoutMode(bool isCompact);
+  QWidget* wrapInCard(QWidget* widget, const QString& title);
+  void applyModernStyle(QWidget* widget);
+  bool eventFilter(QObject *obj, QEvent *event);
 
   QTableView *m_logTable;
   QDateTimeEdit *m_startDate;
@@ -164,6 +178,17 @@ private:
   QListWidget *m_highlightList;
   QMap<QString, QString> m_savedHighlights;
   QMenu *m_highlightMenu;
+  QWidget *m_centralWidget;
+  QVBoxLayout *m_mainLayout;
+  QHBoxLayout *m_toolbarLayout;
+  QVBoxLayout *m_contentLayout;
+  QHash<QString, QWidget*> m_containers;
+  bool m_isCompactMode = false;
+  // 新增布局相关成员
+  QWidget* m_mainContainer;
+  QVBoxLayout* m_containerLayout;
+  QStackedWidget* m_viewStack;
+  QMap<QString, QWidget*> m_cards;
 };
 
 class LogItemDelegate : public QStyledItemDelegate {

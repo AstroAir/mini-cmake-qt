@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <atomic>
 #include <execution>
+#include <queue>
 #include <ranges>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -270,59 +271,150 @@ public:
 
 private:
   std::vector<QRect> findDifferenceRegions(const QImage &diffImg) const {
-    // Same region-detection logic as in PixelDifferenceStrategy
     std::vector<QRect> regions;
     QImage visited(diffImg.size(), QImage::Format_Mono);
     visited.fill(0);
 
-    const int threshold = 32;
+    // 动态阈值计算
+    const int baseThreshold = 32;
+    double meanDiff = 0;
 
-    for (int y = 0; y < diffImg.height(); ++y) {
-      for (int x = 0; x < diffImg.width(); ++x) {
-        if (qGray(diffImg.pixel(x, y)) > threshold &&
-            !visited.pixelIndex(x, y)) {
-          QRect region;
-          floodFill(diffImg, visited, x, y, threshold, region);
-          regions.push_back(region);
+#pragma omp parallel
+    {
+#pragma omp for reduction(+ : meanDiff) schedule(dynamic)
+      for (int y = 0; y < diffImg.height(); ++y) {
+        for (int x = 0; x < diffImg.width(); ++x) {
+          QColor c(diffImg.pixel(x, y));
+          meanDiff += qGray(c.rgb());
         }
       }
     }
-    return regions;
+
+    meanDiff /= (diffImg.width() * diffImg.height());
+    const int threshold =
+        std::max(baseThreshold, static_cast<int>(meanDiff * 0.15));
+
+    std::vector<QRect> localRegions;
+#pragma omp parallel
+    {
+      std::vector<QRect> threadRegions;
+#pragma omp for schedule(dynamic)
+      for (int y = 0; y < diffImg.height(); ++y) {
+        for (int x = 0; x < diffImg.width(); ++x) {
+          QColor c(diffImg.pixel(x, y));
+          if (qGray(c.rgb()) > threshold && !visited.pixelIndex(x, y)) {
+            QRect region;
+            floodFill(diffImg, visited, x, y, threshold, region);
+#pragma omp critical
+            {
+              threadRegions.push_back(region);
+            }
+          }
+        }
+      }
+
+#pragma omp critical
+      {
+        localRegions.insert(localRegions.end(), threadRegions.begin(),
+                            threadRegions.end());
+      }
+    }
+
+    // 合并相近区域
+    return mergeCloseRegions(localRegions, diffImg.width() * 0.05);
   }
 
   void floodFill(const QImage &img, QImage &visited, int x, int y,
                  int threshold, QRect &region) const {
-    const std::array<QPoint, 4> directions = {QPoint{1, 0}, QPoint{-1, 0},
-                                              QPoint{0, 1}, QPoint{0, -1}};
-    std::stack<QPoint> stack;
-    stack.emplace(x, y);
+    const std::array<QPoint, 8> directions = {
+        QPoint{1, 0}, QPoint{-1, 0},  QPoint{0, 1},  QPoint{0, -1},
+        QPoint{1, 1}, QPoint{-1, -1}, QPoint{1, -1}, QPoint{-1, 1}};
+
+    constexpr int CHUNK_SIZE = 64;
+    std::queue<QPoint> queue;
+    queue.emplace(x, y);
     visited.setPixel(x, y, 1);
+
+    std::vector<QPoint> points;
+    points.reserve(CHUNK_SIZE);
 
     int minX = x, maxX = x;
     int minY = y, maxY = y;
 
-    while (!stack.empty()) {
-      auto [cx, cy] = stack.top();
-      stack.pop();
+    while (!queue.empty()) {
+      points.clear();
+      for (int i = 0; i < CHUNK_SIZE && !queue.empty(); ++i) {
+        points.push_back(queue.front());
+        queue.pop();
+      }
 
-      minX = std::min(minX, cx);
-      maxX = std::max(maxX, cx);
-      minY = std::min(minY, cy);
-      maxY = std::max(maxY, cy);
+#pragma omp parallel for schedule(dynamic)
+      for (int i = 0; i < points.size(); ++i) {
+        const auto [cx, cy] = points[i];
+#pragma omp critical
+        {
+          minX = std::min(minX, cx);
+          maxX = std::max(maxX, cx);
+          minY = std::min(minY, cy);
+          maxY = std::max(maxY, cy);
+        }
 
-      for (const auto &[dx, dy] : directions) {
-        const int nx = cx + dx;
-        const int ny = cy + dy;
-        if (nx >= 0 && nx < img.width() && ny >= 0 && ny < img.height() &&
-            !visited.pixelIndex(nx, ny) &&
-            qGray(img.pixel(nx, ny)) > threshold) {
-          visited.setPixel(nx, ny, 1);
-          stack.emplace(nx, ny);
+        for (const auto &[dx, dy] : directions) {
+          const int nx = cx + dx;
+          const int ny = cy + dy;
+          if (nx >= 0 && nx < img.width() && ny >= 0 && ny < img.height()) {
+            bool needVisit = false;
+#pragma omp critical
+            {
+              if (!visited.pixelIndex(nx, ny)) {
+                QColor c(img.pixel(nx, ny));
+                if (qGray(c.rgb()) > threshold) {
+                  visited.setPixel(nx, ny, 1);
+                  needVisit = true;
+                }
+              }
+            }
+            if (needVisit) {
+#pragma omp critical
+              {
+                queue.emplace(nx, ny);
+              }
+            }
+          }
         }
       }
     }
 
     region = QRect(QPoint(minX, minY), QPoint(maxX, maxY));
+  }
+
+  std::vector<QRect> mergeCloseRegions(const std::vector<QRect> &regions,
+                                       int maxDist) const {
+    if (regions.empty())
+      return regions;
+
+    std::vector<QRect> merged = {regions[0]};
+
+    for (size_t i = 1; i < regions.size(); ++i) {
+      bool wasMerged = false;
+      for (auto &mergedRegion : merged) {
+        if (isClose(regions[i], mergedRegion, maxDist)) {
+          mergedRegion = mergedRegion.united(regions[i]);
+          wasMerged = true;
+          break;
+        }
+      }
+      if (!wasMerged) {
+        merged.push_back(regions[i]);
+      }
+    }
+
+    return merged;
+  }
+
+  bool isClose(const QRect &r1, const QRect &r2, int maxDist) const {
+    return r1.intersected(r2.adjusted(-maxDist, -maxDist, maxDist, maxDist))
+        .isValid();
   }
 };
 } // namespace ImageComparison

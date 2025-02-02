@@ -2,7 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
+#include <omp.h>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc.hpp>
@@ -12,10 +12,7 @@
 #include <spdlog/spdlog.h>
 #include <vector>
 
-
 namespace GaussianFit {
-namespace views = std::ranges::views;
-
 namespace detail {
 template <typename T>
 concept Arithmetic = std::is_arithmetic_v<T>;
@@ -81,30 +78,32 @@ struct Statistics {
   double stddev;
 };
 
+// 修改 calculate_statistics 使用 OpenMP 并行归约计算 mean 和 variance
 Statistics calculate_statistics(std::span<const DataPoint> points) {
   if (points.empty())
     return {};
 
-  auto [min_it, max_it] =
-      std::minmax_element(points.begin(), points.end(),
-                          [](auto &&a, auto &&b) { return a.y < b.y; });
+  const std::size_t n = points.size();
+  double sum_x = 0.0;
+#pragma omp parallel for reduction(+ : sum_x)
+  for (std::size_t i = 0; i < n; ++i) {
+    sum_x += points[i].x;
+  }
+  const double mean_x = sum_x / n;
 
-  const double mean_x =
-      std::accumulate(points.begin(), points.end(), 0.0,
-                      [](double sum, auto &&p) { return sum + p.x; }) /
-      points.size();
+  double variance = 0.0;
+#pragma omp parallel for reduction(+ : variance)
+  for (std::size_t i = 0; i < n; ++i) {
+    const double diff = points[i].x - mean_x;
+    variance += diff * diff;
+  }
+  variance /= (n - 1);
 
-  const double variance = std::accumulate(points.begin(), points.end(), 0.0,
-                                          [mean_x](double sum, auto &&p) {
-                                            const double diff = p.x - mean_x;
-                                            return sum + diff * diff;
-                                          }) /
-                          (points.size() - 1);
+  auto [min_it, max_it] = std::minmax_element(
+      points.begin(), points.end(),
+      [](const DataPoint &a, const DataPoint &b) { return a.y < b.y; });
 
-  return {.min = min_it->y,
-          .max = max_it->y,
-          .mean = mean_x,
-          .stddev = std::sqrt(variance)};
+  return Statistics{min_it->y, max_it->y, mean_x, std::sqrt(variance)};
 }
 
 #ifdef __AVX2__
@@ -112,8 +111,8 @@ inline __m256d gaussian_avx(__m256d x, __m256d center, __m256d width,
                             __m256d base, __m256d peak) {
   const __m256d t = _mm256_div_pd(_mm256_sub_pd(x, center), width);
   const __m256d neg_half = _mm256_set1_pd(-0.5);
-  const __m256d exp_term = _mm256_exp_pd(_mm256_mul_pd(neg_half, 
-                          _mm256_mul_pd(t, t)));
+  const __m256d exp_term =
+      _mm256_exp_pd(_mm256_mul_pd(neg_half, _mm256_mul_pd(t, t)));
   return _mm256_add_pd(base, _mm256_mul_pd(peak, exp_term));
 }
 #endif
@@ -215,26 +214,28 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
 
 double GaussianFitter::evaluate(const GaussianParams &params,
                                 double x) noexcept {
-  #ifdef __AVX2__
+#ifdef __AVX2__
   if (std::abs(params.width) > detail::EPSILON) {
     __m256d x_vec = _mm256_set1_pd(x);
     __m256d center_vec = _mm256_set1_pd(params.center);
     __m256d width_vec = _mm256_set1_pd(params.width);
     __m256d base_vec = _mm256_set1_pd(params.base);
     __m256d peak_vec = _mm256_set1_pd(params.peak);
-    
-    __m256d result = detail::gaussian_avx(x_vec, center_vec, width_vec, 
-                                          base_vec, peak_vec);
+
+    __m256d result =
+        detail::gaussian_avx(x_vec, center_vec, width_vec, base_vec, peak_vec);
     double results[4];
     _mm256_store_pd(results, result);
     return results[0];
   }
-  #endif
+#endif
 
   const double t = detail::safe_division(x - params.center, params.width);
   return params.base + params.peak * std::exp(-0.5 * t * t);
 }
 
+// ----------------------------------------------------------------
+// 修改: 优化 visualize 中计算拟合曲线点的过程
 void GaussianFitter::visualize(std::span<const DataPoint> points,
                                const GaussianParams &params,
                                std::string_view window_name) {
@@ -246,28 +247,32 @@ void GaussianFitter::visualize(std::span<const DataPoint> points,
 
   cv::Mat plot(plot_height, plot_width, CV_8UC3, background_color);
 
-  const auto [x_min, x_max] =
-      std::minmax_element(points.begin(), points.end(),
-                          [](auto &&a, auto &&b) { return a.x < b.x; });
+  // 计算 x 轴范围
+  auto [x_min_it, x_max_it] = std::minmax_element(
+      points.begin(), points.end(),
+      [](const DataPoint &a, const DataPoint &b) { return a.x < b.x; });
+  const double x_min_val = x_min_it->x;
+  const double x_max_val = x_max_it->x;
 
   const double y_scale = detail::safe_division(plot_height * 0.9, params.peak);
 
-  std::vector<cv::Point> curve_points;
-  for (const auto px : views::iota(0, plot_width)) {
-    const double x =
-        detail::safe_division(px * (x_max->x - x_min->x), plot_width) +
-        x_min->x;
-    const double y = evaluate(params, x);
-    const int py = static_cast<int>((params.base + params.peak - y) * y_scale);
-    curve_points.emplace_back(px, std::clamp(py, 0, plot_height - 1));
+  // 并行计算曲线点，预分配 vector 大小
+  std::vector<cv::Point> curve_points(plot_width);
+#pragma omp parallel for
+  for (int px = 0; px < plot_width; ++px) {
+    double x = detail::safe_division(px * (x_max_val - x_min_val), plot_width) +
+               x_min_val;
+    double y = evaluate(params, x);
+    int py = static_cast<int>((params.base + params.peak - y) * y_scale);
+    curve_points[px] = cv::Point(px, std::clamp(py, 0, plot_height - 1));
   }
-  cv::polylines(plot, curve_points, false, curve_color, 2);
+  cv::polylines(plot, curve_points, false, curve_color, 2, cv::LINE_AA);
 
+  // 绘制数据点 (顺序执行)
   for (const auto &p : points) {
-    const int px = static_cast<int>(detail::safe_division(
-        (p.x - x_min->x) * plot_width, x_max->x - x_min->x));
-    const int py =
-        static_cast<int>((params.base + params.peak - p.y) * y_scale);
+    int px = static_cast<int>(detail::safe_division(
+        (p.x - x_min_val) * plot_width, (x_max_val - x_min_val)));
+    int py = static_cast<int>((params.base + params.peak - p.y) * y_scale);
     cv::circle(plot, {px, py}, 4, data_point_color, -1);
   }
 
@@ -276,21 +281,25 @@ void GaussianFitter::visualize(std::span<const DataPoint> points,
   cv::waitKey(1);
 }
 
+// ----------------------------------------------------------------
+// 修改: 将 compute_residuals 并行化
 void GaussianFitter::compute_residuals(const cv::Mat &params,
                                        std::span<const DataPoint> points,
                                        cv::Mat &residuals) {
   const GaussianParams p{params.at<double>(0), params.at<double>(1),
                          params.at<double>(2), params.at<double>(3)};
-
   if (!p.valid()) {
     throw std::invalid_argument("Invalid parameters in residual calculation");
   }
-
-  for (const auto &&[i, point] : detail::enumerate(points)) {
-    residuals.at<double>(i) = point.y - evaluate(p, point.x);
+  const std::size_t n = points.size();
+#pragma omp parallel for
+  for (std::size_t i = 0; i < n; ++i) {
+    residuals.at<double>(i) = points[i].y - evaluate(p, points[i].x);
   }
 }
 
+// ----------------------------------------------------------------
+// 修改: 将 compute_jacobian 并行化
 void GaussianFitter::compute_jacobian(const cv::Mat &params,
                                       std::span<const DataPoint> points,
                                       cv::Mat &jacobian) {
@@ -303,8 +312,10 @@ void GaussianFitter::compute_jacobian(const cv::Mat &params,
     throw std::invalid_argument("Invalid width in Jacobian calculation");
   }
 
-  for (const auto &&[i, point] : detail::enumerate(points)) {
-    const double x = point.x;
+  const std::size_t n = points.size();
+#pragma omp parallel for
+  for (std::size_t i = 0; i < n; ++i) {
+    const double x = points[i].x;
     const double delta = x - center;
     const double scaled_delta = detail::safe_division(delta, width);
     const double exp_term = std::exp(-0.5 * scaled_delta * scaled_delta);

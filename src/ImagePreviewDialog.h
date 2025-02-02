@@ -29,6 +29,7 @@ public:
   void showImage(const QString &path);
   void updateImagePreview(const QString &imagePath);
   void updateImagePreview(QLabel *label, const QString &imagePath);
+  void createThumbnailGrid();
 
 public slots:
   void updateMetadata(const ImageMetadata& metadata);

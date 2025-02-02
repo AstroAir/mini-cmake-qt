@@ -203,3 +203,22 @@ void DynamicThreadPool::waitAll() {
     return task_queue_.empty() && (active_workers_.load() == 0);
   });
 }
+
+void DynamicThreadPool::processDelayedTasks() {
+    std::lock_guard delay_lock(delay_mutex_);
+    std::unique_lock queue_lock(queue_mutex_);
+    
+    auto now = std::chrono::steady_clock::now();
+    auto it = delayed_queue_.begin();
+    
+    while (it != delayed_queue_.end()) {
+        if (it->second.enqueue_time <= now) {
+            // 将延迟任务移动到主任务队列
+            task_queue_.push(std::move(it->second));
+            it = delayed_queue_.erase(it);
+            queue_cv_.notify_one();
+        } else {
+            ++it;
+        }
+    }
+}

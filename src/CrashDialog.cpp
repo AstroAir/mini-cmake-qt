@@ -5,25 +5,33 @@
 #include <QClipboard>
 #include <QDateTime>
 #include <QFileDialog>
+#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
+#include <QNetworkDiskCache>
+#include <QNetworkRequest>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
-
+#include <QtConcurrent>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
 #elif defined(Q_OS_LINUX)
 #include <sys/utsname.h>
 #endif
+
+QString CrashDialog::s_reportServerUrl =
+    "https://crash-report.example.com/api/submit";
+QMap<QString, QString> CrashDialog::s_customFields;
 
 CrashDialog::CrashDialog(const QString &log, QWidget *parent)
     : QDialog(parent), m_fullLog(log) {
@@ -33,6 +41,10 @@ CrashDialog::CrashDialog(const QString &log, QWidget *parent)
 
   setupUI();
   m_detailInfo->setPlainText(collectSystemInfo() + "\n\n" + log);
+
+  initializeNetworkManager();
+  setupAutoSave();
+  collectSystemInfoAsync();
 }
 
 void CrashDialog::setupUI() {
@@ -168,18 +180,30 @@ void CrashDialog::onSaveClicked() {
 }
 
 void CrashDialog::onSendReport() {
-  QNetworkAccessManager *mgr = new QNetworkAccessManager(this);
-  QNetworkRequest request(QUrl("https://crash-report.example.com/api/submit"));
+  // 创建一个 QNetworkRequest 对象
+  auto request = QNetworkRequest();
+  request.setUrl(QUrl(s_reportServerUrl));
+  request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
+  request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
-  request.setHeader(QNetworkRequest::ContentTypeHeader, "text/plain");
-  request.setRawHeader("X-App-Version",
-                       QCoreApplication::applicationVersion().toUtf8());
+  QJsonObject reportData;
+  reportData["crash_log"] = m_detailInfo->toPlainText();
+  reportData["app_version"] = QCoreApplication::applicationVersion();
+  reportData["platform"] = QSysInfo::prettyProductName();
+
+  // 添加自定义字段
+  for (auto it = s_customFields.constBegin(); it != s_customFields.constEnd();
+       ++it) {
+    reportData[it.key()] = it.value();
+  }
+
+  QJsonDocument doc(reportData);
 
   m_reportBtn->setEnabled(false);
   m_progressBar->setVisible(true);
 
-  QNetworkReply *reply =
-      mgr->post(request, m_detailInfo->toPlainText().toUtf8());
+  // 发送 POST 请求
+  QNetworkReply *reply = m_networkManager->post(request, doc.toJson());
 
   connect(reply, &QNetworkReply::uploadProgress, this,
           &CrashDialog::onUploadProgress);
@@ -208,4 +232,85 @@ void CrashDialog::onUploadFinished(QNetworkReply *reply) {
         tr("Failed to send report: %1").arg(reply->errorString()));
   }
   reply->deleteLater();
+}
+
+void CrashDialog::initializeNetworkManager() {
+  m_networkManager = new QNetworkAccessManager(this);
+  m_networkManager->setTransferTimeout(30000); // 30秒超时
+
+  // 配置网络缓存
+  auto *cache = new QNetworkDiskCache(this);
+  QString cacheDir =
+      QStandardPaths::writableLocation(QStandardPaths::CacheLocation) +
+      "/network-cache";
+  cache->setCacheDirectory(cacheDir);
+  m_networkManager->setCache(cache);
+}
+
+void CrashDialog::setupAutoSave() {
+  m_autoSaveTimer = new QTimer(this);
+  m_autoSaveTimer->setInterval(60000); // 每分钟
+  connect(m_autoSaveTimer, &QTimer::timeout, this, &CrashDialog::onAutoSave);
+  m_autoSaveTimer->start();
+}
+
+void CrashDialog::collectSystemInfoAsync() {
+  auto future = QtConcurrent::run([this]() { return collectSystemInfo(); });
+
+  auto watcher = new QFutureWatcher<QString>(this);
+  connect(watcher, &QFutureWatcher<QString>::finished, [this, watcher]() {
+    m_detailInfo->setPlainText(watcher->result());
+    watcher->deleteLater();
+  });
+  watcher->setFuture(future);
+}
+
+void CrashDialog::onAutoSave() {
+  QSettings settings;
+  settings.setValue("CrashReport/LastReport", m_detailInfo->toPlainText());
+  settings.setValue("CrashReport/Timestamp", QDateTime::currentDateTime());
+}
+
+void CrashDialog::setReportServer(const QString &url) {
+  s_reportServerUrl = url;
+}
+
+void CrashDialog::setCustomFields(const QMap<QString, QString> &fields) {
+  s_customFields = fields;
+}
+
+void CrashDialog::onSystemInfoUpdate() {
+  // 异步更新系统信息
+  auto future = QtConcurrent::run([this]() { return collectSystemInfo(); });
+
+  auto watcher = new QFutureWatcher<QString>(this);
+  connect(watcher, &QFutureWatcher<QString>::finished, [this, watcher]() {
+    m_detailInfo->setPlainText(watcher->result() + "\n\n" + m_fullLog);
+    watcher->deleteLater();
+  });
+  watcher->setFuture(future);
+}
+
+void CrashDialog::onCheckUpdates() {
+  QNetworkRequest request(QUrl(s_reportServerUrl + "/version"));
+  request.setAttribute(QNetworkRequest::Http2AllowedAttribute, true);
+
+  auto reply = m_networkManager->get(request);
+  connect(reply, &QNetworkReply::finished, [this, reply]() {
+    if (reply->error() == QNetworkReply::NoError) {
+      QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+      QJsonObject obj = doc.object();
+
+      QString latestVersion = obj["latest_version"].toString();
+      QString currentVersion = QCoreApplication::applicationVersion();
+
+      if (latestVersion > currentVersion) {
+        QMessageBox::information(this, tr("Update Available"),
+                                 tr("A new version (%1) is available. Please "
+                                    "update your application.")
+                                     .arg(latestVersion));
+      }
+    }
+    reply->deleteLater();
+  });
 }

@@ -419,3 +419,23 @@ void* JsonModel::MemoryPool::allocate(size_t size) {
     currentIndex += size;
     return ptr;
 }
+
+void JsonModel::NodeCache::add(const std::string& path, Node* node) {
+    if (!node) return;
+    
+    // 检查缓存大小，防止内存占用过大
+    if (cache.size() > 10000) { // 限制缓存条目数
+        cache.clear();
+    }
+    
+    cache[path] = node;
+}
+
+void JsonModel::NodeCache::clear() {
+    cache.clear();
+}
+
+JsonModel::Node* JsonModel::NodeCache::get(const std::string& path) {
+    auto it = cache.find(path);
+    return it != cache.end() ? it->second : nullptr;
+}
