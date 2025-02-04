@@ -430,3 +430,6 @@ void Convolve::MemoryPool::clear() {
   std::lock_guard<std::mutex> lock(pool_mutex_);
   pool_.clear();
 }
+
+std::vector<cv::Mat> Convolve::MemoryPool::pool_;
+std::mutex Convolve::MemoryPool::pool_mutex_;

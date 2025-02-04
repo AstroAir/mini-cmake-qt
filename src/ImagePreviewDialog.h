@@ -1,6 +1,7 @@
 #ifndef IMAGEPREVIEWDIALOG_H
 #define IMAGEPREVIEWDIALOG_H
 
+#include "image/Crop.h"
 #include "image/MetaData.hpp"
 #include "image/StarDetector.hpp"
 #include "HistogramDialog.hpp"
@@ -20,6 +21,8 @@
 #include <QtConcurrent>
 #include <QCache>
 #include <QThreadPool>
+#include <QStatusBar>
+#include <QMovie>
 
 
 class ImagePreviewDialog : public QDialog {
@@ -38,10 +41,17 @@ public slots:
   void applyConvolution();
   void applyDeconvolution();
   void showExifInfo();
+  void cropImage();
+  void flipHorizontal();
+  void flipVertical(); 
+  void resetImage();
 
 protected:
   void keyPressEvent(QKeyEvent *event) override;
   void wheelEvent(QWheelEvent *event) override;
+  void mousePressEvent(QMouseEvent* event) override;
+  void mouseMoveEvent(QMouseEvent* event) override;
+  void mouseReleaseEvent(QMouseEvent* event) override;
 
 private slots:
   void zoomIn();
@@ -68,14 +78,9 @@ private slots:
   void toggleAutoDetection();
   void exportStarData();
   void showHistogram();
-  void applyCustomFilter();
   void applyBatchOperations();
   void showStatistics();
-  void cropImage();
-  void resizeImage();
-  void adjustColors();
-  void applyWatershed();
-  void detectEdges();
+  void showContextMenu(const QPoint &pos);
 
 private:
   QScrollArea *scrollArea;
@@ -87,6 +92,7 @@ private:
   QPushButton *nextButton;
   QToolBar *toolBar;
   QSlider *zoomSlider;
+  QStatusBar *statusBar;
 
   QVector<QString> imageList;
   int currentIndex;
@@ -124,6 +130,9 @@ private:
   void setupConvolutionUI();
   void processConvolution(const ConvolutionConfig& config);
   void processDeconvolution(const DeconvolutionConfig& config);
+  void initLoadingAnimation();
+  void startLoading();
+  void stopLoading();
 
   ExifParser* exifParser;
   std::vector<ExifValue> exifData;
@@ -132,6 +141,7 @@ private:
   QAction* applyDeconvolutionAction;
   QToolBar* convolutionToolBar;
   QToolBar* exifToolBar;
+  QMovie* loadingAnimation;
 
   void setupUI();
   void createToolBar();
@@ -183,6 +193,20 @@ private:
   void applyChainFilters();
   void configureDenoising();
   void configureFilters();
+
+  ImageCropper imageCropper;
+
+  QPointF cropStartPoint;
+  QPointF cropEndPoint;
+  bool isCropping = false;
+  QRubberBand* rubberBand = nullptr;
+  CropStrategy currentCropStrategy;
+
+  void setupCropDialog();
+  void startCrop(const QPoint& pos);
+  void updateCrop(const QPoint& pos);
+  void endCrop(const QPoint& pos);
+  void applyCrop(const CropStrategy& strategy);
 };
 
 #endif // IMAGEPREVIEWDIALOG_H

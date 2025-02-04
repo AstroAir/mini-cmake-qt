@@ -25,6 +25,29 @@ struct HistogramStats {
     double uniformity{0.0};
 };
 
+// 添加异常处理类
+class HistogramException : public std::runtime_error {
+public:
+    explicit HistogramException(const std::string& msg) : std::runtime_error(msg) {}
+};
+
+// 添加错误状态枚举
+enum class HistogramStatus {
+    Success,
+    EmptyImage,
+    InvalidChannel,
+    InvalidSize,
+    ProcessError
+};
+
+// 添加结果包装结构体
+template<typename T>
+struct HistogramResult {
+    T value;
+    HistogramStatus status;
+    std::string message;
+};
+
 auto calculateHist(const cv::Mat &img, const HistogramConfig &config = {})
     -> std::vector<cv::Mat>;
 

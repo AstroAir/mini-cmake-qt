@@ -20,6 +20,8 @@
 #include <filesystem>
 
 #include "ImagePreviewDialog.h"
+#include "utils/ThreadPool.hpp"
+#include <QCache>
 
 namespace fs = std::filesystem;
 
@@ -64,7 +66,7 @@ private slots:
   void addImageOverlay(const QPixmap &overlay);  // 新增：叠加图像（用于功能扩展）
 
 private:
-  QListView *listView;
+  QTreeView *fileView;  // 将 listView 改为 fileView
   QWidget *gridView;
   QGridLayout *gridLayout;
   QPushButton *scanButton;
@@ -123,6 +125,33 @@ private:
   void createContextMenu();
   QString getSelectedFilePath();
   void setupConnections();
+
+  // 新增：线程池和缓存相关成员
+  DynamicThreadPool threadPool;
+  QCache<QString, QPixmap> thumbnailCache;
+  QProgressDialog *progressDialog;
+  int loadingProgress = 0;
+  std::atomic<bool> isLoading{false};
+  
+  void initThreadPool();
+  void loadThumbnail(const QString &path, QPushButton *button);
+  void updateLoadingProgress();
+  void switchToListView();
+  void switchToGridView();
+  void clearCurrentView();
+  
+  static constexpr int THUMBNAIL_CACHE_SIZE = 1000; // 缓存大小（单位：MB）
+  static constexpr int MAX_CONCURRENT_LOADS = 4;    // 最大并发加载数
+
+  QLabel* statusLabel;      // 状态标签
+  QProgressBar* progressBar;  // 进度条
+  void setupStatusBar();    // 设置状态栏
+  void updateStatusMessage(const QString& message); // 更新状态消息
+  void updateProgress(int value, int total);       // 更新进度
+  void startLoading();     // 开始加载
+  void finishLoading();    // 完成加载
+  
+  std::atomic<bool> isCancelled{false};  // 取消标志
 };
 
 #endif // MAINWINDOW_H

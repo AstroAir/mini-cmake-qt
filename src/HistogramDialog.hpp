@@ -42,6 +42,19 @@ private:
   double calculateSkewness();
   void drawStatisticsOverlay();
   void updateStatisticsDisplay(const HistogramStats &stats);
+
+  // 添加新的成员
+  QProgressBar* progressBar;
+  QLabel* statusLabel;
+  QTimer* updateTimer;
+  std::atomic<bool> processingFlag;
+    
+  // 添加新的方法
+  void showError(const QString& message);
+  void showProgress(int value);
+  void resetProgress();
+  void enableControls(bool enable);
+  void processWithProgress(const std::function<void()>& task);
 };
 
 void showImageHistogram(QWidget *parent, const cv::Mat &image);

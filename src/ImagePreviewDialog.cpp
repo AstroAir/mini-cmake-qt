@@ -1,4 +1,5 @@
 #include "ImagePreviewDialog.h"
+#include "ImageContextMenu.h"
 
 #include "MetadataDialog.h"
 #include "image/ImageIO.hpp"
@@ -19,6 +20,8 @@
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QtConcurrent>
+#include <qthreadpool.h>
 
 ImagePreviewDialog::ImagePreviewDialog(QWidget *parent)
     : QDialog(parent), currentZoom(1.0), currentRotation(0),
@@ -27,6 +30,11 @@ ImagePreviewDialog::ImagePreviewDialog(QWidget *parent)
   setupUI();
   resize(800, 600);
   setWindowTitle("图片预览");
+
+  // 设置 imageLabel 的右键菜单策略
+  imageLabel->setContextMenuPolicy(Qt::CustomContextMenu);
+  connect(imageLabel, &QWidget::customContextMenuRequested, this,
+          &ImagePreviewDialog::showContextMenu);
 }
 
 void ImagePreviewDialog::setupUI() {
@@ -48,6 +56,7 @@ void ImagePreviewDialog::setupUI() {
   countLabel = new QLabel;
   infoLabel = new QLabel;
   zoomLabel = new QLabel;
+  statusBar = new QStatusBar;
 
   infoLayout->addWidget(prevButton);
   infoLayout->addWidget(countLabel);
@@ -96,6 +105,9 @@ void ImagePreviewDialog::setupUI() {
   exifToolBar = createExifToolBar();
   mainLayout->addWidget(convolutionToolBar);
   mainLayout->addWidget(exifToolBar);
+
+  // 初始化加载动画
+  initLoadingAnimation();
 }
 
 void ImagePreviewDialog::createToolBar() {
@@ -144,8 +156,6 @@ void ImagePreviewDialog::createToolBar() {
   toolBar->addWidget(zoomSlider);
 }
 
-// ... 续上文 ...
-
 void ImagePreviewDialog::setImageList(const QVector<QString> &images,
                                       int currentIdx) {
   imageList = images;
@@ -158,91 +168,140 @@ void ImagePreviewDialog::setImageList(const QVector<QString> &images,
 }
 
 void ImagePreviewDialog::loadImage(const QString &path) {
-  try {
-    spdlog::info("Loading image: {}", path.toStdString());
-
-    if (path.isEmpty()) {
-      throw std::runtime_error("图片路径为空");
-    }
-
-    QFileInfo fileInfo(path);
-    if (!fileInfo.exists()) {
-      throw std::runtime_error("图片文件不存在");
-    }
-
-    if (!fileInfo.isReadable()) {
-      throw std::runtime_error("无法读取图片文件,请检查权限");
-    }
-
-    if (path.endsWith(".fits", Qt::CaseInsensitive)) {
-      loadFitsImage(path);
-      return;
-    }
-
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-
-    if (!reader.canRead()) {
-      throw std::runtime_error("无法识别的图片格式: " +
-                               reader.errorString().toStdString());
-    }
-
-    QImage image = reader.read();
-    if (image.isNull()) {
-      throw std::runtime_error("读取图片失败: " +
-                               reader.errorString().toStdString());
-    }
-
-    // 读取原始图像用于处理
-    originalImage = cv::imread(path.toStdString(), cv::IMREAD_UNCHANGED);
-    if (originalImage.empty()) {
-      spdlog::warn("Failed to load original image for processing");
-    }
-
-    // 更新界面显示
-    infoLabel->setText(formatFileInfo(path));
-    imageLabel->setPixmap(QPixmap::fromImage(image));
-    updateImage();
-
-    // 更新窗口标题
-    setWindowTitle(QString("图片预览 - %1").arg(fileInfo.fileName()));
-
-    // 自动检测星点
-    if (autoDetectionEnabled) {
-      startStarDetection();
-    }
-
-    // 更新直方图
-    updateHistogram();
-
-    spdlog::info("Successfully loaded image: {}", path.toStdString());
-
-  } catch (const std::exception &e) {
-    spdlog::error("Error loading image: {}", e.what());
-    QMessageBox::critical(this, "加载错误",
-                          QString("无法加载图片：%1").arg(e.what()));
-
-    // 清除当前显示
-    imageLabel->clear();
-    infoLabel->clear();
-    originalImage.release();
+  if (path.isEmpty()) {
+    spdlog::warn("loadImage called with empty path");
+    return;
   }
+
+  spdlog::info("Starting to load image from path: {}", path.toStdString());
+
+  // 检查文件后缀名
+  QString extension = QFileInfo(path).suffix().toLower();
+  if (extension == "fit" || extension == "fits") {
+    spdlog::info("Detected FITS file extension: {}", extension.toStdString());
+    loadFitsImage(path);
+    return;
+  }
+
+  // 立即显示loading动画
+  startLoading();
+
+  // 异步加载图像
+  QThreadPool::globalInstance()->start([this, path]() {
+    try {
+      spdlog::info("Reading image in background thread from path: {}",
+                   path.toStdString());
+
+      // 在后台线程读取图像
+      QImageReader reader(path);
+      reader.setAutoTransform(true);
+
+      // 先读取图像信息
+      QSize imageSize = reader.size();
+      spdlog::info("Image size: {}x{}", imageSize.width(), imageSize.height());
+
+      // 在主线程更新UI信息
+      QMetaObject::invokeMethod(
+          this,
+          [this, path, imageSize]() {
+            infoLabel->setText(formatFileInfo(path) +
+                               QString(" (%1x%2)")
+                                   .arg(imageSize.width())
+                                   .arg(imageSize.height()));
+            spdlog::info("Updated UI with image info for path: {}",
+                         path.toStdString());
+          },
+          Qt::QueuedConnection);
+
+      // 读取图像
+      QImage image = reader.read();
+      spdlog::info("Image read successfully from path: {}", path.toStdString());
+
+      // 在主线程更新图像显示
+      QMetaObject::invokeMethod(
+          this,
+          [this, image, path]() {
+            stopLoading();
+            if (!image.isNull()) {
+              imageLabel->setPixmap(QPixmap::fromImage(image));
+              updateImage();
+              spdlog::info("Image displayed successfully for path: {}",
+                           path.toStdString());
+
+              // 后台加载原始图像用于处理
+              QThreadPool::globalInstance()->start([this, path]() {
+                originalImage =
+                    cv::imread(path.toStdString(), cv::IMREAD_UNCHANGED);
+                spdlog::info(
+                    "Original image loaded for processing from path: {}",
+                    path.toStdString());
+              });
+            } else {
+              imageLabel->setText("加载失败");
+              spdlog::error("Failed to display image for path: {}",
+                            path.toStdString());
+            }
+          },
+          Qt::QueuedConnection);
+
+    } catch (const std::exception &e) {
+      spdlog::error("Exception occurred while loading image from path: {}: {}",
+                    path.toStdString(), e.what());
+      QMetaObject::invokeMethod(
+          this,
+          [this, e]() {
+            stopLoading();
+            QMessageBox::warning(this, "错误",
+                                 QString("加载图像失败: %1").arg(e.what()));
+          },
+          Qt::QueuedConnection);
+    }
+  });
 }
 
 void ImagePreviewDialog::loadFitsImage(const QString &path) {
+  spdlog::info("Starting to load FITS image from path: {}", path.toStdString());
   try {
-    cv::Mat image;
-    // 使用 ImageIO 中的 FITS 读取功能
-    // TODO: 实现FITS图像读取功能
+    // 使用 ImageIO 中的现有 loadImage 函数读取 FITS 图像
+    cv::Mat image = ::loadImage(path.toStdString());
+
     if (!image.empty()) {
       QImage qImage(image.data, image.cols, image.rows, image.step,
                     QImage::Format_Grayscale8);
       imageLabel->setPixmap(QPixmap::fromImage(qImage));
       updateImage();
+      spdlog::info("FITS image displayed successfully for path: {}",
+                   path.toStdString());
+
+      // 获取和显示FITS元数据
+      auto metadata = getFitsMetadata(path.toStdString());
+      currentMetadata.path = path.toStdString();
+      currentMetadata.custom_data["fits_metadata"] = metadata;
+      spdlog::info("FITS metadata loaded and displayed for path: {}",
+                   path.toStdString());
+    } else {
+      // 增加详细提示：检查文件格式、路径以及是否为有效FITS图像
+      spdlog::error("Failed to load FITS image from path: {}",
+                    path.toStdString());
+      QMessageBox::warning(
+          this, "错误",
+          QString("FITS图像加载失败：%1\n请检查文件是否为有效的FITS格式。")
+              .arg(path));
     }
-  } catch (const std::exception &e) {
+  } catch (const cv::Exception &e) { // 捕获OpenCV相关异常
+    spdlog::error(
+        "OpenCV exception occurred while loading FITS image from path: {}: {}",
+        path.toStdString(), e.what());
     QMessageBox::warning(this, "错误",
-                         QString("无法加载FITS图像: %1").arg(e.what()));
+                         QString("加载FITS图像时OpenCV出错: %1").arg(e.what()));
+  } catch (const std::exception &e) {
+    spdlog::error(
+        "Exception occurred while loading FITS image from path: {}: {}",
+        path.toStdString(), e.what());
+    QMessageBox::warning(
+        this, "错误",
+        QString("无法加载FITS图像: %1\n请检查图像是否损坏或格式不支持。")
+            .arg(e.what()));
   }
 }
 
@@ -388,13 +447,25 @@ void ImagePreviewDialog::showNext() {
   if (currentIndex < imageList.size() - 1) {
     try {
       currentIndex++;
+      QApplication::setOverrideCursor(Qt::WaitCursor);
       loadImage(imageList[currentIndex]);
       updateNavigationButtons();
       updateCountLabel();
+      QApplication::restoreOverrideCursor();
     } catch (const std::exception &e) {
+      QApplication::restoreOverrideCursor();
       spdlog::error("Error showing next image: {}", e.what());
-      QMessageBox::warning(this, "错误",
-                           QString("无法显示下一张图片：%1").arg(e.what()));
+
+      QMessageBox::StandardButton reply = QMessageBox::warning(
+          this, "错误",
+          QString("无法显示下一张图片：%1\n是否跳过该图片？").arg(e.what()),
+          QMessageBox::Yes | QMessageBox::No);
+
+      if (reply == QMessageBox::Yes) {
+        showNext(); // 递归调用以跳过当前图片
+      } else {
+        currentIndex--; // 恢复索引
+      }
     }
   }
 }
@@ -403,13 +474,25 @@ void ImagePreviewDialog::showPrevious() {
   if (currentIndex > 0) {
     try {
       currentIndex--;
+      QApplication::setOverrideCursor(Qt::WaitCursor);
       loadImage(imageList[currentIndex]);
       updateNavigationButtons();
       updateCountLabel();
+      QApplication::restoreOverrideCursor();
     } catch (const std::exception &e) {
+      QApplication::restoreOverrideCursor();
       spdlog::error("Error showing previous image: {}", e.what());
-      QMessageBox::warning(this, "错误",
-                           QString("无法显示上一张图片：%1").arg(e.what()));
+
+      QMessageBox::StandardButton reply = QMessageBox::warning(
+          this, "错误",
+          QString("无法显示上一张图片：%1\n是否跳过该图片？").arg(e.what()),
+          QMessageBox::Yes | QMessageBox::No);
+
+      if (reply == QMessageBox::Yes) {
+        showPrevious(); // 递归调用以跳过当前图片
+      } else {
+        currentIndex++; // 恢复索引
+      }
     }
   }
 }
@@ -468,38 +551,37 @@ void ImagePreviewDialog::scaleImage(QLabel *label, const QImage &image) {
 
 // 优化：改进星点检测算法，增加并发处理和精度计算（仅增加注释，具体实现依赖算法细节）
 void ImagePreviewDialog::detectStars() {
-  if (currentIndex >= 0 && currentIndex < imageList.size()) {
-    QString imagePath = imageList[currentIndex];
-    cv::Mat image = cv::imread(imagePath.toStdString(), cv::IMREAD_GRAYSCALE);
+  if (originalImage.empty()) {
+    QMessageBox::warning(this, "警告", "请等待图像完全加载");
+    return;
+  }
 
-    if (image.empty()) {
-      QMessageBox::warning(this, "错误", "无法加载图像进行星点检测");
-      return;
-    }
+  startLoading();
 
-    // ...existing preprocessing code...
-    // 新增：优化算法精度，调用高性能运算库或多线程并行执行（示例伪代码）
-    // cv::parallel_for(0, image.rows, [&](int i){ /* 计算每行星点检测 */ });
-
+  QThreadPool::globalInstance()->start([this]() {
     try {
-      // 配置星点检测参数
-      StarDetectionConfig config;
-      config.visualize = false; // 关闭默认可视化
-      config.min_star_size = 5;
-      config.min_star_brightness = 30;
+      auto stars = starDetector.multiscale_detect_stars(originalImage);
 
-      // 执行星点检测
-      starDetector = StarDetector(config);
-      detectedStars = starDetector.multiscale_detect_stars(image);
-
-      // 显示结果
-      showStarDetectionResult();
+      QMetaObject::invokeMethod(
+          this,
+          [this, stars]() {
+            stopLoading();
+            detectedStars = stars;
+            showStarDetectionResult();
+          },
+          Qt::QueuedConnection);
 
     } catch (const std::exception &e) {
-      QMessageBox::warning(this, "错误",
-                           QString("星点检测失败: %1").arg(e.what()));
+      QMetaObject::invokeMethod(
+          this,
+          [this, e]() {
+            stopLoading();
+            QMessageBox::warning(this, "错误",
+                                 QString("星点检测失败: %1").arg(e.what()));
+          },
+          Qt::QueuedConnection);
     }
-  }
+  });
 }
 
 void ImagePreviewDialog::showStarDetectionResult() {
@@ -877,50 +959,31 @@ void ImagePreviewDialog::applyHistogramEqualization() {
 }
 
 void ImagePreviewDialog::batchProcessImages() {
-  QStringList options;
-  options << "星点检测" << "自动拉伸" << "直方图均衡" << "全部处理";
-
-  bool ok;
-  QString selected = QInputDialog::getItem(this, "批处理", "选择处理方式：",
-                                           options, 0, false, &ok);
-
-  if (!ok || selected.isEmpty())
-    return;
-
+  // 立即显示进度对话框
   QProgressDialog progress("处理中...", "取消", 0, imageList.size(), this);
   progress.setWindowModality(Qt::WindowModal);
+  progress.show();
 
-  for (int i = 0; i < imageList.size(); ++i) {
-    if (progress.wasCanceled())
-      break;
+  // 使用线程池处理图像
+  QThreadPool::globalInstance()->setMaxThreadCount(QThread::idealThreadCount());
 
-    QString path = imageList[i];
-    progress.setValue(i);
+  int processed = 0;
+  QVector<QFuture<void>> futures;
 
-    // 根据选择执行相应的处理
-    if (selected == "星点检测" || selected == "全部处理") {
-      cv::Mat img = cv::imread(path.toStdString(), cv::IMREAD_GRAYSCALE);
-      if (!img.empty()) {
-        detectedStars = starDetector.multiscale_detect_stars(img);
-        exportDetectedStarsToCSV(path + "_stars.csv");
-      }
-    }
-    if (selected == "自动拉伸" || selected == "全部处理") {
-      // 处理并保存
-      cv::Mat img = cv::imread(path.toStdString(), cv::IMREAD_UNCHANGED);
-      if (!img.empty()) {
-        double minVal, maxVal;
-        cv::minMaxLoc(img, &minVal, &maxVal);
-        cv::Mat processed;
-        img.convertTo(processed, -1, 255.0 / (maxVal - minVal),
-                      -minVal * 255.0 / (maxVal - minVal));
-        cv::imwrite((path.toStdString() + "_stretched.png"), processed);
-      }
-    }
-    // ... 其他处理选项
+  for (const QString &path : imageList) {
+    futures.append(QtConcurrent::run([this, path, &processed, &progress]() {
+      processImage(path);
+      QMetaObject::invokeMethod(
+          &progress,
+          [&progress, &processed]() { progress.setValue(++processed); },
+          Qt::QueuedConnection);
+    }));
   }
 
-  progress.setValue(imageList.size());
+  // 等待所有处理完成
+  for (auto &future : futures) {
+    future.waitForFinished();
+  }
 }
 
 void ImagePreviewDialog::saveAsFITS() {
@@ -1365,5 +1428,279 @@ void ImagePreviewDialog::showStatistics() {
   } catch (const std::exception &e) {
     QMessageBox::critical(this, "错误",
                           QString("计算统计信息失败: %1").arg(e.what()));
+  }
+}
+
+void ImagePreviewDialog::initLoadingAnimation() {
+  loadingAnimation = new QMovie(":/images/loading.gif");
+  loadingAnimation->setScaledSize(QSize(64, 64));
+}
+
+void ImagePreviewDialog::startLoading() {
+  imageLabel->setMovie(loadingAnimation);
+  loadingAnimation->start();
+}
+
+void ImagePreviewDialog::stopLoading() { loadingAnimation->stop(); }
+
+void ImagePreviewDialog::showContextMenu(const QPoint &pos) {
+  ImageContextMenu contextMenu(this);
+  // 连接右键菜单信号与对应槽函数
+  connect(&contextMenu, &ImageContextMenu::zoomInRequested, this,
+          &ImagePreviewDialog::zoomIn);
+  connect(&contextMenu, &ImageContextMenu::zoomOutRequested, this,
+          &ImagePreviewDialog::zoomOut);
+  connect(&contextMenu, &ImageContextMenu::rotateLeftRequested, this,
+          &ImagePreviewDialog::rotateLeft);
+  connect(&contextMenu, &ImageContextMenu::rotateRightRequested, this,
+          &ImagePreviewDialog::rotateRight);
+  connect(&contextMenu, &ImageContextMenu::toggleFullscreenRequested, this,
+          &ImagePreviewDialog::toggleFullscreen);
+  connect(&contextMenu, &ImageContextMenu::copyRequested, this,
+          &ImagePreviewDialog::copyToClipboard);
+  connect(&contextMenu, &ImageContextMenu::saveRequested, this,
+          &ImagePreviewDialog::saveImage);
+  // 新增操作信号的连接
+  connect(&contextMenu, &ImageContextMenu::cropRequested, this,
+          &ImagePreviewDialog::cropImage);
+  connect(&contextMenu, &ImageContextMenu::flipHorizontalRequested, this,
+          &ImagePreviewDialog::flipHorizontal);
+  connect(&contextMenu, &ImageContextMenu::flipVerticalRequested, this,
+          &ImagePreviewDialog::flipVertical);
+  connect(&contextMenu, &ImageContextMenu::resetRequested, this,
+          &ImagePreviewDialog::resetImage);
+
+  contextMenu.exec(imageLabel->mapToGlobal(pos));
+}
+
+// 新增槽函数实现：可根据需要替换为更详细的逻辑
+void ImagePreviewDialog::cropImage() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("裁切选项");
+  auto layout = new QVBoxLayout(&dialog);
+
+  // 创建裁切方式选择组
+  auto cropGroup = new QButtonGroup(&dialog);
+  auto manualRadio = new QRadioButton("手动选择区域", &dialog);
+  auto ratioRadio = new QRadioButton("按比例裁切", &dialog);
+  auto circleRadio = new QRadioButton("圆形裁切", &dialog);
+  auto ellipseRadio = new QRadioButton("椭圆形裁切", &dialog);
+
+  cropGroup->addButton(manualRadio);
+  cropGroup->addButton(ratioRadio);
+  cropGroup->addButton(circleRadio);
+  cropGroup->addButton(ellipseRadio);
+
+  layout->addWidget(manualRadio);
+  layout->addWidget(ratioRadio);
+  layout->addWidget(circleRadio);
+  layout->addWidget(ellipseRadio);
+
+  // 比例选择组合框
+  auto ratioCombo = new QComboBox(&dialog);
+  ratioCombo->addItems({"16:9", "4:3", "1:1", "3:2", "自定义"});
+  ratioCombo->setEnabled(false);
+  layout->addWidget(ratioCombo);
+
+  // 自定义比例输入框
+  auto customRatioWidget = new QWidget(&dialog);
+  auto customRatioLayout = new QHBoxLayout(customRatioWidget);
+  auto widthSpin = new QSpinBox(customRatioWidget);
+  auto heightSpin = new QSpinBox(customRatioWidget);
+  widthSpin->setRange(1, 1000);
+  heightSpin->setRange(1, 1000);
+  customRatioLayout->addWidget(widthSpin);
+  customRatioLayout->addWidget(new QLabel(":"));
+  customRatioLayout->addWidget(heightSpin);
+  customRatioWidget->setEnabled(false);
+  layout->addWidget(customRatioWidget);
+
+  // 连接信号槽
+  connect(ratioRadio, &QRadioButton::toggled, ratioCombo,
+          &QComboBox::setEnabled);
+  connect(ratioCombo, &QComboBox::currentTextChanged, [=](const QString &text) {
+    customRatioWidget->setEnabled(text == "自定义");
+  });
+
+  // 操作按钮
+  auto buttonBox = new QDialogButtonBox(
+      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+  layout->addWidget(buttonBox);
+
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  // 处理对话框结果
+  if (dialog.exec() == QDialog::Accepted) {
+    if (manualRadio->isChecked()) {
+      // 进入手动选择模式
+      isCropping = true;
+      setCursor(Qt::CrossCursor);
+      if (!rubberBand)
+        rubberBand = new QRubberBand(QRubberBand::Rectangle, this);
+    } else if (ratioRadio->isChecked()) {
+      double ratio;
+      if (ratioCombo->currentText() == "自定义") {
+        ratio = static_cast<double>(widthSpin->value()) / heightSpin->value();
+      } else {
+        QStringList parts = ratioCombo->currentText().split(":");
+        ratio = parts[0].toDouble() / parts[1].toDouble();
+      }
+      currentCropStrategy = RatioCrop{ratio};
+      applyCrop(currentCropStrategy);
+    } else if (circleRadio->isChecked()) {
+      QSize imgSize = imageLabel->pixmap().size();
+      int radius = std::min(imgSize.width(), imgSize.height()) / 2;
+      currentCropStrategy = CircleCrop{
+          cv::Point(imgSize.width() / 2, imgSize.height() / 2), radius};
+      applyCrop(currentCropStrategy);
+    } else if (ellipseRadio->isChecked()) {
+      QSize imgSize = imageLabel->pixmap().size();
+      currentCropStrategy =
+          EllipseCrop{cv::Point(imgSize.width() / 2, imgSize.height() / 2),
+                      cv::Size(imgSize.width() / 2, imgSize.height() / 2), 0.0};
+      applyCrop(currentCropStrategy);
+    }
+  }
+}
+
+void ImagePreviewDialog::mousePressEvent(QMouseEvent *event) {
+  if (isCropping && event->button() == Qt::LeftButton) {
+    startCrop(event->pos());
+  }
+  QDialog::mousePressEvent(event);
+}
+
+void ImagePreviewDialog::mouseMoveEvent(QMouseEvent *event) {
+  if (isCropping) {
+    updateCrop(event->pos());
+  }
+  QDialog::mouseMoveEvent(event);
+}
+
+void ImagePreviewDialog::mouseReleaseEvent(QMouseEvent *event) {
+  if (isCropping && event->button() == Qt::LeftButton) {
+    endCrop(event->pos());
+  }
+  QDialog::mouseReleaseEvent(event);
+}
+
+void ImagePreviewDialog::startCrop(const QPoint &pos) {
+  cropStartPoint = imageLabel->mapFrom(this, pos);
+  if (rubberBand) {
+    rubberBand->setGeometry(QRect(cropStartPoint.toPoint(), QSize()));
+    rubberBand->show();
+  }
+}
+
+void ImagePreviewDialog::updateCrop(const QPoint &pos) {
+  if (rubberBand) {
+    QPoint endPoint = imageLabel->mapFrom(this, pos);
+    rubberBand->setGeometry(
+        QRect(cropStartPoint.toPoint(), endPoint).normalized());
+  }
+}
+
+void ImagePreviewDialog::endCrop(const QPoint &pos) {
+  if (rubberBand) {
+    cropEndPoint = imageLabel->mapFrom(this, pos);
+    QRect selectionRect =
+        QRect(cropStartPoint.toPoint(), cropEndPoint.toPoint()).normalized();
+
+    // 将选择区域从界面坐标转换为图像坐标
+    QPixmap pixmap = imageLabel->pixmap(Qt::ReturnByValue);
+    QRect imageRect = imageLabel->rect();
+    double scaleX = static_cast<double>(pixmap.width()) / imageRect.width();
+    double scaleY = static_cast<double>(pixmap.height()) / imageRect.height();
+
+    // 计算裁剪区域
+    int x = static_cast<int>(selectionRect.x() * scaleX);
+    int y = static_cast<int>(selectionRect.y() * scaleY);
+    int width = static_cast<int>(selectionRect.width() * scaleX);
+    int height = static_cast<int>(selectionRect.height() * scaleY);
+
+    // 确保裁剪区域在图像范围内
+    x = std::clamp(x, 0, pixmap.width());
+    y = std::clamp(y, 0, pixmap.height());
+    width = std::clamp(width, 0, pixmap.width() - x);
+    height = std::clamp(height, 0, pixmap.height() - y);
+
+    // 检查裁剪区域是否有效
+    if (width > 0 && height > 0) {
+      cv::Rect cropRect(x, y, width, height);
+      currentCropStrategy = cropRect;
+      applyCrop(currentCropStrategy);
+    } else {
+      QMessageBox::warning(this, "裁剪失败", "选择的区域无效");
+    }
+
+    rubberBand->hide();
+    isCropping = false;
+    setCursor(Qt::ArrowCursor);
+  }
+}
+
+void ImagePreviewDialog::applyCrop(const CropStrategy &strategy) {
+  if (originalImage.empty())
+    return;
+
+  try {
+    auto result = imageCropper.crop(originalImage, strategy);
+    if (result) {
+      cv::Mat cropped = *result;
+      QImage qImage;
+      if (cropped.channels() == 1) {
+        qImage = QImage(cropped.data, cropped.cols, cropped.rows, cropped.step,
+                        QImage::Format_Grayscale8);
+      } else {
+        qImage = QImage(cropped.data, cropped.cols, cropped.rows, cropped.step,
+                        QImage::Format_BGR888);
+      }
+      imageLabel->setPixmap(QPixmap::fromImage(qImage));
+      updateImage();
+
+      // 更新原始图像
+      originalImage = cropped.clone();
+    }
+  } catch (const std::exception &e) {
+    QMessageBox::warning(this, "裁切失败",
+                         QString("图像裁切失败：%1").arg(e.what()));
+  }
+}
+
+void ImagePreviewDialog::flipHorizontal() {
+  // 示例：对当前图片进行水平翻转
+  QPixmap pix = imageLabel->pixmap(Qt::ReturnByValue);
+  if (!pix.isNull()) {
+    QImage img = pix.toImage().mirrored(true, false);
+    imageLabel->setPixmap(QPixmap::fromImage(img));
+  }
+}
+
+void ImagePreviewDialog::flipVertical() {
+  // 示例：对当前图片进行垂直翻转
+  QPixmap pix = imageLabel->pixmap(Qt::ReturnByValue);
+  if (!pix.isNull()) {
+    QImage img = pix.toImage().mirrored(false, true);
+    imageLabel->setPixmap(QPixmap::fromImage(img));
+  }
+}
+
+void ImagePreviewDialog::resetImage() {
+  // 示例：恢复原始图像（假设 originalImage 存储原图）
+  if (!originalImage.empty()) {
+
+    QImage qImage;
+    if (originalImage.channels() == 1) {
+      qImage =
+          QImage(originalImage.data, originalImage.cols, originalImage.rows,
+                 originalImage.step, QImage::Format_Grayscale8);
+    } else {
+      qImage =
+          QImage(originalImage.data, originalImage.cols, originalImage.rows,
+                 originalImage.step, QImage::Format_BGR888);
+    }
+    imageLabel->setPixmap(QPixmap::fromImage(qImage));
+    updateImage();
   }
 }

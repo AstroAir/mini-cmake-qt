@@ -14,27 +14,44 @@ HistogramDialog::HistogramDialog(QWidget *parent)
 
 void HistogramDialog::showHistogram(const cv::Mat &image,
                                     const HistogramConfig &cfg) {
-  currentImage = image.clone();
-  config = cfg; // 更新配置
-
-  try {
-    std::vector<cv::Mat> histograms;
-    if (image.channels() == 1) {
-      histograms.push_back(calculateGrayHist(image, config));
-    } else {
-      histograms = calculateHist(image, config);
-    }
-    updateChart(histograms);
-
-    // 计算并显示统计信息
-    if (!histograms.empty()) {
-      HistogramStats stats = calculateHistogramStats(histograms[0]);
-      updateStatisticsDisplay(stats);
-    }
-  } catch (const std::exception &e) {
-    throw std::runtime_error(std::string("Failed to calculate histogram: ") +
-                             e.what());
+  if (processingFlag) {
+    showError("正在处理中，请稍候...");
+    return;
   }
+
+  enableControls(false);
+  processWithProgress([=]() {
+    try {
+      currentImage = image.clone();
+      config = cfg;
+
+      showProgress(20);
+      std::vector<cv::Mat> histograms;
+
+      if (image.channels() == 1) {
+        histograms.push_back(calculateGrayHist(image, config));
+      } else {
+        histograms = calculateHist(image, config);
+      }
+
+      showProgress(60);
+      updateChart(histograms);
+
+      if (!histograms.empty()) {
+        showProgress(80);
+        HistogramStats stats = calculateHistogramStats(histograms[0]);
+        updateStatisticsDisplay(stats);
+      }
+
+      showProgress(100);
+      statusLabel->setText("处理完成");
+
+    } catch (const HistogramException &e) {
+      showError(QString("直方图计算错误: %1").arg(e.what()));
+    } catch (const std::exception &e) {
+      showError(QString("发生错误: %1").arg(e.what()));
+    }
+  });
 }
 
 void HistogramDialog::updateChart(const std::vector<cv::Mat> &histograms) {
@@ -251,6 +268,33 @@ void HistogramDialog::setupUI() {
             &HistogramDialog::exportHistogramData);
     connect(saveImageButton, &QPushButton::clicked, this,
             &HistogramDialog::saveHistogramAsImage);
+
+    // 添加状态栏
+    auto statusBar = new QWidget(this);
+    auto statusLayout = new QHBoxLayout(statusBar);
+    
+    progressBar = new QProgressBar(this);
+    progressBar->setMaximum(100);
+    progressBar->setMinimum(0);
+    progressBar->hide();
+    
+    statusLabel = new QLabel(this);
+    statusLabel->setStyleSheet("color: #666666;");
+    
+    statusLayout->addWidget(statusLabel);
+    statusLayout->addWidget(progressBar);
+    
+    mainLayout->addWidget(statusBar);
+    
+    // 添加更新定时器
+    updateTimer = new QTimer(this);
+    updateTimer->setInterval(100);
+    connect(updateTimer, &QTimer::timeout, this, [this]() {
+        if (!processingFlag) {
+            updateTimer->stop();
+            resetProgress();
+        }
+    });
 }
 
 void HistogramDialog::calculateStatistics() {
@@ -390,6 +434,52 @@ void HistogramDialog::updateStatisticsDisplay(const HistogramStats &stats) {
 
   // 更新图表标题或统计信息显示
   chart->setTitle(statsText);
+}
+
+void HistogramDialog::showError(const QString& message) {
+    statusLabel->setText(message);
+    statusLabel->setStyleSheet("color: #ff0000;");
+    QMessageBox::warning(this, "错误", message);
+}
+
+void HistogramDialog::showProgress(int value) {
+    progressBar->setValue(value);
+    progressBar->setVisible(value < 100);
+}
+
+void HistogramDialog::resetProgress() {
+    progressBar->hide();
+    progressBar->setValue(0);
+    statusLabel->setStyleSheet("color: #666666;");
+    statusLabel->setText("就绪");
+    enableControls(true);
+}
+
+void HistogramDialog::enableControls(bool enable) {
+    logScaleCheckBox->setEnabled(enable);
+    binCountSpinner->setEnabled(enable);
+    exportButton->setEnabled(enable);
+    saveImageButton->setEnabled(enable);
+}
+
+void HistogramDialog::processWithProgress(const std::function<void()>& task) {
+    processingFlag = true;
+    progressBar->show();
+    updateTimer->start();
+    
+    QThread* worker = new QThread;
+    QObject* context = new QObject;
+    context->moveToThread(worker);
+    
+    connect(worker, &QThread::started, context, [task, this]() {
+        task();
+        processingFlag = false;
+    });
+    
+    connect(worker, &QThread::finished, worker, &QThread::deleteLater);
+    connect(worker, &QThread::finished, context, &QObject::deleteLater);
+    
+    worker->start();
 }
 
 void showImageHistogram(QWidget *parent, const cv::Mat &image) {

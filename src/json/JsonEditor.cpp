@@ -2,22 +2,23 @@
 #include "JsonModel.hpp"
 
 #include <QApplication>
+#include <QCompleter>
+#include <QDialog>
 #include <QFileDialog>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QStringListModel>
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeView>
 #include <QVBoxLayout>
-#include <QCompleter>
-#include <QStringListModel>
-#include <QProgressBar>
-#include <QDialog>
+
 
 #include <fstream>
 
@@ -68,12 +69,13 @@ void JsonEditor::setupUI() {
   setAcceptDrops(true);
 
   // 连接异步加载信号
-  connect(&model, &JsonModel::loadProgress, this, &JsonEditor::showLoadingProgress);
+  connect(&model, &JsonModel::loadProgress, this,
+          &JsonEditor::showLoadingProgress);
   connect(&model, &JsonModel::loadCompleted, this, [this]() {
     progressBar->setVisible(false);
     statusBar->showMessage(tr("加载完成"), 2000);
   });
-  connect(&model, &JsonModel::loadError, this, [this](const QString& error) {
+  connect(&model, &JsonModel::loadError, this, [this](const QString &error) {
     progressBar->setVisible(false);
     QMessageBox::critical(this, tr("错误"), error);
   });
@@ -308,108 +310,131 @@ void JsonEditor::saveFile() {
   }
 }
 
-void JsonEditor::loadJson(const nlohmann::json& json) {
-    model.load(json);
-    updateStats();
-    updateCompleterWordList(); // 更新自动补全词列表
+void JsonEditor::loadJson(const nlohmann::json &json) {
+  model.load(json);
+  updateStats();
+  updateCompleterWordList(); // 更新自动补全词列表
 }
 
-nlohmann::json JsonEditor::getJson() const {
-    return model.getJson();
-}
+nlohmann::json JsonEditor::getJson() const { return model.getJson(); }
 
 void JsonEditor::setupCompleter() {
-    completer = new QCompleter(this);
-    completer->setModelSorting(QCompleter::CaseInsensitivelySortedModel);
-    completer->setCaseSensitivity(Qt::CaseInsensitive);
-    completer->setWrapAround(false);
-    
-    // 初始化基础关键字
-    wordList << "true" << "false" << "null" << "{" << "}" << "[" << "]" << ":"
-             << "," << "\"\"";
-    
-    completer->setModel(new QStringListModel(wordList, completer));
-    
-    // 将自动补全器设置给编辑器
-    QLineEdit *editor = qobject_cast<QLineEdit*>(treeView->itemDelegate()->createEditor(
-        treeView, QStyleOptionViewItem(), QModelIndex()));
-    if (editor) {
-        editor->setCompleter(completer);
-    }
+  completer = new QCompleter(this);
+  completer->setModelSorting(QCompleter::CaseInsensitivelySortedModel);
+  completer->setCaseSensitivity(Qt::CaseInsensitive);
+  completer->setWrapAround(false);
+
+  // 初始化基础关键字
+  wordList << "true" << "false" << "null" << "{" << "}" << "[" << "]" << ":"
+           << "," << "\"\"";
+
+  completer->setModel(new QStringListModel(wordList, completer));
+
+  // 将自动补全器设置给编辑器
+  QLineEdit *editor =
+      qobject_cast<QLineEdit *>(treeView->itemDelegate()->createEditor(
+          treeView, QStyleOptionViewItem(), QModelIndex()));
+  if (editor) {
+    editor->setCompleter(completer);
+  }
 }
 
 void JsonEditor::updateCompleterWordList() {
-    // 从当前JSON数据中提取关键词
-    std::function<void(const Json&)> extractWords = [&](const Json& j) {
-        if (j.is_object()) {
-            for (auto& [key, value] : j.items()) {
-                wordList << QString::fromStdString(key);
-                extractWords(value);
-            }
-        } else if (j.is_array()) {
-            for (auto& element : j) {
-                extractWords(element);
-            }
-        } else if (j.is_string()) {
-            wordList << QString::fromStdString(j.get<std::string>());
-        }
-    };
+  // 从当前JSON数据中提取关键词
+  std::function<void(const Json &)> extractWords = [&](const Json &j) {
+    if (j.is_object()) {
+      for (auto &[key, value] : j.items()) {
+        wordList << QString::fromStdString(key);
+        extractWords(value);
+      }
+    } else if (j.is_array()) {
+      for (auto &element : j) {
+        extractWords(element);
+      }
+    } else if (j.is_string()) {
+      wordList << QString::fromStdString(j.get<std::string>());
+    }
+  };
 
-    extractWords(model.getJson());
-    wordList.removeDuplicates();
-    completer->setModel(new QStringListModel(wordList, completer));
+  extractWords(model.getJson());
+  wordList.removeDuplicates();
+  completer->setModel(new QStringListModel(wordList, completer));
 }
 
 void JsonEditor::setupFindReplace() {
-    findReplaceDialog = new QDialog(this);
-    auto* layout = new QVBoxLayout(findReplaceDialog);
-    
-    findEdit = new QLineEdit(findReplaceDialog);
-    replaceEdit = new QLineEdit(findReplaceDialog);
-    replaceBtn = new QPushButton(tr("替换"), findReplaceDialog);
-    replaceAllBtn = new QPushButton(tr("全部替换"), findReplaceDialog);
-    
-    // ...设置查找替换对话框UI...
+  findReplaceDialog = new QDialog(this);
+  auto *layout = new QVBoxLayout(findReplaceDialog);
+
+  findEdit = new QLineEdit(findReplaceDialog);
+  replaceEdit = new QLineEdit(findReplaceDialog);
+  replaceBtn = new QPushButton(tr("替换"), findReplaceDialog);
+  replaceAllBtn = new QPushButton(tr("全部替换"), findReplaceDialog);
+
+  // ...设置查找替换对话框UI...
 }
 
-void JsonEditor::handleDroppedFile(const QString& path) {
-    try {
-        std::ifstream file(path.toStdString());
-        Json data = Json::parse(file);
-        model.loadAsync(data);
-        progressBar->setVisible(true);
-        addToRecentFiles(path);
-    } catch (const std::exception& e) {
-        QMessageBox::critical(this, tr("错误"), e.what());
-    }
+void JsonEditor::handleDroppedFile(const QString &path) {
+  try {
+    std::ifstream file(path.toStdString());
+    Json data = Json::parse(file);
+    model.loadAsync(data);
+    progressBar->setVisible(true);
+    addToRecentFiles(path);
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, tr("错误"), e.what());
+  }
 }
 
 void JsonEditor::showLoadingProgress(int progress) {
-    progressBar->setVisible(true);
-    progressBar->setValue(progress);
-    statusBar->showMessage(tr("正在加载... %1%").arg(progress));
+  progressBar->setVisible(true);
+  progressBar->setValue(progress);
+  statusBar->showMessage(tr("正在加载... %1%").arg(progress));
 }
 
-void JsonEditor::addToRecentFiles(const QString& filePath) {
-    const int maxRecentFiles = 5;  // 最多保存5个最近文件
-    
-    QSettings settings;
-    QStringList recentFiles = settings.value("recentFiles").toStringList();
-    
-    // 移除已存在的相同路径（如果有）
-    recentFiles.removeAll(filePath);
-    
-    // 在开头插入新路径
-    recentFiles.prepend(filePath);
-    
-    // 如果超过最大数量，移除多余的
-    while (recentFiles.size() > maxRecentFiles) {
-        recentFiles.removeLast();
+void JsonEditor::addToRecentFiles(const QString &filePath) {
+  const int maxRecentFiles = 5; // 最多保存5个最近文件
+
+  QSettings settings;
+  QStringList recentFiles = settings.value("recentFiles").toStringList();
+
+  // 移除已存在的相同路径（如果有）
+  recentFiles.removeAll(filePath);
+
+  // 在开头插入新路径
+  recentFiles.prepend(filePath);
+
+  // 如果超过最大数量，移除多余的
+  while (recentFiles.size() > maxRecentFiles) {
+    recentFiles.removeLast();
+  }
+
+  // 保存更新后的列表
+  settings.setValue("recentFiles", recentFiles);
+
+  // 更新最近文件菜单（如果需要）
+  emit recentFilesChanged(recentFiles);
+}
+
+void JsonEditor::dragEnterEvent(QDragEnterEvent *event) {
+  if (event->mimeData()->hasUrls()) {
+    const QList<QUrl> urls = event->mimeData()->urls();
+    if (urls.size() == 1) { // 只接受单个文件
+      QString filePath = urls.first().toLocalFile();
+      if (filePath.endsWith(".json", Qt::CaseInsensitive)) {
+        event->acceptProposedAction();
+        return;
+      }
     }
-    
-    // 保存更新后的列表
-    settings.setValue("recentFiles", recentFiles);
-    
-    // 更新最近文件菜单（如果需要）
-    emit recentFilesChanged(recentFiles);
+  }
+  event->ignore();
+}
+
+void JsonEditor::dropEvent(QDropEvent *event) {
+  const QList<QUrl> urls = event->mimeData()->urls();
+  if (urls.isEmpty())
+    return;
+
+  QString filePath = urls.first().toLocalFile();
+  handleDroppedFile(filePath);
+  event->acceptProposedAction();
 }
