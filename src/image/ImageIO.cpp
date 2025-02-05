@@ -22,6 +22,62 @@ bool handleCvException(const std::exception &e, const std::string &context) {
   return false;
 }
 
+namespace {
+bool isFitsFile(const std::string &filename) {
+  std::string ext = std::filesystem::path(filename).extension().string();
+  return ext == ".fits" || ext == ".fit" || ext == ".fts";
+}
+} // namespace
+
+cv::Mat loadFitsImage(const std::string &filename) {
+  fitsfile *fptr;
+  int status = 0;
+  int naxis = 0;
+  long naxes[2] = {0, 0};
+  int bitpix = 0;
+
+  // 打开FITS文件
+  if (fits_open_file(&fptr, filename.c_str(), READONLY, &status)) {
+    spdlog::error("无法打开FITS文件: {}", filename);
+    fits_report_error(stderr, status);
+    return cv::Mat();
+  }
+
+  // 获取图像信息
+  if (fits_get_img_param(fptr, 2, &bitpix, &naxis, naxes, &status)) {
+    spdlog::error("无法获取FITS图像参数");
+    fits_close_file(fptr, &status);
+    fits_report_error(stderr, status);
+    return cv::Mat();
+  }
+
+  // 分配内存并读取数据
+  std::vector<float> contents(naxes[0] * naxes[1]);
+  long fpixel[2] = {1, 1}; // FITS uses 1-based indexing
+
+  if (fits_read_pix(fptr, TFLOAT, fpixel, naxes[0] * naxes[1], nullptr,
+                    contents.data(), nullptr, &status)) {
+    spdlog::error("读取FITS像素数据失败");
+    fits_close_file(fptr, &status);
+    fits_report_error(stderr, status);
+    return cv::Mat();
+  }
+
+  // 关闭文件
+  fits_close_file(fptr, &status);
+
+  // 转换为OpenCV格式
+  cv::Mat result(naxes[1], naxes[0], CV_32F);
+  std::memcpy(result.data, contents.data(), contents.size() * sizeof(float));
+
+  // 归一化到0-255范围
+  cv::Mat normalized;
+  cv::normalize(result, normalized, 0, 255, cv::NORM_MINMAX);
+  normalized.convertTo(normalized, CV_8U);
+
+  return normalized;
+}
+
 auto loadImage(const std::string &filename, int flags) -> cv::Mat {
   try {
     spdlog::info("开始加载图像 '{}'，参数 flags={}", filename, flags);
@@ -32,7 +88,12 @@ auto loadImage(const std::string &filename, int flags) -> cv::Mat {
     }
 
     auto start = std::chrono::high_resolution_clock::now();
-    cv::Mat image = cv::imread(filename, flags);
+    cv::Mat image;
+    if (isFitsFile(filename)) {
+      image = loadFitsImage(filename);
+    } else {
+      image = cv::imread(filename, flags);
+    }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration =
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start)

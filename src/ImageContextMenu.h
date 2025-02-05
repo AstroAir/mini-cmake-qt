@@ -4,24 +4,22 @@
 #include <QMenu>
 
 class ImageContextMenu : public QMenu {
-  Q_OBJECT
+    Q_OBJECT
 public:
-  explicit ImageContextMenu(QWidget *parent = nullptr);
+    explicit ImageContextMenu(QWidget *parent = nullptr);
 
 signals:
-  void zoomInRequested();
-  void zoomOutRequested();
-  void rotateLeftRequested();
-  void rotateRightRequested();
-  void toggleFullscreenRequested();
-  void copyRequested();
-  void saveRequested();
-
-  // 新增的操作信号
-  void cropRequested();
-  void flipHorizontalRequested();
-  void flipVerticalRequested();
-  void resetRequested();
+    void zoomInRequested();
+    void zoomOutRequested();
+    void rotateLeftRequested();
+    void rotateRightRequested();
+    void toggleFullscreenRequested();
+    void copyRequested();
+    void saveRequested();
+    void cropRequested();
+    void flipHorizontalRequested();
+    void flipVerticalRequested();
+    void resetRequested();
 };
 
 #endif // IMAGECONTEXTMENU_H

@@ -32,19 +32,9 @@ cv::Rect adjust_roi(cv::Rect roi, const cv::Size &img_size) {
 }
 } // namespace detail
 
-// 扩展裁切策略变体
-using CropStrategy =
-    std::variant<cv::Rect,                              // 矩形区域
-                 std::vector<cv::Point>,                // 多边形区域
-                 std::tuple<cv::Point2f, float, float>, // 旋转裁切
-                 CircleCrop,                            // 圆形裁切
-                 EllipseCrop,                           // 椭圆形裁切
-                 RatioCrop>;                            // 按比例裁切
+ImageCropper::ImageCropper(bool autoAdjust) : autoAdjust(autoAdjust) {}
 
-ImageCropper::ImageCropper(bool enable_gpu)
-    : use_gpu_(enable_gpu && hasCUDASupport()) {}
-
-static bool hasCUDASupport() {
+bool ImageCropper::hasCUDASupport() {
 #ifdef HAVE_OPENCV_CUDA
   return cv::cuda::getCudaEnabledDeviceCount() > 0;
 #else
@@ -53,10 +43,10 @@ static bool hasCUDASupport() {
 }
 
 // 通用裁切入口
-std::optional<cv::Mat>
-ImageCropper::crop(const cv::Mat &src, const CropStrategy &strategy,
-                   const AdaptiveParams &adaptive_params) {
-  if (!detail::validate_image(src))
+std::optional<cv::Mat> ImageCropper::crop(const cv::Mat &image,
+                                          const CropStrategy &strategy,
+                                          const AdaptiveParams &params) {
+  if (!detail::validate_image(image))
     return std::nullopt;
 
   try {
@@ -64,89 +54,28 @@ ImageCropper::crop(const cv::Mat &src, const CropStrategy &strategy,
         [&](auto &&arg) {
           using T = std::decay_t<decltype(arg)>;
           if constexpr (std::is_same_v<T, cv::Rect>) {
-            return crop_rectangular(src, arg);
+            return std::optional<cv::Mat>(cropRect(image, arg));
           } else if constexpr (std::is_same_v<T, std::vector<cv::Point>>) {
-            return crop_polygon(src, arg);
+            return std::optional<cv::Mat>(cropPolygon(image, arg));
           } else if constexpr (std::is_same_v<
                                    T, std::tuple<cv::Point2f, float, float>>) {
             auto &[center, angle, scale] = arg;
-            return crop_rotated(src, center, angle, scale);
+            return crop_rotated(image, center, angle, scale);
           } else if constexpr (std::is_same_v<T, CircleCrop>) {
-            return crop_circle(src, arg);
+            return std::optional<cv::Mat>(cropCircle(image, arg));
           } else if constexpr (std::is_same_v<T, EllipseCrop>) {
-            return crop_ellipse(src, arg);
+            return std::optional<cv::Mat>(cropEllipse(image, arg));
           } else if constexpr (std::is_same_v<T, RatioCrop>) {
-            return crop_ratio(src, arg);
+            return std::optional<cv::Mat>(cropRatio(image, arg));
           } else {
             static_assert(always_false_v<T>,
                           "Non-exhaustive strategy handling");
+            return std::optional<cv::Mat>();
           }
         },
         strategy);
-  } catch (const cv::Exception &e) {
-    spdlog::error("OpenCV exception: {}", e.what());
-    return std::nullopt;
   } catch (const std::exception &e) {
-    spdlog::error("General exception: {}", e.what());
-    return std::nullopt;
-  }
-}
-
-// 自适应内容感知裁切
-std::optional<cv::Mat>
-ImageCropper::adaptive_crop(const cv::Mat &src, const AdaptiveParams &params) {
-  if (!detail::validate_image(src))
-    return std::nullopt;
-
-  try {
-    cv::Mat processed;
-#ifdef HAVE_OPENCV_CUDA
-    if (use_gpu_) {
-      cv::cuda::GpuMat gpu_src(src);
-      cv::cuda::GpuMat gpu_processed;
-
-      // 创建CUDA流和滤波器
-      cv::cuda::Stream stream;
-      auto color_cvt = cv::cuda::createColorMap(cv::COLOR_BGR2GRAY);
-      auto blur = cv::cuda::createGaussianFilter(
-          CV_8UC1, CV_8UC1, cv::Size(params.blurSize, params.blurSize), 0);
-
-      // 执行处理
-      color_cvt->apply(gpu_src, gpu_processed, stream);
-      blur->apply(gpu_processed, gpu_processed, stream);
-      gpu_processed.download(processed);
-    } else
-#endif
-    {
-      cv::cvtColor(src, processed, cv::COLOR_BGR2GRAY);
-      cv::GaussianBlur(processed, processed,
-                       cv::Size(params.blurSize, params.blurSize), 0);
-    }
-
-    cv::Canny(processed, processed, params.cannyThreshold1,
-              params.cannyThreshold2);
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(processed, contours, cv::RETR_EXTERNAL,
-                     cv::CHAIN_APPROX_SIMPLE);
-
-    if (contours.empty()) {
-      spdlog::warn("No contours found, returning original image");
-      return src.clone();
-    }
-
-    auto max_contour = std::max_element(
-        contours.begin(), contours.end(), [](const auto &a, const auto &b) {
-          return cv::contourArea(a) < cv::contourArea(b);
-        });
-
-    cv::Rect bbox = cv::boundingRect(*max_contour);
-    bbox += cv::Size(params.margin, params.margin);
-    bbox -= cv::Point(params.margin, params.margin);
-
-    return crop_rectangular(src, detail::adjust_roi(bbox, src.size()));
-  } catch (const cv::Exception &e) {
-    spdlog::error("Adaptive crop failed: {}", e.what());
+    spdlog::error("Crop error: {}", e.what());
     return std::nullopt;
   }
 }
@@ -239,4 +168,94 @@ std::optional<cv::Mat> ImageCropper::crop_ratio(const cv::Mat &src,
   }
 
   return crop_rectangular(src, roi);
+}
+
+cv::Mat ImageCropper::cropRect(const cv::Mat &image, const cv::Rect &rect) {
+  cv::Rect adjustedRect = rect;
+  if (autoAdjust) {
+    adjustRectToImage(adjustedRect, image.size());
+  } else if (!validateRect(rect, image.size())) {
+    throw std::runtime_error("裁剪区域超出图像范围");
+  }
+  return image(adjustedRect).clone();
+}
+
+cv::Mat ImageCropper::cropPolygon(const cv::Mat &image,
+                                  const std::vector<cv::Point> &points) {
+  cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
+  std::vector<std::vector<cv::Point>> contours = {points};
+  cv::fillPoly(mask, contours, cv::Scalar(255));
+
+  cv::Mat result;
+  image.copyTo(result, mask);
+
+  // 获取多边形的边界框
+  cv::Rect boundRect = cv::boundingRect(points);
+  return result(boundRect).clone();
+}
+
+cv::Mat ImageCropper::cropCircle(const cv::Mat &image,
+                                 const CircleCrop &circle) {
+  cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
+  cv::circle(mask, circle.center, circle.radius, cv::Scalar(255), -1);
+
+  cv::Mat result;
+  image.copyTo(result, mask);
+
+  // 获取圆形的边界框
+  cv::Rect boundRect(circle.center.x - circle.radius,
+                     circle.center.y - circle.radius, 2 * circle.radius,
+                     2 * circle.radius);
+  adjustRectToImage(boundRect, image.size());
+  return result(boundRect).clone();
+}
+
+cv::Mat ImageCropper::cropEllipse(const cv::Mat &image,
+                                  const EllipseCrop &ellipse) {
+  cv::Mat mask = cv::Mat::zeros(image.size(), CV_8UC1);
+  cv::ellipse(mask, ellipse.center, ellipse.axes, ellipse.angle, 0, 360,
+              cv::Scalar(255), -1);
+
+  cv::Mat result;
+  image.copyTo(result, mask);
+
+  // 获取椭圆的边界框
+  cv::Rect boundRect(ellipse.center.x - ellipse.axes.width,
+                     ellipse.center.y - ellipse.axes.height,
+                     2 * ellipse.axes.width, 2 * ellipse.axes.height);
+  adjustRectToImage(boundRect, image.size());
+  return result(boundRect).clone();
+}
+
+cv::Mat ImageCropper::cropRatio(const cv::Mat &image, const RatioCrop &ratio) {
+  double currentRatio = static_cast<double>(image.cols) / image.rows;
+  cv::Rect roi;
+
+  if (currentRatio > ratio.ratio) {
+    // 图像过宽，需要在宽度上裁剪
+    int newWidth = static_cast<int>(image.rows * ratio.ratio);
+    int x = (image.cols - newWidth) / 2;
+    roi = cv::Rect(x, 0, newWidth, image.rows);
+  } else {
+    // 图像过高，需要在高度上裁剪
+    int newHeight = static_cast<int>(image.cols / ratio.ratio);
+    int y = (image.rows - newHeight) / 2;
+    roi = cv::Rect(0, y, image.cols, newHeight);
+  }
+
+  return this->cropRect(image, roi);
+}
+
+bool ImageCropper::validateRect(const cv::Rect &rect,
+                                const cv::Size &imageSize) {
+  return rect.x >= 0 && rect.y >= 0 && rect.x + rect.width <= imageSize.width &&
+         rect.y + rect.height <= imageSize.height;
+}
+
+void ImageCropper::adjustRectToImage(cv::Rect &rect,
+                                     const cv::Size &imageSize) {
+  rect.x = std::max(0, std::min(rect.x, imageSize.width - 1));
+  rect.y = std::max(0, std::min(rect.y, imageSize.height - 1));
+  rect.width = std::min(rect.width, imageSize.width - rect.x);
+  rect.height = std::min(rect.height, imageSize.height - rect.y);
 }

@@ -27,11 +27,13 @@ set(SOURCE_FILES
     src/CrashDialog.cpp
     src/CrashHandler.cpp
     src/HistogramDialog.cpp
+    src/ImageContextMenu.cpp
     src/ImagePreviewDialog.cpp
     src/MetaDataDialog.cpp
     src/UpdateCheck.cpp
 
     src/image/Convolve.cpp
+    src/image/Crop.cpp
     src/image/Denoise.cpp
     src/image/Exif.cpp
     src/image/Filter.cpp

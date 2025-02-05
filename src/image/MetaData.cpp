@@ -88,27 +88,39 @@ void ImageProcessor::validate_tag_key(const std::string &key) const {
 // 创建图像元数据
 ImageMetadata ImageProcessor::create_metadata(const fs::path &path,
                                               const cv::Mat &img) const {
-    ImageMetadata meta{
-        .path = path,
-        .size = img.size(),
-        .channels = img.channels(),
-        .depth = img.depth(),
-        .color_space = detect_color_space(img),
-        .timestamp = std::chrono::clock_cast<std::chrono::system_clock>(
-            fs::last_write_time(path)),
-        .custom_data = {}
-    };
+  // 尝试安全获取文件最后修改时间，失败则使用当前时间
+  std::chrono::system_clock::time_point timestamp;
+  try {
+    timestamp = std::chrono::clock_cast<std::chrono::system_clock>(
+        fs::last_write_time(path));
+  } catch (const std::exception &e) {
+    spdlog::warn("获取文件修改时间失败: {}，将使用当前时间替代", e.what());
+    timestamp = std::chrono::system_clock::now();
+  }
 
-    // 对FITS文件加载额外元数据
-    if (path.extension() == ".fits" || path.extension() == ".fit") {
-        auto fitsMetadata = getFitsMetadata(path.string());
-        for (const auto& [key, value] : fitsMetadata) {
-            meta.add_tag(key, value);
-        }
-        logger->info("已加载FITS元数据: {} 项", fitsMetadata.size());
+  ImageMetadata meta{.path = path,
+                     .size = img.size(),
+                     .channels = img.channels(),
+                     .depth = img.depth(),
+                     .color_space = detect_color_space(img),
+                     .timestamp = timestamp,
+                     .custom_data = {}};
+
+  std::string ext = path.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+  if (ext == ".fits" || ext == ".fit" || ext == ".fts") {
+    try {
+      auto fitsMetadata = getFitsMetadata(path.string());
+      for (const auto &[key, value] : fitsMetadata) {
+        meta.add_tag(key, value);
+      }
+      logger->info("已加载FITS元数据: {} 项", fitsMetadata.size());
+    } catch (const std::exception &e) {
+      spdlog::error("加载FITS元数据失败: {}", e.what());
     }
+  }
 
-    return meta;
+  return meta;
 }
 
 // 检测颜色空间
@@ -198,43 +210,40 @@ void ImageProcessor::log_error(const std::string &function,
 }
 
 // 保存元数据
-bool ImageProcessor::save_metadata(const ImageMetadata &meta,
-                                 const std::optional<fs::path> &output_path) noexcept {
-    try {
-        fs::path json_path;
-        if (output_path.has_value()) {
-            json_path = *output_path;
-        } else {
-            json_path = meta.path;
-            json_path.replace_extension(".json");
-        }
-
-        // 创建要保存的JSON对象
-        json metadata_json = {
-            {"path", meta.path.string()},
-            {"size", {
-                {"width", meta.size.width},
-                {"height", meta.size.height}
-            }},
-            {"channels", meta.channels},
-            {"depth", meta.depth},
-            {"color_space", meta.color_space},
-            {"timestamp", std::chrono::system_clock::to_time_t(meta.timestamp)},
-            {"custom_data", meta.custom_data}
-        };
-
-        create_output_directory(json_path);
-        
-        std::ofstream f(json_path);
-        if (!f) {
-            throw std::runtime_error("无法打开文件进行写入: " + json_path.string());
-        }
-        f << metadata_json.dump(4);
-        
-        logger->info("元数据保存成功: {}", json_path.string());
-        return true;
-    } catch (const std::exception &e) {
-        log_error("save_metadata", e.what());
-        return false;
+bool ImageProcessor::save_metadata(
+    const ImageMetadata &meta,
+    const std::optional<fs::path> &output_path) noexcept {
+  try {
+    fs::path json_path;
+    if (output_path.has_value()) {
+      json_path = *output_path;
+    } else {
+      json_path = meta.path;
+      json_path.replace_extension(".json");
     }
+
+    // 创建要保存的JSON对象
+    json metadata_json = {
+        {"path", meta.path.string()},
+        {"size", {{"width", meta.size.width}, {"height", meta.size.height}}},
+        {"channels", meta.channels},
+        {"depth", meta.depth},
+        {"color_space", meta.color_space},
+        {"timestamp", std::chrono::system_clock::to_time_t(meta.timestamp)},
+        {"custom_data", meta.custom_data}};
+
+    create_output_directory(json_path);
+
+    std::ofstream f(json_path);
+    if (!f) {
+      throw std::runtime_error("无法打开文件进行写入: " + json_path.string());
+    }
+    f << metadata_json.dump(4);
+
+    logger->info("元数据保存成功: {}", json_path.string());
+    return true;
+  } catch (const std::exception &e) {
+    log_error("save_metadata", e.what());
+    return false;
+  }
 }
