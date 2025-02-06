@@ -1,7 +1,6 @@
 #include "HFR.hpp"
 
-#include <spdlog/sinks/basic_file_sink.h>
-#include <spdlog/spdlog.h>
+#include "spdlog/sinks/basic_file_sink.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,22 +13,28 @@ using json = nlohmann::json;
 using namespace std;
 using namespace cv;
 
+namespace {
+std::shared_ptr<spdlog::logger> hfrLogger =
+    spdlog::basic_logger_mt("HFRLogger", "logs/hfr.log");
+} // namespace
+
 constexpr double MIN_LONG_RATIO = 1.5;
 
 auto checkElongated(int width, int height) -> bool {
-  spdlog::info("Checking elongation for width: {}, height: {}", width, height);
+  hfrLogger->info("Checking elongation for width: {}, height: {}", width,
+                  height);
   double ratio = width > height ? static_cast<double>(width) / height
                                 : static_cast<double>(height) / width;
   bool elongated = ratio > MIN_LONG_RATIO;
-  spdlog::info("Elongated: {}", elongated);
+  hfrLogger->info("Elongated: {}", elongated);
   return elongated;
 }
 
 auto defineNarrowRadius(int minArea, double maxArea, double area, double scale)
     -> std::tuple<int, std::vector<int>, std::vector<double>> {
-  spdlog::info("Defining narrow radius with minArea: {}, maxArea: {}, area: "
-               "{}, scale: {}",
-               minArea, maxArea, area, scale);
+  hfrLogger->info("Defining narrow radius with minArea: {}, maxArea: {}, area: "
+                  "{}, scale: {}",
+                  minArea, maxArea, area, scale);
   std::vector<int> checklist;
   std::vector<double> thresholdList;
   int checkNum = 0;
@@ -57,11 +62,11 @@ auto defineNarrowRadius(int minArea, double maxArea, double area, double scale)
     checkNum = 0;
     checklist = {};
     thresholdList = {};
-    spdlog::warn("Area {} is out of defined thresholds.", area);
+    hfrLogger->warn("Area {} is out of defined thresholds.", area);
   }
-  spdlog::info("defineNarrowRadius result - checkNum: {}, checklist size: {}, "
-               "thresholdList size: {}",
-               checkNum, checklist.size(), thresholdList.size());
+  hfrLogger->info("defineNarrowRadius result - checkNum: {}, checklist size: "
+                  "{}, thresholdList size: {}",
+                  checkNum, checklist.size(), thresholdList.size());
   return {checkNum, checklist, thresholdList};
 }
 
@@ -78,7 +83,7 @@ inline auto checkWhitePixel(const cv::Mat &rect_contour, int xCoord, int yCoord)
 auto eightSymmetryCircleCheck(const cv::Mat &rect_contour,
                               const cv::Point &center, int xCoord, int yCoord)
     -> int {
-  spdlog::info(
+  hfrLogger->info(
       "Performing EightSymmetryCircleCheck with xCoord: {}, yCoord: {}", xCoord,
       yCoord);
   int whitePixelCount = 0;
@@ -98,13 +103,14 @@ auto eightSymmetryCircleCheck(const cv::Mat &rect_contour,
       checkWhitePixel(rect_contour, center.x - yCoord, center.y + xCoord);
   whitePixelCount +=
       checkWhitePixel(rect_contour, center.x - yCoord, center.y - xCoord);
-  spdlog::info("White pixel count after symmetry check: {}", whitePixelCount);
+  hfrLogger->info("White pixel count after symmetry check: {}",
+                  whitePixelCount);
   return whitePixelCount;
 }
 
 auto fourSymmetryCircleCheck(const cv::Mat &rect_contour,
                              const cv::Point &center, float radius) -> int {
-  spdlog::info("Performing FourSymmetryCircleCheck with radius: {}", radius);
+  hfrLogger->info("Performing FourSymmetryCircleCheck with radius: {}", radius);
   int whitePixelCount = 0;
   whitePixelCount += checkWhitePixel(rect_contour, center.x,
                                      center.y + static_cast<int>(radius));
@@ -114,20 +120,20 @@ auto fourSymmetryCircleCheck(const cv::Mat &rect_contour,
       rect_contour, center.x - static_cast<int>(radius), center.y);
   whitePixelCount += checkWhitePixel(
       rect_contour, center.x + static_cast<int>(radius), center.y);
-  spdlog::info("White pixel count after four symmetry check: {}",
-               whitePixelCount);
+  hfrLogger->info("White pixel count after four symmetry check: {}",
+                  whitePixelCount);
   return whitePixelCount;
 }
 
 auto checkBresenhamCircle(const cv::Mat &rect_contour, float radius,
                           float pixelRatio, bool ifDebug) -> bool {
-  spdlog::info("Starting BresenhamCircleCheck with radius: {}, pixelRatio: {}, "
-               "ifDebug: {}",
-               radius, pixelRatio, ifDebug);
+  hfrLogger->info("Starting BresenhamCircleCheck with radius: {}, pixelRatio: "
+                  "{}, ifDebug: {}",
+                  radius, pixelRatio, ifDebug);
   cv::Mat rectContourRgb;
   if (ifDebug) {
     cv::cvtColor(rect_contour, rectContourRgb, cv::COLOR_GRAY2BGR);
-    spdlog::info("Converted rect_contour to RGB for debugging.");
+    hfrLogger->info("Converted rect_contour to RGB for debugging.");
   }
 
   int totalPixelCount = 0;
@@ -153,7 +159,7 @@ auto checkBresenhamCircle(const cv::Mat &rect_contour, float radius,
 
     if (ifDebug) {
       // Future implementation for debugging can be added here
-      spdlog::info("Debug mode: xCoord = {}, yCoord = {}", xCoord, yCoord);
+      hfrLogger->info("Debug mode: xCoord = {}, yCoord = {}", xCoord, yCoord);
     } else {
       whitePixelCount +=
           eightSymmetryCircleCheck(rect_contour, center, xCoord, yCoord);
@@ -163,10 +169,10 @@ auto checkBresenhamCircle(const cv::Mat &rect_contour, float radius,
   }
 
   float ratio = static_cast<float>(whitePixelCount) / totalPixelCount;
-  spdlog::info("BresenhamCircleCheck ratio: {}", ratio);
+  hfrLogger->info("BresenhamCircleCheck ratio: {}", ratio);
 
   bool result = ratio > pixelRatio;
-  spdlog::info("BresenhamCircleCheck result: {}", result);
+  hfrLogger->info("BresenhamCircleCheck result: {}", result);
   return result;
 }
 
@@ -213,14 +219,14 @@ auto calcHfr(const cv::Mat &inImage, float radius) -> double {
 
     return sum <= 0 ? std::sqrt(2.0) * max_radius : sumDist / sum;
   } catch (const std::exception &e) {
-    spdlog::error("Exception in calcHfr: {}", e.what());
+    hfrLogger->error("Exception in calcHfr: {}", e.what());
     throw;
   }
 }
 
 auto caldim(const cv::Mat &img) -> bool {
   try {
-    spdlog::info("Performing caldim check.");
+    hfrLogger->info("Performing caldim check.");
     cv::Mat gray;
     if (img.channels() == 3) {
       cvtColor(img, gray, COLOR_BGR2GRAY);
@@ -239,12 +245,12 @@ auto caldim(const cv::Mat &img) -> bool {
     double nonZeroRatio =
         static_cast<double>(nonZeroCount) / (binary.rows * binary.cols);
 
-    spdlog::info("caldim check: non-zero ratio = {}", nonZeroRatio);
+    hfrLogger->info("caldim check: non-zero ratio = {}", nonZeroRatio);
 
     constexpr double K_NON_ZERO_RATIO_THRESHOLD = 0.1;
     return nonZeroRatio < K_NON_ZERO_RATIO_THRESHOLD;
   } catch (const std::exception &e) {
-    spdlog::error("Exception in caldim: {}", e.what());
+    hfrLogger->error("Exception in caldim: {}", e.what());
     throw;
   }
 }
@@ -255,22 +261,22 @@ auto preprocessImage(const Mat &img, Mat &grayimg, Mat &rgbImg, Mat &mark_img)
     if (img.channels() == 3) {
       cvtColor(img, grayimg, COLOR_BGR2GRAY);
       rgbImg = img;
-      spdlog::info("Converted BGR to grayscale.");
+      hfrLogger->info("Converted BGR to grayscale.");
     } else {
       grayimg = img;
       cvtColor(grayimg, rgbImg, COLOR_GRAY2BGR);
-      spdlog::info("Converted grayscale to RGB.");
+      hfrLogger->info("Converted grayscale to RGB.");
     }
 
     if (mark_img.empty()) {
       mark_img = rgbImg.clone();
-      spdlog::info("Initialized mark_img with cloned RGB image.");
+      hfrLogger->info("Initialized mark_img with cloned RGB image.");
     } else if (mark_img.channels() == 1) {
       cvtColor(mark_img, mark_img, COLOR_GRAY2BGR);
-      spdlog::info("Converted single-channel mark_img to BGR.");
+      hfrLogger->info("Converted single-channel mark_img to BGR.");
     }
   } catch (const std::exception &e) {
-    spdlog::error("Exception in preprocessImage: {}", e.what());
+    hfrLogger->error("Exception in preprocessImage: {}", e.what());
     throw;
   }
 }
@@ -295,7 +301,7 @@ auto removeNoise(Mat &map, bool if_removehotpixel, bool if_noiseremoval)
       cv::sepFilter2D(map, map, -1, kernel_x, kernel_y);
     }
   } catch (const std::exception &e) {
-    spdlog::error("Exception in removeNoise: {}", e.what());
+    hfrLogger->error("Exception in removeNoise: {}", e.what());
     throw;
   }
 }
@@ -308,9 +314,9 @@ auto calculateMeanAndStd(const Mat &map, bool down_sample_mean_std,
       Scalar meanVal, stddev;
       meanStdDev(map, meanVal, stddev);
       stdDev = stddev[0];
-      spdlog::info("Calculated mean and std without downsampling.");
+      hfrLogger->info("Calculated mean and std without downsampling.");
     } else {
-      spdlog::info("Calculating mean and std with downsampling.");
+      hfrLogger->info("Calculating mean and std with downsampling.");
       vector<uchar> bufferValue;
       if (map.isContinuous()) {
         bufferValue.assign(map.datastart, map.dataend);
@@ -324,7 +330,7 @@ auto calculateMeanAndStd(const Mat &map, bool down_sample_mean_std,
       int sampleBy = 1;
       if (map.rows * map.cols > K_MAX_SAMPLES) {
         sampleBy = map.rows * map.cols / K_MAX_SAMPLES;
-        spdlog::info("Downsampling with step: {}", sampleBy);
+        hfrLogger->info("Downsampling with step: {}", sampleBy);
       }
 
       vector<uchar> sampleValue;
@@ -341,11 +347,11 @@ auto calculateMeanAndStd(const Mat &map, bool down_sample_mean_std,
         sum += diff * diff;
       }
       stdDev = sqrt(sum / sampleValue.size());
-      spdlog::info("Calculated downsampled mean: {} and std: {}", medianVal,
-                   stdDev);
+      hfrLogger->info("Calculated downsampled mean: {} and std: {}", medianVal,
+                      stdDev);
     }
   } catch (const std::exception &e) {
-    spdlog::error("Exception in calculateMeanAndStd: {}", e.what());
+    hfrLogger->error("Exception in calculateMeanAndStd: {}", e.what());
     throw;
   }
 }
@@ -377,7 +383,7 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
                          boundingBox.y + boundingBox.height / 2);
 
         if (checkElongated(boundingBox.width, boundingBox.height)) {
-          spdlog::info("Contour {} is elongated. Skipping.", i);
+          hfrLogger->info("Contour {} is elongated. Skipping.", i);
           continue;
         }
 
@@ -397,7 +403,7 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
           if (expandedRect.x < 0 || expandedRect.y < 0 ||
               expandedRect.x + expandedRect.width >= grayimg.cols ||
               expandedRect.y + expandedRect.height >= grayimg.rows) {
-            spdlog::warn(
+            hfrLogger->warn(
                 "Expanded rectangle out of bounds. Skipping contour {}", i);
             continue;
           }
@@ -411,7 +417,7 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
           }
         }
         if (!bshCheck) {
-          spdlog::info("Contour {} failed BresenHam check. Skipping.", i);
+          hfrLogger->info("Contour {} failed BresenHam check. Skipping.", i);
           continue;
         }
 
@@ -422,22 +428,23 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
         if (starRegion.x < 0 || starRegion.y < 0 ||
             starRegion.x + starRegion.width >= grayimg.cols ||
             starRegion.y + starRegion.height >= grayimg.rows) {
-          spdlog::warn("Star region out of bounds for contour {}. Skipping.",
-                       i);
+          hfrLogger->warn("Star region out of bounds for contour {}. "
+                          "Skipping.",
+                          i);
           continue;
         }
 
         Mat rectExpand = rgbImg(starRegion);
 
         if (caldim(rectExpand)) {
-          spdlog::info("Contour {} failed caldim check. Skipping.", i);
+          hfrLogger->info("Contour {} failed caldim check. Skipping.", i);
           continue;
         }
 
         double hfr = calcHfr(grayimg(starRegion), radius);
         constexpr double K_HFR_THRESHOLD = 0.05;
         if (hfr < K_HFR_THRESHOLD) {
-          spdlog::info("HFR below threshold for contour {}. Skipping.", i);
+          hfrLogger->info("HFR below threshold for contour {}. Skipping.", i);
           continue;
         }
         hfrList.push_back(hfr);
@@ -449,7 +456,7 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
                  Scalar(0, 255, 0), 1);
           putText(mark_img, to_string(hfr), rectCenter, FONT_HERSHEY_SIMPLEX,
                   1.0, Scalar(0, 255, 0), 1, LINE_AA);
-          spdlog::info("Marked star at contour {} with HFR: {}", i, hfr);
+          hfrLogger->info("Marked star at contour {} with HFR: {}", i, hfr);
         }
       }
     }
@@ -460,7 +467,7 @@ auto processContours(const Mat &grayimg, const Mat &rgbImg, Mat &mark_img,
             : accumulate(hfrList.begin(), hfrList.end(), 0.0) / hfrList.size();
     return make_tuple(starnum, avgHfr, hfrList, arelist);
   } catch (const std::exception &e) {
-    spdlog::error("Exception in processContours: {}", e.what());
+    hfrLogger->error("Exception in processContours: {}", e.what());
     throw;
   }
 }
@@ -470,7 +477,7 @@ auto starDetectAndHfr(const Mat &img, bool if_removehotpixel,
                       bool down_sample_mean_std, Mat mark_img)
     -> tuple<Mat, int, double, json> {
   try {
-    spdlog::info("Starting StarDetectAndHfr processing.");
+    hfrLogger->info("Starting StarDetectAndHfr processing.");
     Mat grayimg, rgbImg;
     preprocessImage(img, grayimg, rgbImg, mark_img);
 
@@ -481,19 +488,19 @@ auto starDetectAndHfr(const Mat &img, bool if_removehotpixel,
     calculateMeanAndStd(map, down_sample_mean_std, medianVal, stdDev);
 
     double threshold = medianVal + 3 * stdDev;
-    spdlog::info("Applying threshold: {}", threshold);
+    hfrLogger->info("Applying threshold: {}", threshold);
     Mat thresMap;
     cv::threshold(map, thresMap, threshold, 255, THRESH_BINARY);
 
     Mat closekernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     morphologyEx(thresMap, thresMap, MORPH_OPEN, closekernel);
-    spdlog::info("Performed morphological opening.");
+    hfrLogger->info("Performed morphological opening.");
 
     vector<vector<Point>> contours;
     vector<Vec4i> hierarchy;
     findContours(thresMap, contours, hierarchy, RETR_EXTERNAL,
                  CHAIN_APPROX_NONE);
-    spdlog::info("Found {} contours.", contours.size());
+    hfrLogger->info("Found {} contours.", contours.size());
 
     int starnum;
     double avghfr;
@@ -511,15 +518,16 @@ auto starDetectAndHfr(const Mat &img, bool if_removehotpixel,
             ? -1
             : accumulate(arelist.begin(), arelist.end(), 0.0) / arelist.size();
 
-    spdlog::info("Processed {} stars.", starnum);
-    spdlog::info("Average HFR: {}, Max Area: {}, Min Area: {}, Avg Area: {}",
-                 avghfr, maxarea, minarea, avgarea);
+    hfrLogger->info("Processed {} stars.", starnum);
+    hfrLogger->info("Average HFR: {}, Max Area: {}, Min Area: {}, Avg Area: "
+                    "{}",
+                    avghfr, maxarea, minarea, avgarea);
 
     json result = {{"max", maxarea}, {"min", minarea}, {"average", avgarea}};
 
     return make_tuple(mark_img, starnum, avghfr, result);
   } catch (const std::exception &e) {
-    spdlog::error("Exception in StarDetectAndHfr: {}", e.what());
+    hfrLogger->error("Exception in StarDetectAndHfr: {}", e.what());
     throw;
   }
 }

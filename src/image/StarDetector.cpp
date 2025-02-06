@@ -1,456 +1,609 @@
-#include "StarDetector.hpp"
-#include "FWHM.hpp"
-#include "HFR.hpp"
+#include "Stack.hpp"
 
 #include <algorithm>
-#include <execution>
-#include <fstream>
-#include <mutex>
-#include <nlohmann/json.hpp>
-#include <queue>
-#include <spdlog/spdlog.h>
-#include <unordered_map>
-
-#include <opencv2/core.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
-
+#include <cmath>
 #include <omp.h>
+#include <opencv2/imgproc.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/spdlog.h>
+#include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
-using json = nlohmann::json;
+namespace {
+std::shared_ptr<spdlog::logger> stackLogger =
+    spdlog::basic_logger_mt("StackLogger", "logs/stack.log");
+} // namespace
 
-StarDetector::StarDetector(StarDetectionConfig config)
-    : config_(std::move(config)) {
-  validate_parameters();
-  spdlog::debug("Initialized StarDetector with configured parameters");
-}
-
-void StarDetector::validate_parameters() const {
-  if (config_.median_filter_size % 2 == 0) {
-    throw std::invalid_argument("Median filter size must be odd");
-  }
-  if (config_.scales.empty()) {
-    throw std::invalid_argument("Scales list cannot be empty");
-  }
-  if (config_.wavelet_levels <= 0) {
-    throw std::invalid_argument("Wavelet levels must be positive");
-  }
-  if (config_.binarization_threshold < 0 ||
-      config_.binarization_threshold > 255) {
-    throw std::invalid_argument(
-        "Binarization threshold must be between 0 and 255");
-  }
-  if (config_.min_star_size <= 0) {
-    throw std::invalid_argument("Minimum star size must be positive");
-  }
-  if (config_.min_star_brightness < 0 || config_.min_star_brightness > 255) {
-    throw std::invalid_argument(
-        "Minimum star brightness must be between 0 and 255");
-  }
-  if (config_.min_circularity <= 0 || config_.max_circularity <= 0 ||
-      config_.min_circularity > config_.max_circularity) {
-    throw std::invalid_argument(
-        "Circularity values must be positive and min_circularity must be less "
-        "than or equal to max_circularity");
-  }
-  if (config_.dbscan_eps <= 0) {
-    throw std::invalid_argument("DBSCAN epsilon must be positive");
-  }
-  if (config_.dbscan_min_samples <= 0) {
-    throw std::invalid_argument("DBSCAN minimum samples must be positive");
-  }
-}
-
-std::vector<cv::Point>
-StarDetector::multiscale_detect_stars(const cv::Mat &input_image) {
-  if (input_image.empty()) {
-    throw std::invalid_argument("Input image is empty");
+// Compute the mean and standard deviation of images
+auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
+    -> std::pair<cv::Mat, cv::Mat> {
+  if (images.empty()) {
+    stackLogger->error(
+        "Input images are empty when computing mean and standard deviation.");
+    throw std::runtime_error("Input images are empty");
   }
 
-  cv::Mat gray_image;
-  if (input_image.channels() > 1) {
-    cv::cvtColor(input_image, gray_image, cv::COLOR_BGR2GRAY);
-  } else {
-    gray_image = input_image.clone();
-  }
+  stackLogger->info(
+      "Starting to compute mean and standard deviation. Number of images: {}",
+      images.size());
 
-  cv::Mat mark_img;
-  cv::cvtColor(gray_image, mark_img, cv::COLOR_GRAY2BGR);
+  // Initialize mean and standard deviation matrices
+  cv::Mat mean = cv::Mat::zeros(images[0].size(), CV_32F);
+  cv::Mat accumSquare = cv::Mat::zeros(images[0].size(), CV_32F);
 
-  std::vector<cv::Point> all_stars;
-  std::mutex mutex;
-
-  // 并行处理不同尺度
-  std::for_each(std::execution::par, config_.scales.begin(),
-                config_.scales.end(), [&](float scale) {
-                  try {
-                    auto scaled_stars = process_scale(gray_image, scale);
-                    std::lock_guard lock(mutex);
-                    all_stars.insert(all_stars.end(), scaled_stars.begin(),
-                                     scaled_stars.end());
-                  } catch (const std::exception &e) {
-                    spdlog::error("Scale {} processing failed: {}", scale,
-                                  e.what());
-                  }
-                });
-
-  auto unique_stars = remove_duplicates(all_stars);
-
-  // 如果需要计算度量指标
-  if (config_.calculate_metrics && !unique_stars.empty()) {
-    auto metrics = calculate_batch_metrics(input_image, unique_stars,
-                                           config_.local_region_size);
-
-    // 可以根据需要将度量指标保存或可视化
-    if (config_.visualize) {
-      for (size_t i = 0; i < unique_stars.size(); ++i) {
-        const auto &[fwhm, hfr] = metrics[i];
-        cv::putText(mark_img, cv::format("FWHM:%.2f HFR:%.2f", fwhm, hfr),
-                    unique_stars[i] + cv::Point(10, 10),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(0, 255, 0), 1);
-      }
+  // Accumulate pixel values
+  for (const auto &img : images) {
+    if (img.size() != mean.size() || img.type() != mean.type()) {
+      stackLogger->error("All images must have the same size and type.");
+      throw std::runtime_error("Image size or type mismatch");
     }
+
+    cv::Mat floatImg;
+    img.convertTo(floatImg, CV_32F);
+    mean += floatImg;
+    accumSquare += floatImg.mul(floatImg);
   }
 
-  if (config_.save_detected_stars) {
-    save_detected_stars(unique_stars, config_.detected_stars_save_path);
+  // Compute mean
+  mean /= static_cast<float>(images.size());
+
+  // Compute standard deviation
+  cv::Mat stdDev;
+  cv::sqrt(accumSquare / static_cast<float>(images.size()) - mean.mul(mean),
+           stdDev);
+
+  stackLogger->info("Mean and standard deviation computation completed.");
+
+  return {mean, stdDev};
+}
+
+// Sigma clipping stack
+auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
+    -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for sigma clipping stack.");
+    throw std::runtime_error("No images to stack");
   }
 
-  if (config_.visualize) {
-    visualize_stars(gray_image, unique_stars);
+  stackLogger->info("Starting sigma clipping stack. Sigma value: {:.2f}",
+                    sigma);
+
+  cv::Mat mean, stdDev;
+  try {
+    std::tie(mean, stdDev) = computeMeanAndStdDev(images);
+  } catch (const std::exception &e) {
+    stackLogger->error("Failed to compute mean and standard deviation: {}",
+                       e.what());
+    throw;
   }
 
-  return unique_stars;
-}
-
-std::vector<cv::Point> StarDetector::process_scale(const cv::Mat &gray_image,
-                                                   float scale) const {
-  cv::Mat resized_image;
-  cv::resize(gray_image, resized_image, {}, scale, scale, cv::INTER_LANCZOS4);
-
-  // 预处理流水线
-  cv::Mat filtered = apply_median_filter(resized_image);
-  cv::Mat denoised = wavelet_denoising(filtered);
-  cv::Mat binary = binarize_image(denoised);
-
-  auto contours = detect_contours(binary);
-  auto filtered_stars = filter_stars(contours, binary);
-
-  // 坐标转换回原图尺寸
-  std::vector<cv::Point> scaled_stars;
-  scaled_stars.reserve(filtered_stars.size());
-  for (const auto &p : filtered_stars) {
-    scaled_stars.emplace_back(static_cast<int>(p.x / scale),
-                              static_cast<int>(p.y / scale));
+  std::vector<cv::Mat> layers;
+  for (size_t i = 0; i < images.size(); ++i) {
+    cv::Mat temp;
+    images[i].convertTo(temp, CV_32F);
+    cv::Mat mask = cv::abs(temp - mean) < (sigma * stdDev);
+    temp.setTo(0, ~mask);
+    layers.push_back(temp);
+    stackLogger->info("Processed image {}, applied sigma clipping mask.",
+                      i + 1);
   }
 
-  return scaled_stars;
-}
+  cv::Mat sum = cv::Mat::zeros(images[0].size(), CV_32F);
+  cv::Mat count = cv::Mat::zeros(images[0].size(), CV_32F);
 
-cv::Mat StarDetector::apply_median_filter(const cv::Mat &image) const {
-  cv::Mat filtered;
-  cv::medianBlur(image, filtered, config_.median_filter_size);
-  return filtered;
-}
-
-cv::Mat StarDetector::wavelet_denoising(const cv::Mat &image) const {
-  // 简化的多级小波降噪实现
-  cv::Mat denoised = image.clone();
-  for (int i = 0; i < config_.wavelet_levels; ++i) {
-    cv::Mat low_freq;
-    cv::pyrDown(denoised, low_freq);
-    cv::pyrUp(low_freq, denoised);
+  for (size_t i = 0; i < layers.size(); ++i) {
+    cv::Mat mask = layers[i] != 0;
+    sum += layers[i];
+    count += mask;
+    stackLogger->info("Accumulated layer {}.", i + 1);
   }
-  return denoised;
+
+  // Prevent division by zero
+  cv::Mat nonZeroMask = count > 0;
+  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
+  sum.copyTo(result, nonZeroMask);
+  result /= count;
+
+  // Convert result back to 8-bit image
+  result.convertTo(result, CV_8U);
+
+  stackLogger->info("Sigma clipping stack completed.");
+
+  return result;
 }
 
-cv::Mat StarDetector::binarize_image(const cv::Mat &image) const {
-  cv::Mat binary;
-  cv::threshold(image, binary, config_.binarization_threshold, 255,
-                cv::THRESH_BINARY);
-  return binary;
-}
+// Compute the mode (most frequent value) of each pixel
+auto computeMode(const std::vector<cv::Mat> &images) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("Input images are empty when computing mode.");
+    throw std::runtime_error("Input images are empty");
+  }
 
-std::vector<std::vector<cv::Point>>
-StarDetector::detect_contours(const cv::Mat &binary_image) const {
-  std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(binary_image, contours, cv::RETR_EXTERNAL,
-                   cv::CHAIN_APPROX_SIMPLE);
-  return contours;
-}
+  stackLogger->info("Starting to compute image mode. Number of images: {}",
+                    images.size());
 
-std::vector<cv::Point>
-StarDetector::filter_stars(const std::vector<std::vector<cv::Point>> &contours,
-                           const cv::Mat &binary_image) const {
+  cv::Mat modeImage = cv::Mat::zeros(images[0].size(), images[0].type());
 
-  std::vector<cv::Point> valid_stars;
-  valid_stars.reserve(contours.size());
-
-#pragma omp parallel
-  {
-    std::vector<cv::Point> local_valid;
-#pragma omp for schedule(dynamic) nowait
-    for (int idx = 0; idx < static_cast<int>(contours.size()); ++idx) {
-      const auto &contour = contours[idx];
-      if (contour.empty())
-        continue;
-
-      // 使用高精度计算
-      const double area = cv::contourArea(contour);
-      const double perimeter = cv::arcLength(contour, true);
-      if (perimeter <= std::numeric_limits<double>::epsilon())
-        continue;
-
-      const double circularity = (4.0 * M_PI * area) / (perimeter * perimeter);
-      if (circularity < config_.min_circularity ||
-          circularity > config_.max_circularity) {
-        continue;
+  for (int row = 0; row < images[0].rows; ++row) {
+    for (int col = 0; col < images[0].cols; ++col) {
+      std::unordered_map<uchar, int> frequency;
+      for (const auto &img : images) {
+        uchar pixel = img.at<uchar>(row, col);
+        frequency[pixel]++;
       }
 
-      cv::Rect rect = cv::boundingRect(contour);
-      if (rect.area() < config_.min_star_size)
-        continue;
-
-      cv::Mat mask = cv::Mat::zeros(binary_image.size(), CV_8U);
-      cv::drawContours(mask, {contour}, -1, 255, cv::FILLED);
-
-      // 使用 OpenCV SIMD优化
-      cv::Mat roi = binary_image(rect);
-      cv::Mat mask_roi = mask(rect);
-      cv::Scalar mean = cv::mean(roi, mask_roi);
-
-      if (mean[0] >= config_.min_star_brightness) {
-        cv::Moments m = cv::moments(contour);
-        // 使用double精度计算质心
-        double cx = m.m10 / m.m00;
-        double cy = m.m01 / m.m00;
-        local_valid.emplace_back(static_cast<int>(std::round(cx)),
-                                 static_cast<int>(std::round(cy)));
+      // Find the most frequent pixel value
+      int maxFreq = 0;
+      uchar modePixel = 0;
+      for (const auto &[pixel, freq] : frequency) {
+        if (freq > maxFreq) {
+          maxFreq = freq;
+          modePixel = pixel;
+        }
       }
-    }
 
-#pragma omp critical
-    {
-      valid_stars.insert(valid_stars.end(), local_valid.begin(),
-                         local_valid.end());
+      modeImage.at<uchar>(row, col) = modePixel;
     }
   }
 
-  return valid_stars;
+  stackLogger->info("Image mode computation completed.");
+
+  return modeImage;
 }
 
-std::vector<cv::Point>
-StarDetector::remove_duplicates(const std::vector<cv::Point> &stars) const {
-  if (stars.empty())
-    return {};
-
-  std::vector<int> labels(stars.size(), -1);
-  std::atomic<int> cluster_id{0};
-
-#pragma omp parallel for schedule(dynamic)
-  for (size_t i = 0; i < stars.size(); ++i) {
-    if (labels[i] != -1)
-      continue;
-
-    std::vector<size_t> neighbors = find_neighbors(stars, i);
-    if (neighbors.size() < config_.dbscan_min_samples) {
-      labels[i] = -1;
-      continue;
-    }
-
-    int current_cluster = cluster_id++;
-    labels[i] = current_cluster;
-
-    // ...其余DBSCAN聚类代码保持不变...
-  }
-
-  // 并行计算聚类中心
-  std::unordered_map<int, std::vector<cv::Point>> clusters;
-#pragma omp parallel
-  {
-    std::unordered_map<int, std::vector<cv::Point>> local_clusters;
-#pragma omp for nowait
-    for (size_t i = 0; i < stars.size(); ++i) {
-      if (labels[i] != -1) {
-        local_clusters[labels[i]].push_back(stars[i]);
-      }
-    }
-
-#pragma omp critical
-    {
-      for (auto &[id, points] : local_clusters) {
-        auto &target = clusters[id];
-        target.insert(target.end(), points.begin(), points.end());
-      }
+// 计算图像熵
+auto computeEntropy(const cv::Mat &image) -> double {
+  std::vector<int> histogram(256, 0);
+  for (int i = 0; i < image.rows; i++) {
+    for (int j = 0; j < image.cols; j++) {
+      histogram[image.at<uchar>(i, j)]++;
     }
   }
 
-  std::vector<cv::Point> unique_stars;
-  unique_stars.reserve(clusters.size());
-
-#pragma omp parallel for schedule(dynamic) ordered
-  for (auto it = clusters.begin(); it != clusters.end(); ++it) {
-    const auto &points = it->second;
-    cv::Point2d sum(0.0, 0.0);
-    for (const auto &p : points) {
-      sum += cv::Point2d(p);
+  double entropy = 0.0;
+  int totalPixels = image.rows * image.cols;
+  for (int i = 0; i < 256; i++) {
+    if (histogram[i] > 0) {
+      double probability = static_cast<double>(histogram[i]) / totalPixels;
+      entropy -= probability * std::log2(probability);
     }
-    cv::Point center(static_cast<int>(std::round(sum.x / points.size())),
-                     static_cast<int>(std::round(sum.y / points.size())));
-
-#pragma omp ordered
-    unique_stars.push_back(center);
   }
-
-  return unique_stars;
+  return entropy;
 }
 
-std::vector<size_t>
-StarDetector::find_neighbors(const std::vector<cv::Point> &points,
-                             size_t idx) const {
-  std::vector<size_t> neighbors;
-  const auto &p = points[idx];
-  for (size_t i = 0; i < points.size(); ++i) {
-    if (i == idx)
-      continue;
-    if (cv::norm(p - points[i]) < config_.dbscan_eps) {
-      neighbors.push_back(i);
+// 基于熵的堆叠
+auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for entropy stack.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting entropy stack for {} images.", images.size());
+
+  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_8U);
+  std::vector<cv::Mat> entropies;
+
+  // 计算每个图像的局部熵
+  for (const auto &img : images) {
+    cv::Mat entropy = cv::Mat::zeros(img.size(), CV_32F);
+    int windowSize = 9;
+    int offset = windowSize / 2;
+
+    for (int i = offset; i < img.rows - offset; i++) {
+      for (int j = offset; j < img.cols - offset; j++) {
+        cv::Mat window = img(cv::Range(i - offset, i + offset + 1),
+                             cv::Range(j - offset, j + offset + 1));
+        entropy.at<float>(i, j) = static_cast<float>(computeEntropy(window));
+      }
+    }
+    entropies.push_back(entropy);
+  }
+
+  // 根据最大熵选择像素
+  for (int i = 0; i < result.rows; i++) {
+    for (int j = 0; j < result.cols; j++) {
+      float maxEntropy = -1;
+      int bestIndex = 0;
+      for (size_t k = 0; k < images.size(); k++) {
+        if (entropies[k].at<float>(i, j) > maxEntropy) {
+          maxEntropy = entropies[k].at<float>(i, j);
+          bestIndex = static_cast<int>(k);
+        }
+      }
+      result.at<uchar>(i, j) = images[bestIndex].at<uchar>(i, j);
     }
   }
-  return neighbors;
+
+  stackLogger->info("Entropy stack completed.");
+  return result;
 }
 
-void StarDetector::save_detected_stars(const std::vector<cv::Point> &stars,
-                                       const fs::path &path) const {
-  if (path.empty())
-    return;
+// 焦点堆叠
+auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for focus stack.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting focus stack for {} images.", images.size());
+
+  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_8U);
+  std::vector<cv::Mat> laplacians;
+
+  // 计算每个图像的Laplacian
+  for (const auto &img : images) {
+    cv::Mat laplacian;
+    cv::Laplacian(img, laplacian, CV_32F);
+    laplacian = cv::abs(laplacian);
+    laplacians.push_back(laplacian);
+  }
+
+  // 根据Laplacian响应选择最清晰的像素
+  for (int i = 0; i < result.rows; i++) {
+    for (int j = 0; j < result.cols; j++) {
+      float maxResponse = -1;
+      int bestIndex = 0;
+      for (size_t k = 0; k < images.size(); k++) {
+        if (laplacians[k].at<float>(i, j) > maxResponse) {
+          maxResponse = laplacians[k].at<float>(i, j);
+          bestIndex = static_cast<int>(k);
+        }
+      }
+      result.at<uchar>(i, j) = images[bestIndex].at<uchar>(i, j);
+    }
+  }
+
+  // 应用高斯模糊以减少噪声
+  cv::GaussianBlur(result, result, cv::Size(3, 3), 0);
+
+  stackLogger->info("Focus stack completed.");
+  return result;
+}
+
+auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
+                 float sigma, const std::vector<float> &weights) -> cv::Mat;
+
+// Stack images by layers
+auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
+                         float sigma, const std::vector<float> &weights)
+    -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for stacking by layers.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting image stacking by layers. Mode: {}",
+                    static_cast<int>(mode));
+
+  std::vector<cv::Mat> channels;
+  cv::split(images[0], channels);
+
+  for (size_t i = 1; i < images.size(); ++i) {
+    std::vector<cv::Mat> tempChannels;
+    cv::split(images[i], tempChannels);
+    for (size_t j = 0; j < channels.size(); ++j) {
+      channels[j].push_back(tempChannels[j]);
+    }
+  }
+
+  std::vector<cv::Mat> stackedChannels;
+  for (auto &channel : channels) {
+    stackedChannels.push_back(stackImages(channel, mode, sigma, weights));
+  }
+
+  cv::Mat stackedImage;
+  cv::merge(stackedChannels, stackedImage);
+
+  stackLogger->info("Image stacking by layers completed.");
+
+  return stackedImage;
+}
+
+// 新增：截断平均堆叠算法（提高算法精度和鲁棒性，利用OpenMP优化性能）
+auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
+    -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for trimmed mean stack.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting trimmed mean stack with trim ratio: {:.2f}",
+                    trimRatio);
+
+  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
+  int totalImages = static_cast<int>(images.size());
+  int trimCount = static_cast<int>(totalImages * trimRatio / 2);
+#pragma omp parallel for
+  for (int i = 0; i < images[0].rows; i++) {
+    for (int j = 0; j < images[0].cols; j++) {
+      std::vector<float> pixelValues;
+      pixelValues.reserve(totalImages);
+      for (const auto &img : images) {
+        pixelValues.push_back(static_cast<float>(img.at<uchar>(i, j)));
+      }
+      std::sort(pixelValues.begin(), pixelValues.end());
+      float sum = 0;
+      int count = 0;
+      for (int k = trimCount; k < totalImages - trimCount; k++) {
+        sum += pixelValues[k];
+        count++;
+      }
+      result.at<float>(i, j) = sum / count;
+    }
+  }
+  result.convertTo(result, CV_8U);
+
+  stackLogger->info("Trimmed mean stack completed.");
+  return result;
+}
+
+// 新增：加权中值堆叠（Weighted Median Stack）
+auto weightedMedianStack(const std::vector<cv::Mat> &images,
+                         const std::vector<float> &weights) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for weighted median stack.");
+    throw std::runtime_error("No images to stack");
+  }
+  if (weights.size() != images.size()) {
+    stackLogger->error("Number of weights does not match number of images for "
+                       "weighted median stack.");
+    throw std::runtime_error("Weights size mismatch");
+  }
+
+  stackLogger->info("Starting weighted median stack for {} images.",
+                    images.size());
+  cv::Mat result = cv::Mat::zeros(images[0].size(), images[0].type());
+  int rows = images[0].rows, cols = images[0].cols;
+  int n = static_cast<int>(images.size());
+
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
+      std::vector<std::pair<uchar, float>> pixelWeights;
+      pixelWeights.reserve(n);
+      float totalWeight = 0.0f;
+      for (int k = 0; k < n; k++) {
+        uchar pixel = images[k].at<uchar>(i, j);
+        float w = weights[k];
+        pixelWeights.push_back({pixel, w});
+        totalWeight += w;
+      }
+      std::sort(pixelWeights.begin(), pixelWeights.end(),
+                [](auto a, auto b) { return a.first < b.first; });
+      float halfWeight = totalWeight / 2.0f;
+      float cumWeight = 0.0f;
+      uchar medianPixel = 0;
+      for (auto &pw : pixelWeights) {
+        cumWeight += pw.second;
+        if (cumWeight >= halfWeight) {
+          medianPixel = pw.first;
+          break;
+        }
+      }
+      result.at<uchar>(i, j) = medianPixel;
+    }
+  }
+
+  stackLogger->info("Weighted median stack completed.");
+  return result;
+}
+
+// 新增：自适应焦点堆叠（Adaptive Focus Stack）
+// 利用每幅图像的 Laplacian 作为锐度权重计算加权平均
+auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for adaptive focus stack.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting adaptive focus stack for {} images.",
+                    images.size());
+  int rows = images[0].rows, cols = images[0].cols;
+  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
+  cv::Mat weightSum = cv::Mat::zeros(images[0].size(), CV_32F);
+  int n = static_cast<int>(images.size());
+
+  std::vector<cv::Mat> laplacianMats(n);
+  for (int k = 0; k < n; k++) {
+    cv::Laplacian(images[k], laplacianMats[k], CV_32F);
+    laplacianMats[k] = cv::abs(laplacianMats[k]);
+  }
+
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
+      float weightedPixel = 0.0f;
+      float totalWeight = 0.0f;
+      for (int k = 0; k < n; k++) {
+        float weight = laplacianMats[k].at<float>(i, j);
+        float pixelVal = static_cast<float>(images[k].at<uchar>(i, j));
+        weightedPixel += pixelVal * weight;
+        totalWeight += weight;
+      }
+      if (totalWeight > 0)
+        result.at<float>(i, j) = weightedPixel / totalWeight;
+      else
+        result.at<float>(i, j) = static_cast<float>(images[0].at<uchar>(i, j));
+    }
+  }
+  result.convertTo(result, CV_8U);
+
+  stackLogger->info("Adaptive focus stack completed.");
+  return result;
+}
+
+// Image stacking function
+auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
+                 float sigma, const std::vector<float> &weights) -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for stacking.");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting image stacking. Mode: {}",
+                    static_cast<int>(mode));
+
+  cv::Mat stackedImage;
 
   try {
-    json j;
-    for (const auto &p : stars) {
-      j.push_back({{"x", p.x}, {"y", p.y}});
+    switch (mode) {
+    case MEAN: {
+      stackLogger->info("Selected stacking mode: Mean stack (MEAN)");
+      cv::Mat stdDev; // Declare stdDev variable
+      std::tie(stackedImage, stdDev) = computeMeanAndStdDev(images);
+      stackedImage.convertTo(stackedImage, CV_8U);
+      break;
     }
-
-    std::ofstream file(path);
-    file << j.dump(4);
-    spdlog::info("Saved detected stars to {}", path.string());
-  } catch (const std::exception &e) {
-    spdlog::error("Failed to save stars: {}", e.what());
-  }
-}
-
-void StarDetector::visualize_stars(const cv::Mat &image,
-                                   const std::vector<cv::Point> &stars) const {
-  cv::Mat display;
-  cv::cvtColor(image, display, cv::COLOR_GRAY2BGR);
-
-  for (const auto &p : stars) {
-    cv::circle(display, p, 3, {0, 0, 255}, 1);
-  }
-
-  if (!config_.visualization_save_path.empty()) {
-    cv::imwrite(config_.visualization_save_path.string(), display);
-  } else {
-    cv::imshow("Detected Stars", display);
-    cv::waitKey(0);
-  }
-}
-
-std::pair<double, double> StarDetector::calculate_star_metrics(
-    const cv::Mat &image, const cv::Point &center, int region_size) const {
-  try {
-    cv::Mat roi = extract_star_region(image, center, region_size);
-    if (roi.empty()) {
-      return {0.0, 0.0};
-    }
-
-    // 将ROI转换为双精度以提高计算精度
-    cv::Mat roi_double;
-    roi.convertTo(roi_double, CV_64F);
-
-    // 计算HFR
-    double hfr = calcHfr(roi_double, region_size / 2.0);
-
-    // 提取数据点用于FWHM计算
-    std::vector<GaussianFit::DataPoint> points;
-    points.reserve(region_size);
-
-    cv::Mat row_profile;
-    cv::reduce(roi_double, row_profile, 0, cv::REDUCE_AVG);
-
-    for (int i = 0; i < row_profile.cols; ++i) {
-      points.push_back({static_cast<double>(i),
-                        static_cast<double>(row_profile.at<double>(0, i))});
-    }
-
-    // 计算FWHM
-    auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
-    double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
-
-    return {fwhm, hfr};
-  } catch (const std::exception &e) {
-    spdlog::error("Error calculating star metrics: {}", e.what());
-    return {0.0, 0.0};
-  }
-}
-
-std::vector<std::pair<double, double>>
-StarDetector::calculate_batch_metrics(const cv::Mat &image,
-                                      const std::vector<cv::Point> &centers,
-                                      int region_size) const {
-
-  std::vector<std::pair<double, double>> results(centers.size());
-
-  // 预分配内存
-  std::vector<cv::Mat> rois(centers.size());
-
-#pragma omp parallel for schedule(dynamic)
-  for (size_t i = 0; i < centers.size(); ++i) {
-    rois[i] = extract_star_region(image, centers[i], region_size);
-    if (!rois[i].empty()) {
-      cv::Mat roi_double;
-      rois[i].convertTo(roi_double, CV_64F);
-
-      double hfr = calcHfr(roi_double, region_size / 2.0);
-
-      std::vector<GaussianFit::DataPoint> points;
-      points.reserve(region_size);
-
-      cv::Mat row_profile;
-      cv::reduce(roi_double, row_profile, 0, cv::REDUCE_AVG);
-
-      for (int j = 0; j < row_profile.cols; ++j) {
-        points.push_back(
-            {static_cast<double>(j), row_profile.at<double>(0, j)});
+    case MEDIAN: {
+      stackLogger->info("Selected stacking mode: Median stack (MEDIAN)");
+      std::vector<cv::Mat> sortedImages;
+      for (const auto &img : images) {
+        cv::Mat floatImg;
+        img.convertTo(floatImg, CV_32F);
+        sortedImages.push_back(floatImg);
       }
 
-      auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
-      double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
+      // Stack all images into a 4D matrix
+      cv::Mat stacked4D;
+      cv::merge(sortedImages, stacked4D);
 
-      results[i] = {fwhm, hfr};
+      // Compute median
+      cv::Mat medianImg = cv::Mat::zeros(images[0].size(), CV_32F);
+      for (int row = 0; row < medianImg.rows; ++row) {
+        for (int col = 0; col < medianImg.cols; ++col) {
+          std::vector<float> pixelValues;
+          pixelValues.reserve(sortedImages.size());
+          for (const auto &sortedImg : sortedImages) {
+            pixelValues.push_back(sortedImg.at<float>(row, col));
+          }
+          std::nth_element(pixelValues.begin(),
+                           pixelValues.begin() + pixelValues.size() / 2,
+                           pixelValues.end());
+          medianImg.at<float>(row, col) = pixelValues[pixelValues.size() / 2];
+        }
+      }
+      medianImg.convertTo(stackedImage, CV_8U);
+      break;
     }
+    case MAXIMUM: {
+      stackLogger->info("Selected stacking mode: Maximum stack (MAXIMUM)");
+      stackedImage = images[0].clone();
+      for (size_t i = 1; i < images.size(); ++i) {
+        cv::max(stackedImage, images[i], stackedImage);
+        stackLogger->info("Applied maximum stack: Image {}", i + 1);
+      }
+      break;
+    }
+    case MINIMUM: {
+      stackLogger->info("Selected stacking mode: Minimum stack (MINIMUM)");
+      stackedImage = images[0].clone();
+      for (size_t i = 1; i < images.size(); ++i) {
+        cv::min(stackedImage, images[i], stackedImage);
+        stackLogger->info("Applied minimum stack: Image {}", i + 1);
+      }
+      break;
+    }
+    case SIGMA_CLIPPING: {
+      stackLogger->info(
+          "Selected stacking mode: Sigma clipping stack (SIGMA_CLIPPING)");
+      stackedImage = sigmaClippingStack(images, sigma);
+      break;
+    }
+    case WEIGHTED_MEAN: {
+      stackLogger->info(
+          "Selected stacking mode: Weighted mean stack (WEIGHTED_MEAN)");
+      if (weights.empty()) {
+        stackLogger->error("Weight vector is empty for weighted mean stack.");
+        throw std::runtime_error("Weight vector cannot be empty");
+      }
+      if (weights.size() != images.size()) {
+        stackLogger->error(
+            "Number of weights does not match number of images.");
+        throw std::runtime_error(
+            "Number of weights does not match number of images");
+      }
+
+      cv::Mat weightedSum = cv::Mat::zeros(images[0].size(), CV_32F);
+      float totalWeight = 0.0F;
+      for (size_t i = 0; i < images.size(); ++i) {
+        cv::Mat floatImg;
+        images[i].convertTo(floatImg, CV_32F);
+        weightedSum += floatImg * weights[i];
+        totalWeight += weights[i];
+        stackLogger->info("Applied weight {}: {:.2f}", i + 1, weights[i]);
+      }
+
+      weightedSum /= totalWeight;
+      weightedSum.convertTo(stackedImage, CV_8U);
+      break;
+    }
+    case LIGHTEN: {
+      stackLogger->info("Selected stacking mode: Lighten stack (LIGHTEN)");
+      stackedImage = images[0].clone();
+      for (size_t i = 1; i < images.size(); ++i) {
+        cv::Mat mask = images[i] > stackedImage;
+        images[i].copyTo(stackedImage, mask);
+        stackLogger->info("Applied lighten stack: Image {}", i + 1);
+      }
+      break;
+    }
+    case MODE: {
+      stackLogger->info("Selected stacking mode: Mode stack (MODE)");
+      stackedImage = computeMode(images);
+      break;
+    }
+    case ENTROPY: {
+      stackLogger->info("Selected stacking mode: Entropy stack (ENTROPY)");
+      stackedImage = entropyStack(images);
+      break;
+    }
+    case FOCUS_STACK: {
+      stackLogger->info("Selected stacking mode: Focus stack (FOCUS_STACK)");
+      stackedImage = focusStack(images);
+      break;
+    }
+    case TRIMMED_MEAN: {
+      stackLogger->info(
+          "Selected stacking mode: Trimmed mean stack (TRIMMED_MEAN)");
+      float trimRatio = 0.2f; // 可调整的修剪比例，根据需要更改数值
+      stackedImage = trimmedMeanStack(images, trimRatio);
+      break;
+    }
+    case WEIGHTED_MEDIAN: {
+      stackLogger->info(
+          "Selected stacking mode: Weighted median stack (WEIGHTED_MEDIAN)");
+      if (weights.empty()) {
+        stackLogger->error("Weight vector is empty for weighted median stack.");
+        throw std::runtime_error("Weight vector cannot be empty");
+      }
+      if (weights.size() != images.size()) {
+        stackLogger->error(
+            "Number of weights does not match number of images for "
+            "weighted median stack.");
+        throw std::runtime_error("Number of weights does not match");
+      }
+      stackedImage = weightedMedianStack(images, weights);
+      break;
+    }
+    case ADAPTIVE_FOCUS: {
+      stackLogger->info(
+          "Selected stacking mode: Adaptive focus stack (ADAPTIVE_FOCUS)");
+      stackedImage = adaptiveFocusStack(images);
+      break;
+    }
+    default: {
+      stackLogger->error("Unknown stacking mode: {}", static_cast<int>(mode));
+      throw std::invalid_argument("Unknown stacking mode");
+    }
+    }
+
+    stackLogger->info("Image stacking completed.");
+  } catch (const std::exception &e) {
+    stackLogger->error("Exception occurred during image stacking: {}",
+                       e.what());
+    throw;
   }
 
-  return results;
-}
-
-cv::Mat StarDetector::extract_star_region(const cv::Mat &image,
-                                          const cv::Point &center,
-                                          int size) const {
-  int half_size = size / 2;
-  cv::Rect roi(std::max(0, center.x - half_size),
-               std::max(0, center.y - half_size),
-               std::min(size, image.cols - center.x + half_size),
-               std::min(size, image.rows - center.y + half_size));
-
-  if (roi.width < size || roi.height < size) {
-    return cv::Mat();
-  }
-
-  cv::Mat region = image(roi).clone();
-  if (image.type() != CV_32F) {
-    region.convertTo(region, CV_32F);
-  }
-
-  return region;
+  return stackedImage;
 }

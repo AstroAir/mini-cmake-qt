@@ -9,10 +9,15 @@
 #include <optional>
 #include <ranges>
 #include <span>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <vector>
 
 namespace GaussianFit {
+namespace {
+std::shared_ptr<spdlog::logger> fwhmLogger =
+    spdlog::basic_logger_mt("FWHMLogger", "logs/fwhm.log");
+} // namespace
 namespace detail {
 template <typename T>
 concept Arithmetic = std::is_arithmetic_v<T>;
@@ -26,6 +31,7 @@ inline auto safe_division(auto numerator, auto denominator) {
 cv::Mat create_optimization_matrix(std::size_t rows, std::size_t cols) {
   cv::Mat mat(static_cast<int>(rows), static_cast<int>(cols), CV_64F);
   if (mat.empty()) {
+    fwhmLogger->error("Failed to allocate optimization matrix");
     throw std::bad_alloc();
   }
   return mat;
@@ -103,7 +109,7 @@ Statistics calculate_statistics(std::span<const DataPoint> points) {
       points.begin(), points.end(),
       [](const DataPoint &a, const DataPoint &b) { return a.y < b.y; });
 
-  return Statistics{min_it->y, max_it->y, mean_x, std::sqrt(variance)};
+  return Statistics{min_it->y, min_it->y, mean_x, std::sqrt(variance)};
 }
 
 #ifdef __AVX2__
@@ -122,17 +128,18 @@ inline __m256d gaussian_avx(__m256d x, __m256d center, __m256d width,
 std::optional<GaussianParams>
 GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
                     int max_iterations) {
-  SPDLOG_INFO("Initializing Gaussian fit with {} points", points.size());
+  fwhmLogger->info("Initializing Gaussian fit with {} points", points.size());
 
   if (points.empty()) {
-    SPDLOG_ERROR("Empty input data points");
+    fwhmLogger->error("Empty input data points");
     return std::nullopt;
   }
 
   try {
     const auto stats = detail::calculate_statistics(points);
-    SPDLOG_DEBUG("Calculated statistics: min={}, max={}, mean={}, stddev={}",
-                 stats.min, stats.max, stats.mean, stats.stddev);
+    fwhmLogger->debug(
+        "Calculated statistics: min={}, max={}, mean={}, stddev={}", stats.min,
+        stats.max, stats.mean, stats.stddev);
 
     cv::Mat params = (cv::Mat_<double>(4, 1) << stats.min,
                       stats.max - stats.min, stats.mean, stats.stddev * 2.0);
@@ -148,15 +155,16 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
       compute_residuals(params, points, residuals);
       double current_error = cv::norm(residuals);
 
-      SPDLOG_DEBUG("Iteration {:03d} - Error: {:.4e}", iter, current_error);
+      fwhmLogger->debug("Iteration {:03d} - Error: {:.4e}", iter,
+                        current_error);
 
       if (std::abs(current_error - prev_error) < epsilon) {
-        SPDLOG_INFO("Convergence achieved at iteration {}", iter);
+        fwhmLogger->info("Convergence achieved at iteration {}", iter);
         break;
       }
 
       if (current_error > prev_error) {
-        SPDLOG_WARN("Error increasing at iteration {}", iter);
+        fwhmLogger->warn("Error increasing at iteration {}", iter);
         break;
       }
 
@@ -185,7 +193,7 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
       prev_error = current_error;
 
       if (!validate_parameters(params)) {
-        SPDLOG_WARN("Invalid parameters detected at iteration {}", iter);
+        fwhmLogger->warn("Invalid parameters detected at iteration {}", iter);
         return std::nullopt;
       }
     }
@@ -194,20 +202,20 @@ GaussianFitter::fit(std::span<const DataPoint> points, double epsilon,
                           params.at<double>(2), std::abs(params.at<double>(3))};
 
     if (!result.valid()) {
-      SPDLOG_ERROR("Final parameters validation failed");
+      fwhmLogger->error("Final parameters validation failed");
       return std::nullopt;
     }
 
-    SPDLOG_INFO(
+    fwhmLogger->info(
         "Fit successful: base={:.3f}, peak={:.3f}, center={:.3f}, width={:.3f}",
         result.base, result.peak, result.center, result.width);
     return result;
 
   } catch (const cv::Exception &e) {
-    SPDLOG_CRITICAL("OpenCV exception: {}", e.what());
+    fwhmLogger->critical("OpenCV exception: {}", e.what());
     return std::nullopt;
   } catch (const std::exception &e) {
-    SPDLOG_CRITICAL("Standard exception: {}", e.what());
+    fwhmLogger->critical("Standard exception: {}", e.what());
     return std::nullopt;
   }
 }
@@ -289,6 +297,7 @@ void GaussianFitter::compute_residuals(const cv::Mat &params,
   const GaussianParams p{params.at<double>(0), params.at<double>(1),
                          params.at<double>(2), params.at<double>(3)};
   if (!p.valid()) {
+    fwhmLogger->error("Invalid parameters in residual calculation");
     throw std::invalid_argument("Invalid parameters in residual calculation");
   }
   const std::size_t n = points.size();
@@ -309,6 +318,7 @@ void GaussianFitter::compute_jacobian(const cv::Mat &params,
   const double width = params.at<double>(3);
 
   if (width < detail::EPSILON) {
+    fwhmLogger->error("Invalid width in Jacobian calculation");
     throw std::invalid_argument("Invalid width in Jacobian calculation");
   }
 
@@ -331,7 +341,7 @@ void GaussianFitter::compute_jacobian(const cv::Mat &params,
 bool GaussianFitter::validate_parameters(const cv::Mat &params) {
   const double width = params.at<double>(3);
   if (width < detail::EPSILON) {
-    SPDLOG_WARN("Invalid width parameter: {:.4e}", width);
+    fwhmLogger->warn("Invalid width parameter: {:.4e}", width);
     return false;
   }
   return true;

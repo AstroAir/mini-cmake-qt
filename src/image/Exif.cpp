@@ -4,12 +4,18 @@
 #include <fstream>
 #include <opencv2/opencv.hpp>
 #include <span>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
 using namespace std;
+
+namespace {
+std::shared_ptr<spdlog::logger> exifLogger =
+    spdlog::basic_logger_mt("ExifLogger", "logs/exif.log");
+} // namespace
 
 // Custom byteswap implementation if std::byteswap is not available
 template <typename T> T byteswap(T value) {
@@ -23,10 +29,10 @@ template <typename T> T byteswap(T value) {
 }
 
 ExifParser::ExifParser(const string &file_path) {
-  spdlog::info("Opening file: {}", file_path);
+  exifLogger->info("Opening file: {}", file_path);
   ifstream file(file_path, ios::binary);
   if (!file) {
-    spdlog::error("Failed to open file: {}", file_path);
+    exifLogger->error("Failed to open file: {}", file_path);
     throw runtime_error("Failed to open file");
   }
 
@@ -38,36 +44,37 @@ ExifParser::ExifParser(const string &file_path) {
                            end(exif_signature));
 
   if (exif_start == buffer.end()) {
-    spdlog::error("EXIF signature not found in file: {}", file_path);
+    exifLogger->error("EXIF signature not found in file: {}", file_path);
     throw runtime_error("EXIF signature not found");
   }
 
   data_ = span<const uint8_t>(
       reinterpret_cast<const uint8_t *>(exif_start.base() + 6),
       reinterpret_cast<const uint8_t *>(buffer.data() + buffer.size()));
-  spdlog::info("EXIF data found and loaded from file: {}", file_path);
+  exifLogger->info("EXIF data found and loaded from file: {}", file_path);
 }
 
 vector<ExifValue> ExifParser::parse() {
   vector<ExifValue> results;
 
   if (data_.size() < 8) {
-    spdlog::error("Invalid EXIF header, data size too small");
+    exifLogger->error("Invalid EXIF header, data size too small");
     throw runtime_error("Invalid EXIF header");
   }
 
   const auto byte_order = data_[0] == 'I' ? endian::little : endian::big;
-  spdlog::info("Byte order detected: {}",
-               byte_order == endian::little ? "Little Endian" : "Big Endian");
+  exifLogger->info("Byte order detected: {}", byte_order == endian::little
+                                                  ? "Little Endian"
+                                                  : "Big Endian");
 
   constexpr array<uint8_t, 2> fixed_header{0x2a, 0x00};
   if (!equal(fixed_header.begin(), fixed_header.end(), data_.begin() + 2)) {
-    spdlog::error("Invalid TIFF header");
+    exifLogger->error("Invalid TIFF header");
     throw runtime_error("Invalid TIFF header");
   }
 
   auto ifd_offset = read_value<uint32_t>(4, byte_order);
-  spdlog::info("IFD offset: {}", ifd_offset);
+  exifLogger->info("IFD offset: {}", ifd_offset);
   process_ifd(ifd_offset, byte_order, results, true);
 
   return results;
@@ -76,7 +83,7 @@ vector<ExifValue> ExifParser::parse() {
 template <typename T>
 T ExifParser::read_value(size_t offset, endian order) const {
   if (offset + sizeof(T) > data_.size()) {
-    spdlog::error("Read beyond EXIF data boundary at offset: {}", offset);
+    exifLogger->error("Read beyond EXIF data boundary at offset: {}", offset);
     throw out_of_range("Read beyond EXIF data boundary");
   }
 
@@ -88,13 +95,13 @@ T ExifParser::read_value(size_t offset, endian order) const {
 void ExifParser::process_ifd(uint32_t offset, endian order,
                              vector<ExifValue> &results, bool root_ifd) {
   const auto entry_count = read_value<uint16_t>(offset, order);
-  spdlog::info("Processing IFD with {} entries at offset: {}", entry_count,
-               offset);
+  exifLogger->info("Processing IFD with {} entries at offset: {}", entry_count,
+                   offset);
 
   constexpr size_t entry_size = 12;
   const auto max_offset = offset + 2 + entry_count * entry_size;
   if (max_offset > data_.size()) {
-    spdlog::error("IFD structure exceeds data boundary");
+    exifLogger->error("IFD structure exceeds data boundary");
     throw out_of_range("IFD structure exceeds data boundary");
   }
 
@@ -107,9 +114,9 @@ void ExifParser::process_ifd(uint32_t offset, endian order,
     const auto components = read_value<uint32_t>(4, order);
     const auto value_offset = read_value<uint32_t>(8, order);
 
-    spdlog::info("Parsing entry: tag=0x{:04x}, format={}, components={}, "
-                 "value_offset={}",
-                 tag, format, components, value_offset);
+    exifLogger->info("Parsing entry: tag=0x{:04x}, format={}, components={}, "
+                     "value_offset={}",
+                     tag, format, components, value_offset);
 
     try {
       if (auto exif_value =
@@ -118,13 +125,14 @@ void ExifParser::process_ifd(uint32_t offset, endian order,
 
         // 处理子IFD
         if (root_ifd && tag == 0x8769) { // Exif subIFD
-          spdlog::info("Processing Exif subIFD at offset: {}", value_offset);
+          exifLogger->info("Processing Exif subIFD at offset: {}",
+                           value_offset);
           process_ifd(value_offset, order, results, false);
         }
       }
     } catch (const exception &e) {
       // 记录解析错误但继续处理其他条目
-      spdlog::error("Error parsing tag 0x{:04x}: {}", tag, e.what());
+      exifLogger->error("Error parsing tag 0x{:04x}: {}", tag, e.what());
     }
   }
 }
@@ -251,7 +259,7 @@ optional<ExifValue> ExifParser::parse_entry(uint16_t tag, uint16_t format,
     break;
   }
   default:
-    spdlog::warn("Unsupported format: {}", format);
+    exifLogger->warn("Unsupported format: {}", format);
     return nullopt; // 忽略不支持的类型
   }
   return result;

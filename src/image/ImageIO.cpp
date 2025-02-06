@@ -6,7 +6,7 @@
 #undef TBYTE
 #endif
 
-#include "spdlog/spdlog.h"
+#include "spdlog/sinks/basic_file_sink.h"
 #include <chrono>
 #include <filesystem>
 #include <future>
@@ -16,13 +16,16 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+std::shared_ptr<spdlog::logger> imageIOLogger =
+    spdlog::basic_logger_mt("ImageIOLogger", "logs/image_io.log");
+
 // 辅助函数：记录OpenCV异常并返回空矩阵
 bool handleCvException(const std::exception &e, const std::string &context) {
-  spdlog::error("{}: {}", context, e.what());
+  imageIOLogger->error("{}: {}", context, e.what());
   return false;
 }
 
-namespace {
 bool isFitsFile(const std::string &filename) {
   std::string ext = std::filesystem::path(filename).extension().string();
   return ext == ".fits" || ext == ".fit" || ext == ".fts";
@@ -38,14 +41,14 @@ cv::Mat loadFitsImage(const std::string &filename) {
 
   // 打开FITS文件
   if (fits_open_file(&fptr, filename.c_str(), READONLY, &status)) {
-    spdlog::error("无法打开FITS文件: {}", filename);
+    imageIOLogger->error("无法打开FITS文件: {}", filename);
     fits_report_error(stderr, status);
     return cv::Mat();
   }
 
   // 获取图像信息
   if (fits_get_img_param(fptr, 2, &bitpix, &naxis, naxes, &status)) {
-    spdlog::error("无法获取FITS图像参数");
+    imageIOLogger->error("无法获取FITS图像参数");
     fits_close_file(fptr, &status);
     fits_report_error(stderr, status);
     return cv::Mat();
@@ -57,7 +60,7 @@ cv::Mat loadFitsImage(const std::string &filename) {
 
   if (fits_read_pix(fptr, TFLOAT, fpixel, naxes[0] * naxes[1], nullptr,
                     contents.data(), nullptr, &status)) {
-    spdlog::error("读取FITS像素数据失败");
+    imageIOLogger->error("读取FITS像素数据失败");
     fits_close_file(fptr, &status);
     fits_report_error(stderr, status);
     return cv::Mat();
@@ -80,10 +83,10 @@ cv::Mat loadFitsImage(const std::string &filename) {
 
 auto loadImage(const std::string &filename, int flags) -> cv::Mat {
   try {
-    spdlog::info("开始加载图像 '{}'，参数 flags={}", filename, flags);
+    imageIOLogger->info("开始加载图像 '{}'，参数 flags={}", filename, flags);
 
     if (!fs::exists(filename)) {
-      spdlog::error("图像文件不存在: {}", filename);
+      imageIOLogger->error("图像文件不存在: {}", filename);
       return {};
     }
 
@@ -100,21 +103,22 @@ auto loadImage(const std::string &filename, int flags) -> cv::Mat {
             .count();
 
     if (image.empty()) {
-      spdlog::error("加载图像失败: {} (耗时: {}ms)", filename, duration);
+      imageIOLogger->error("加载图像失败: {} (耗时: {}ms)", filename, duration);
       return {};
     }
 
-    spdlog::info("成功加载图像: {}", filename);
-    spdlog::info("图像属性: {}x{}, {} 通道, 类型={}, 深度={}", image.cols,
-                 image.rows, image.channels(), image.type(), image.depth());
-    spdlog::info("加载耗时: {}ms", duration);
+    imageIOLogger->info("成功加载图像: {}", filename);
+    imageIOLogger->info("图像属性: {}x{}, {} 通道, 类型={}, 深度={}",
+                        image.cols, image.rows, image.channels(), image.type(),
+                        image.depth());
+    imageIOLogger->info("加载耗时: {}ms", duration);
 
     return image;
   } catch (const cv::Exception &e) {
     handleCvException(e, "loadImage");
     return {};
   } catch (const std::exception &e) {
-    spdlog::error("loadImage 异常: {}", e.what());
+    imageIOLogger->error("loadImage 异常: {}", e.what());
     return {};
   }
 }
@@ -123,13 +127,13 @@ auto loadImages(const std::string &folder,
                 const std::vector<std::string> &filenames, int flags)
     -> std::vector<std::pair<std::string, cv::Mat>> {
   try {
-    spdlog::info("开始批量加载图像，文件夹: {}", folder);
-    spdlog::info("目标文件数量: {}", filenames.empty()
-                                         ? "所有文件"
-                                         : std::to_string(filenames.size()));
+    imageIOLogger->info("开始批量加载图像，文件夹: {}", folder);
+    imageIOLogger->info("目标文件数量: {}",
+                        filenames.empty() ? "所有文件"
+                                          : std::to_string(filenames.size()));
 
     if (!fs::exists(folder)) {
-      spdlog::error("文件夹不存在: {}", folder);
+      imageIOLogger->error("文件夹不存在: {}", folder);
       return {};
     }
 
@@ -139,7 +143,7 @@ auto loadImages(const std::string &folder,
     int failCount = 0;
 
     if (filenames.empty()) {
-      spdlog::info("扫描目录中的所有图像文件...");
+      imageIOLogger->info("扫描目录中的所有图像文件...");
       std::vector<std::future<void>> futures;
       for (const auto &entry : fs::directory_iterator(folder)) {
         if (entry.is_regular_file()) {
@@ -160,11 +164,13 @@ auto loadImages(const std::string &folder,
                     images.emplace_back(filepath, img);
                   }
                   successCount++;
-                  spdlog::info("加载图像 {}: {}x{}, {} 通道 ({}ms)", filepath,
-                               img.cols, img.rows, img.channels(), duration);
+                  imageIOLogger->info("加载图像 {}: {}x{}, {} 通道 ({}ms)",
+                                      filepath, img.cols, img.rows,
+                                      img.channels(), duration);
                 } else {
                   failCount++;
-                  spdlog::error("加载图像失败: {} ({}ms)", filepath, duration);
+                  imageIOLogger->error("加载图像失败: {} ({}ms)", filepath,
+                                       duration);
                 }
               }));
         }
@@ -174,33 +180,33 @@ auto loadImages(const std::string &folder,
         fut.get();
       }
     } else {
-      spdlog::info("加载指定的 {} 个图像文件...", filenames.size());
+      imageIOLogger->info("加载指定的 {} 个图像文件...", filenames.size());
       std::vector<std::future<void>> futures;
       for (const auto &filename : filenames) {
-        futures.emplace_back(
-            std::async(std::launch::async, [&images, &folder, &filename, flags,
-                                            &successCount, &failCount]() {
-              std::string filepath = (fs::path(folder) / filename).string();
-              auto start = std::chrono::high_resolution_clock::now();
-              cv::Mat img = cv::imread(filepath, flags);
-              auto end = std::chrono::high_resolution_clock::now();
-              auto duration =
-                  std::chrono::duration_cast<std::chrono::milliseconds>(end -
-                                                                        start)
-                      .count();
+        futures.emplace_back(std::async(std::launch::async, [&images, &folder,
+                                                             &filename, flags,
+                                                             &successCount,
+                                                             &failCount]() {
+          std::string filepath = (fs::path(folder) / filename).string();
+          auto start = std::chrono::high_resolution_clock::now();
+          cv::Mat img = cv::imread(filepath, flags);
+          auto end = std::chrono::high_resolution_clock::now();
+          auto duration =
+              std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  .count();
 
-              if (!img.empty()) {
-                {
-                  images.emplace_back(filepath, img);
-                }
-                successCount++;
-                spdlog::info("加载图像 {}: {}x{}, {} 通道 ({}ms)", filepath,
-                             img.cols, img.rows, img.channels(), duration);
-              } else {
-                failCount++;
-                spdlog::error("加载图像失败: {} ({}ms)", filepath, duration);
-              }
-            }));
+          if (!img.empty()) {
+            {
+              images.emplace_back(filepath, img);
+            }
+            successCount++;
+            imageIOLogger->info("加载图像 {}: {}x{}, {} 通道 ({}ms)", filepath,
+                                img.cols, img.rows, img.channels(), duration);
+          } else {
+            failCount++;
+            imageIOLogger->error("加载图像失败: {} ({}ms)", filepath, duration);
+          }
+        }));
       }
       // 等待所有任务完成
       for (auto &fut : futures) {
@@ -213,31 +219,31 @@ auto loadImages(const std::string &folder,
                              endTotal - startTotal)
                              .count();
 
-    spdlog::info("批量加载完成:");
-    spdlog::info("  成功: {} 张图像", successCount);
-    spdlog::info("  失败: {} 张图像", failCount);
-    spdlog::info("  总耗时: {}ms", totalDuration);
-    spdlog::info("  每张图像平均耗时: {}ms",
-                 (successCount > 0) ? totalDuration / successCount : 0);
+    imageIOLogger->info("批量加载完成:");
+    imageIOLogger->info("  成功: {} 张图像", successCount);
+    imageIOLogger->info("  失败: {} 张图像", failCount);
+    imageIOLogger->info("  总耗时: {}ms", totalDuration);
+    imageIOLogger->info("  每张图像平均耗时: {}ms",
+                        (successCount > 0) ? totalDuration / successCount : 0);
 
     return images;
   } catch (const cv::Exception &e) {
     handleCvException(e, "loadImages");
     return {};
   } catch (const std::exception &e) {
-    spdlog::error("loadImages 异常: {}", e.what());
+    imageIOLogger->error("loadImages 异常: {}", e.what());
     return {};
   }
 }
 
 auto saveImage(const std::string &filename, const cv::Mat &image) -> bool {
   try {
-    spdlog::info("开始保存图像: {}", filename);
-    spdlog::info("图像属性: {}x{}, {} 通道, 类型={}", image.cols, image.rows,
-                 image.channels(), image.type());
+    imageIOLogger->info("开始保存图像: {}", filename);
+    imageIOLogger->info("图像属性: {}x{}, {} 通道, 类型={}", image.cols,
+                        image.rows, image.channels(), image.type());
 
     if (image.empty()) {
-      spdlog::error("无法保存空图像: {}", filename);
+      imageIOLogger->error("无法保存空图像: {}", filename);
       return false;
     }
 
@@ -249,22 +255,22 @@ auto saveImage(const std::string &filename, const cv::Mat &image) -> bool {
             .count();
 
     if (success) {
-      spdlog::info("成功保存图像: {} ({}ms)", filename, duration);
+      imageIOLogger->info("成功保存图像: {} ({}ms)", filename, duration);
       try {
         auto fileSize = fs::file_size(filename);
-        spdlog::info("文件大小: {} 字节", fileSize);
+        imageIOLogger->info("文件大小: {} 字节", fileSize);
       } catch (const fs::filesystem_error &e) {
-        spdlog::warn("无法获取文件大小: {}", e.what());
+        imageIOLogger->warn("无法获取文件大小: {}", e.what());
       }
       return true;
     }
 
-    spdlog::error("保存图像失败: {} ({}ms)", filename, duration);
+    imageIOLogger->error("保存图像失败: {} ({}ms)", filename, duration);
     return false;
   } catch (const cv::Exception &e) {
     return handleCvException(e, "saveImage");
   } catch (const std::exception &e) {
-    spdlog::error("saveImage 异常: {}", e.what());
+    imageIOLogger->error("saveImage 异常: {}", e.what());
     return false;
   }
 }
@@ -272,30 +278,31 @@ auto saveImage(const std::string &filename, const cv::Mat &image) -> bool {
 auto saveMatTo8BitJpg(const cv::Mat &image, const std::string &output_path)
     -> bool {
   try {
-    spdlog::info("开始将图像转换为8位JPG: {}x{}", image.cols, image.rows);
+    imageIOLogger->info("开始将图像转换为8位JPG: {}x{}", image.cols,
+                        image.rows);
 
     if (image.empty()) {
-      spdlog::error("输入图像为空");
+      imageIOLogger->error("输入图像为空");
       return false;
     }
 
-    spdlog::info("输入图像: 类型={}, 深度={}, 通道={}", image.type(),
-                 image.depth(), image.channels());
+    imageIOLogger->info("输入图像: 类型={}, 深度={}, 通道={}", image.type(),
+                        image.depth(), image.channels());
 
     cv::Mat image16, outputImage;
 
     // 根据输入深度转换到16位
     switch (image.depth()) {
     case CV_8U:
-      spdlog::info("将8位转换为16位，MSB对齐");
+      imageIOLogger->info("将8位转换为16位，MSB对齐");
       image.convertTo(image16, CV_16UC1, 256.0);
       break;
     case CV_16U:
-      spdlog::info("保持16位深度");
+      imageIOLogger->info("保持16位深度");
       image16 = image.clone();
       break;
     default:
-      spdlog::error("不支持的图像深度: {}", image.depth());
+      imageIOLogger->error("不支持的图像深度: {}", image.depth());
       return false;
     }
 
@@ -310,7 +317,7 @@ auto saveMatTo8BitJpg(const cv::Mat &image, const std::string &output_path)
   } catch (const cv::Exception &e) {
     return handleCvException(e, "saveMatTo8BitJpg");
   } catch (const std::exception &e) {
-    spdlog::error("saveMatTo8BitJpg 异常: {}", e.what());
+    imageIOLogger->error("saveMatTo8BitJpg 异常: {}", e.what());
     return false;
   }
 }
@@ -318,10 +325,11 @@ auto saveMatTo8BitJpg(const cv::Mat &image, const std::string &output_path)
 auto saveMatTo16BitPng(const cv::Mat &image, const std::string &output_path)
     -> bool {
   try {
-    spdlog::info("开始将图像转换为16位PNG: {}x{}", image.cols, image.rows);
+    imageIOLogger->info("开始将图像转换为16位PNG: {}x{}", image.cols,
+                        image.rows);
 
     if (image.empty()) {
-      spdlog::error("输入图像为空");
+      imageIOLogger->error("输入图像为空");
       return false;
     }
 
@@ -329,12 +337,12 @@ auto saveMatTo16BitPng(const cv::Mat &image, const std::string &output_path)
 
     // 最优的16位转换
     if (image.depth() == CV_8U) {
-      spdlog::info("将8位转换为16位");
+      imageIOLogger->info("将8位转换为16位");
       image.convertTo(outputImage, CV_16U, 256.0);
     } else if (image.depth() == CV_16U) {
       outputImage = image.clone();
     } else {
-      spdlog::error("不支持的图像深度: {}", image.depth());
+      imageIOLogger->error("不支持的图像深度: {}", image.depth());
       return false;
     }
 
@@ -346,7 +354,7 @@ auto saveMatTo16BitPng(const cv::Mat &image, const std::string &output_path)
   } catch (const cv::Exception &e) {
     return handleCvException(e, "saveMatTo16BitPng");
   } catch (const std::exception &e) {
-    spdlog::error("saveMatTo16BitPng 异常: {}", e.what());
+    imageIOLogger->error("saveMatTo16BitPng 异常: {}", e.what());
     return false;
   }
 }
@@ -354,10 +362,10 @@ auto saveMatTo16BitPng(const cv::Mat &image, const std::string &output_path)
 auto saveMatToFits(const cv::Mat &image, const std::string &output_path)
     -> bool {
   try {
-    spdlog::info("开始将图像转换为FITS: {}x{}", image.cols, image.rows);
+    imageIOLogger->info("开始将图像转换为FITS: {}x{}", image.cols, image.rows);
 
     if (image.empty()) {
-      spdlog::error("输入图像为空");
+      imageIOLogger->error("输入图像为空");
       return false;
     }
 
@@ -379,7 +387,7 @@ auto saveMatToFits(const cv::Mat &image, const std::string &output_path)
     if (fits_create_file(&fptr, FITS_PATH.c_str(), &status) != 0) {
       char error_msg[84];
       fits_get_errstatus(status, error_msg);
-      spdlog::error("无法创建FITS文件: {} - {}", output_path, error_msg);
+      imageIOLogger->error("无法创建FITS文件: {} - {}", output_path, error_msg);
       return false;
     }
 
@@ -388,7 +396,7 @@ auto saveMatToFits(const cv::Mat &image, const std::string &output_path)
                         &status) != 0) {
       char error_msg[84];
       fits_get_errstatus(status, error_msg);
-      spdlog::error("无法创建FITS图像结构 - {}", error_msg);
+      imageIOLogger->error("无法创建FITS图像结构 - {}", error_msg);
       fits_close_file(fptr, &status);
       return false;
     }
@@ -398,7 +406,7 @@ auto saveMatToFits(const cv::Mat &image, const std::string &output_path)
                        grayImage.ptr<short>(), &status) != 0) {
       char error_msg[84];
       fits_get_errstatus(status, error_msg);
-      spdlog::error("无法写入FITS图像数据 - {}", error_msg);
+      imageIOLogger->error("无法写入FITS图像数据 - {}", error_msg);
       fits_close_file(fptr, &status);
       return false;
     }
@@ -409,16 +417,16 @@ auto saveMatToFits(const cv::Mat &image, const std::string &output_path)
     if (status != 0) {
       char error_msg[84];
       fits_get_errstatus(status, error_msg);
-      spdlog::error("FITS错误: {}", error_msg);
+      imageIOLogger->error("FITS错误: {}", error_msg);
       return false;
     }
 
-    spdlog::info("成功保存FITS文件: {}", output_path);
+    imageIOLogger->info("成功保存FITS文件: {}", output_path);
     return true;
   } catch (const cv::Exception &e) {
     return handleCvException(e, "saveMatToFits");
   } catch (const std::exception &e) {
-    spdlog::error("saveMatToFits 异常: {}", e.what());
+    imageIOLogger->error("saveMatToFits 异常: {}", e.what());
     return false;
   }
 }
@@ -431,11 +439,15 @@ auto getFitsMetadata(const std::string &filepath)
 
   try {
     if (fits_open_file(&fptr, filepath.c_str(), READONLY, &status)) {
+      imageIOLogger->error("无法打开FITS文件: {}", filepath);
+      fits_report_error(stderr, status);
       throw std::runtime_error("无法打开FITS文件");
     }
 
     int nkeys;
     if (fits_get_hdrspace(fptr, &nkeys, nullptr, &status)) {
+      imageIOLogger->error("无法获取FITS头部信息数量");
+      fits_report_error(stderr, status);
       throw std::runtime_error("无法获取FITS头部信息数量");
     }
 
@@ -446,15 +458,24 @@ auto getFitsMetadata(const std::string &filepath)
 
     for (int i = 1; i <= nkeys; i++) {
       if (fits_read_record(fptr, i, card, &status)) {
+        imageIOLogger->warn("无法读取FITS记录 {}", i);
+        fits_report_error(stderr, status);
+        status = 0; // reset status after non-critical error
         continue;
       }
 
       int n = 0; // 新增的参数
       if (fits_get_keyname(card, keyname, &status, &n)) {
+        imageIOLogger->warn("无法获取键名 {}", i);
+        fits_report_error(stderr, status);
+        status = 0; // reset status after non-critical error
         continue;
       }
 
       if (fits_parse_value(card, value, comment, &status)) {
+        imageIOLogger->warn("无法解析值 {}", i);
+        fits_report_error(stderr, status);
+        status = 0; // reset status after non-critical error
         continue;
       }
 
@@ -468,14 +489,23 @@ auto getFitsMetadata(const std::string &filepath)
       }
     }
 
-    fits_close_file(fptr, &status);
-    spdlog::info("成功读取FITS元数据: {} 项", metadata.size());
-
-  } catch (const std::exception &e) {
-    spdlog::error("读取FITS元数据失败: {}", e.what());
     if (fptr) {
       fits_close_file(fptr, &status);
+      if (status) {
+        imageIOLogger->error("关闭FITS文件时发生错误");
+        fits_report_error(stderr, status);
+      }
     }
+    imageIOLogger->info("成功读取FITS元数据: {} 项", metadata.size());
+
+  } catch (const std::exception &e) {
+    imageIOLogger->error("读取FITS元数据失败: {}", e.what());
+    if (fptr) {
+      fits_close_file(fptr, &status);
+      fits_report_error(stderr, status);
+    }
+    // 如果在清理资源后重新抛出异常，请确保状态正确
+    throw;
   }
 
   return metadata;

@@ -4,22 +4,27 @@
 #include <cmath>
 #include <omp.h>
 #include <opencv2/imgproc.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
+namespace {
+std::shared_ptr<spdlog::logger> stackLogger =
+    spdlog::basic_logger_mt("StackLogger", "logs/stack.log");
+} // namespace
 
 // Compute the mean and standard deviation of images
 auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
     -> std::pair<cv::Mat, cv::Mat> {
   if (images.empty()) {
-    spdlog::error(
+    stackLogger->error(
         "Input images are empty when computing mean and standard deviation.");
     throw std::runtime_error("Input images are empty");
   }
 
-  spdlog::info(
+  stackLogger->info(
       "Starting to compute mean and standard deviation. Number of images: {}",
       images.size());
 
@@ -30,7 +35,7 @@ auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
   // Accumulate pixel values
   for (const auto &img : images) {
     if (img.size() != mean.size() || img.type() != mean.type()) {
-      spdlog::error("All images must have the same size and type.");
+      stackLogger->error("All images must have the same size and type.");
       throw std::runtime_error("Image size or type mismatch");
     }
 
@@ -48,7 +53,7 @@ auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
   cv::sqrt(accumSquare / static_cast<float>(images.size()) - mean.mul(mean),
            stdDev);
 
-  spdlog::info("Mean and standard deviation computation completed.");
+  stackLogger->info("Mean and standard deviation computation completed.");
 
   return {mean, stdDev};
 }
@@ -57,18 +62,19 @@ auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
 auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
     -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("No input images for sigma clipping stack.");
+    stackLogger->error("No input images for sigma clipping stack.");
     throw std::runtime_error("No images to stack");
   }
 
-  spdlog::info("Starting sigma clipping stack. Sigma value: {:.2f}", sigma);
+  stackLogger->info("Starting sigma clipping stack. Sigma value: {:.2f}",
+                    sigma);
 
   cv::Mat mean, stdDev;
   try {
     std::tie(mean, stdDev) = computeMeanAndStdDev(images);
   } catch (const std::exception &e) {
-    spdlog::error("Failed to compute mean and standard deviation: {}",
-                  e.what());
+    stackLogger->error("Failed to compute mean and standard deviation: {}",
+                       e.what());
     throw;
   }
 
@@ -79,7 +85,8 @@ auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
     cv::Mat mask = cv::abs(temp - mean) < (sigma * stdDev);
     temp.setTo(0, ~mask);
     layers.push_back(temp);
-    spdlog::info("Processed image {}, applied sigma clipping mask.", i + 1);
+    stackLogger->info("Processed image {}, applied sigma clipping mask.",
+                      i + 1);
   }
 
   cv::Mat sum = cv::Mat::zeros(images[0].size(), CV_32F);
@@ -89,7 +96,7 @@ auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
     cv::Mat mask = layers[i] != 0;
     sum += layers[i];
     count += mask;
-    spdlog::info("Accumulated layer {}.", i + 1);
+    stackLogger->info("Accumulated layer {}.", i + 1);
   }
 
   // Prevent division by zero
@@ -101,7 +108,7 @@ auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
   // Convert result back to 8-bit image
   result.convertTo(result, CV_8U);
 
-  spdlog::info("Sigma clipping stack completed.");
+  stackLogger->info("Sigma clipping stack completed.");
 
   return result;
 }
@@ -109,12 +116,12 @@ auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
 // Compute the mode (most frequent value) of each pixel
 auto computeMode(const std::vector<cv::Mat> &images) -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("Input images are empty when computing mode.");
+    stackLogger->error("Input images are empty when computing mode.");
     throw std::runtime_error("Input images are empty");
   }
 
-  spdlog::info("Starting to compute image mode. Number of images: {}",
-               images.size());
+  stackLogger->info("Starting to compute image mode. Number of images: {}",
+                    images.size());
 
   cv::Mat modeImage = cv::Mat::zeros(images[0].size(), images[0].type());
 
@@ -140,7 +147,7 @@ auto computeMode(const std::vector<cv::Mat> &images) -> cv::Mat {
     }
   }
 
-  spdlog::info("Image mode computation completed.");
+  stackLogger->info("Image mode computation completed.");
 
   return modeImage;
 }
@@ -168,8 +175,11 @@ auto computeEntropy(const cv::Mat &image) -> double {
 // 基于熵的堆叠
 auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat {
   if (images.empty()) {
+    stackLogger->error("No input images for entropy stack.");
     throw std::runtime_error("No images to stack");
   }
+
+  stackLogger->info("Starting entropy stack for {} images.", images.size());
 
   cv::Mat result = cv::Mat::zeros(images[0].size(), CV_8U);
   std::vector<cv::Mat> entropies;
@@ -205,14 +215,18 @@ auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat {
     }
   }
 
+  stackLogger->info("Entropy stack completed.");
   return result;
 }
 
 // 焦点堆叠
 auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
   if (images.empty()) {
+    stackLogger->error("No input images for focus stack.");
     throw std::runtime_error("No images to stack");
   }
+
+  stackLogger->info("Starting focus stack for {} images.", images.size());
 
   cv::Mat result = cv::Mat::zeros(images[0].size(), CV_8U);
   std::vector<cv::Mat> laplacians;
@@ -242,6 +256,8 @@ auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
 
   // 应用高斯模糊以减少噪声
   cv::GaussianBlur(result, result, cv::Size(3, 3), 0);
+
+  stackLogger->info("Focus stack completed.");
   return result;
 }
 
@@ -253,12 +269,12 @@ auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
                          float sigma, const std::vector<float> &weights)
     -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("No input images for stacking.");
+    stackLogger->error("No input images for stacking by layers.");
     throw std::runtime_error("No images to stack");
   }
 
-  spdlog::info("Starting image stacking by layers. Mode: {}",
-               static_cast<int>(mode));
+  stackLogger->info("Starting image stacking by layers. Mode: {}",
+                    static_cast<int>(mode));
 
   std::vector<cv::Mat> channels;
   cv::split(images[0], channels);
@@ -279,7 +295,7 @@ auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
   cv::Mat stackedImage;
   cv::merge(stackedChannels, stackedImage);
 
-  spdlog::info("Image stacking by layers completed.");
+  stackLogger->info("Image stacking by layers completed.");
 
   return stackedImage;
 }
@@ -288,8 +304,13 @@ auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
 auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
     -> cv::Mat {
   if (images.empty()) {
+    stackLogger->error("No input images for trimmed mean stack.");
     throw std::runtime_error("No images to stack");
   }
+
+  stackLogger->info("Starting trimmed mean stack with trim ratio: {:.2f}",
+                    trimRatio);
+
   cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
   int totalImages = static_cast<int>(images.size());
   int trimCount = static_cast<int>(totalImages * trimRatio / 2);
@@ -312,6 +333,8 @@ auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
     }
   }
   result.convertTo(result, CV_8U);
+
+  stackLogger->info("Trimmed mean stack completed.");
   return result;
 }
 
@@ -319,16 +342,17 @@ auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
 auto weightedMedianStack(const std::vector<cv::Mat> &images,
                          const std::vector<float> &weights) -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("No input images for weighted median stack.");
+    stackLogger->error("No input images for weighted median stack.");
     throw std::runtime_error("No images to stack");
   }
   if (weights.size() != images.size()) {
-    spdlog::error("Number of weights does not match number of images for "
-                  "weighted median stack.");
+    stackLogger->error("Number of weights does not match number of images for "
+                       "weighted median stack.");
     throw std::runtime_error("Weights size mismatch");
   }
 
-  spdlog::info("Starting weighted median stack for {} images.", images.size());
+  stackLogger->info("Starting weighted median stack for {} images.",
+                    images.size());
   cv::Mat result = cv::Mat::zeros(images[0].size(), images[0].type());
   int rows = images[0].rows, cols = images[0].cols;
   int n = static_cast<int>(images.size());
@@ -360,7 +384,8 @@ auto weightedMedianStack(const std::vector<cv::Mat> &images,
       result.at<uchar>(i, j) = medianPixel;
     }
   }
-  spdlog::info("Weighted median stack completed.");
+
+  stackLogger->info("Weighted median stack completed.");
   return result;
 }
 
@@ -368,11 +393,12 @@ auto weightedMedianStack(const std::vector<cv::Mat> &images,
 // 利用每幅图像的 Laplacian 作为锐度权重计算加权平均
 auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("No input images for adaptive focus stack.");
+    stackLogger->error("No input images for adaptive focus stack.");
     throw std::runtime_error("No images to stack");
   }
 
-  spdlog::info("Starting adaptive focus stack for {} images.", images.size());
+  stackLogger->info("Starting adaptive focus stack for {} images.",
+                    images.size());
   int rows = images[0].rows, cols = images[0].cols;
   cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
   cv::Mat weightSum = cv::Mat::zeros(images[0].size(), CV_32F);
@@ -402,7 +428,8 @@ auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
     }
   }
   result.convertTo(result, CV_8U);
-  spdlog::info("Adaptive focus stack completed.");
+
+  stackLogger->info("Adaptive focus stack completed.");
   return result;
 }
 
@@ -410,25 +437,26 @@ auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
 auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
                  float sigma, const std::vector<float> &weights) -> cv::Mat {
   if (images.empty()) {
-    spdlog::error("No input images for stacking.");
+    stackLogger->error("No input images for stacking.");
     throw std::runtime_error("No images to stack");
   }
 
-  spdlog::info("Starting image stacking. Mode: {}", static_cast<int>(mode));
+  stackLogger->info("Starting image stacking. Mode: {}",
+                    static_cast<int>(mode));
 
   cv::Mat stackedImage;
 
   try {
     switch (mode) {
     case MEAN: {
-      spdlog::info("Selected stacking mode: Mean stack (MEAN)");
+      stackLogger->info("Selected stacking mode: Mean stack (MEAN)");
       cv::Mat stdDev; // Declare stdDev variable
       std::tie(stackedImage, stdDev) = computeMeanAndStdDev(images);
       stackedImage.convertTo(stackedImage, CV_8U);
       break;
     }
     case MEDIAN: {
-      spdlog::info("Selected stacking mode: Median stack (MEDIAN)");
+      stackLogger->info("Selected stacking mode: Median stack (MEDIAN)");
       std::vector<cv::Mat> sortedImages;
       for (const auto &img : images) {
         cv::Mat floatImg;
@@ -459,38 +487,39 @@ auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
       break;
     }
     case MAXIMUM: {
-      spdlog::info("Selected stacking mode: Maximum stack (MAXIMUM)");
+      stackLogger->info("Selected stacking mode: Maximum stack (MAXIMUM)");
       stackedImage = images[0].clone();
       for (size_t i = 1; i < images.size(); ++i) {
         cv::max(stackedImage, images[i], stackedImage);
-        spdlog::info("Applied maximum stack: Image {}", i + 1);
+        stackLogger->info("Applied maximum stack: Image {}", i + 1);
       }
       break;
     }
     case MINIMUM: {
-      spdlog::info("Selected stacking mode: Minimum stack (MINIMUM)");
+      stackLogger->info("Selected stacking mode: Minimum stack (MINIMUM)");
       stackedImage = images[0].clone();
       for (size_t i = 1; i < images.size(); ++i) {
         cv::min(stackedImage, images[i], stackedImage);
-        spdlog::info("Applied minimum stack: Image {}", i + 1);
+        stackLogger->info("Applied minimum stack: Image {}", i + 1);
       }
       break;
     }
     case SIGMA_CLIPPING: {
-      spdlog::info(
+      stackLogger->info(
           "Selected stacking mode: Sigma clipping stack (SIGMA_CLIPPING)");
       stackedImage = sigmaClippingStack(images, sigma);
       break;
     }
     case WEIGHTED_MEAN: {
-      spdlog::info(
+      stackLogger->info(
           "Selected stacking mode: Weighted mean stack (WEIGHTED_MEAN)");
       if (weights.empty()) {
-        spdlog::error("Weight vector is empty for weighted mean stack.");
+        stackLogger->error("Weight vector is empty for weighted mean stack.");
         throw std::runtime_error("Weight vector cannot be empty");
       }
       if (weights.size() != images.size()) {
-        spdlog::error("Number of weights does not match number of images.");
+        stackLogger->error(
+            "Number of weights does not match number of images.");
         throw std::runtime_error(
             "Number of weights does not match number of images");
       }
@@ -502,7 +531,7 @@ auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
         images[i].convertTo(floatImg, CV_32F);
         weightedSum += floatImg * weights[i];
         totalWeight += weights[i];
-        spdlog::info("Applied weight {}: {:.2f}", i + 1, weights[i]);
+        stackLogger->info("Applied weight {}: {:.2f}", i + 1, weights[i]);
       }
 
       weightedSum /= totalWeight;
@@ -510,66 +539,69 @@ auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
       break;
     }
     case LIGHTEN: {
-      spdlog::info("Selected stacking mode: Lighten stack (LIGHTEN)");
+      stackLogger->info("Selected stacking mode: Lighten stack (LIGHTEN)");
       stackedImage = images[0].clone();
       for (size_t i = 1; i < images.size(); ++i) {
         cv::Mat mask = images[i] > stackedImage;
         images[i].copyTo(stackedImage, mask);
-        spdlog::info("Applied lighten stack: Image {}", i + 1);
+        stackLogger->info("Applied lighten stack: Image {}", i + 1);
       }
       break;
     }
     case MODE: {
-      spdlog::info("Selected stacking mode: Mode stack (MODE)");
+      stackLogger->info("Selected stacking mode: Mode stack (MODE)");
       stackedImage = computeMode(images);
       break;
     }
     case ENTROPY: {
-      spdlog::info("Selected stacking mode: Entropy stack (ENTROPY)");
+      stackLogger->info("Selected stacking mode: Entropy stack (ENTROPY)");
       stackedImage = entropyStack(images);
       break;
     }
     case FOCUS_STACK: {
-      spdlog::info("Selected stacking mode: Focus stack (FOCUS_STACK)");
+      stackLogger->info("Selected stacking mode: Focus stack (FOCUS_STACK)");
       stackedImage = focusStack(images);
       break;
     }
     case TRIMMED_MEAN: {
-      spdlog::info("Selected stacking mode: Trimmed mean stack (TRIMMED_MEAN)");
+      stackLogger->info(
+          "Selected stacking mode: Trimmed mean stack (TRIMMED_MEAN)");
       float trimRatio = 0.2f; // 可调整的修剪比例，根据需要更改数值
       stackedImage = trimmedMeanStack(images, trimRatio);
       break;
     }
     case WEIGHTED_MEDIAN: {
-      spdlog::info(
+      stackLogger->info(
           "Selected stacking mode: Weighted median stack (WEIGHTED_MEDIAN)");
       if (weights.empty()) {
-        spdlog::error("Weight vector is empty for weighted median stack.");
+        stackLogger->error("Weight vector is empty for weighted median stack.");
         throw std::runtime_error("Weight vector cannot be empty");
       }
       if (weights.size() != images.size()) {
-        spdlog::error("Number of weights does not match number of images for "
-                      "weighted median stack.");
+        stackLogger->error(
+            "Number of weights does not match number of images for "
+            "weighted median stack.");
         throw std::runtime_error("Number of weights does not match");
       }
       stackedImage = weightedMedianStack(images, weights);
       break;
     }
     case ADAPTIVE_FOCUS: {
-      spdlog::info(
+      stackLogger->info(
           "Selected stacking mode: Adaptive focus stack (ADAPTIVE_FOCUS)");
       stackedImage = adaptiveFocusStack(images);
       break;
     }
     default: {
-      spdlog::error("Unknown stacking mode: {}", static_cast<int>(mode));
+      stackLogger->error("Unknown stacking mode: {}", static_cast<int>(mode));
       throw std::invalid_argument("Unknown stacking mode");
     }
     }
 
-    spdlog::info("Image stacking completed.");
+    stackLogger->info("Image stacking completed.");
   } catch (const std::exception &e) {
-    spdlog::error("Exception occurred during image stacking: {}", e.what());
+    stackLogger->error("Exception occurred during image stacking: {}",
+                       e.what());
     throw;
   }
 

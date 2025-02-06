@@ -1,13 +1,24 @@
 #include "Denoise.hpp"
 
 #include <algorithm>
+#include <spdlog/sinks/basic_file_sink.h>
+#include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <vector>
 
+namespace {
+std::shared_ptr<spdlog::logger> denoiseLogger =
+    spdlog::basic_logger_mt("DenoiseLogger", "logs/denoise.log");
+} // namespace
+
 void WaveletDenoiser::denoise(const cv::Mat &src, cv::Mat &dst, int levels,
                               float threshold) {
+  denoiseLogger->debug("Starting wavelet denoise with levels: {}, threshold: "
+                       "{}",
+                       levels, threshold);
   // 为简单起见，仅对单通道进行演示，彩色可拆分通道分别处理
   if (src.channels() > 1) {
+    denoiseLogger->debug("Processing multi-channel image");
     // 转换为Lab或YUV后处理亮度通道，再合并，还可并行处理
     cv::Mat copyImg;
     src.copyTo(copyImg);
@@ -21,38 +32,50 @@ void WaveletDenoiser::denoise(const cv::Mat &src, cv::Mat &dst, int levels,
     bgr[0] = denoisedChannel;
 
     cv::merge(bgr, dst);
+    denoiseLogger->debug("Multi-channel wavelet denoise completed");
   } else {
+    denoiseLogger->debug("Processing single-channel image");
     wavelet_process_single_channel(src, dst, levels, threshold);
+    denoiseLogger->debug("Single-channel wavelet denoise completed");
   }
 }
 
 void WaveletDenoiser::wavelet_process_single_channel(const cv::Mat &src,
                                                      cv::Mat &dst, int levels,
                                                      float threshold) {
+  denoiseLogger->debug("Starting wavelet process for single channel with "
+                       "levels: {}, threshold: {}",
+                       levels, threshold);
   // 转成float类型，便于处理
   cv::Mat floatSrc;
   src.convertTo(floatSrc, CV_32F);
+  denoiseLogger->debug("Converted source to float type");
 
   // 小波分解
   cv::Mat waveCoeffs = floatSrc.clone();
   for (int i = 0; i < levels; i++) {
     waveCoeffs = decompose_one_level(waveCoeffs);
+    denoiseLogger->debug("Decomposed level {}", i + 1);
   }
 
   // 去噪（简单阈值处理）
   cv::threshold(waveCoeffs, waveCoeffs, threshold, 0, cv::THRESH_TOZERO);
+  denoiseLogger->debug("Applied thresholding");
 
   // 逆变换
   for (int i = 0; i < levels; i++) {
     waveCoeffs = recompose_one_level(waveCoeffs, floatSrc.size());
+    denoiseLogger->debug("Recomposed level {}", i + 1);
   }
 
   // 转回原类型
   waveCoeffs.convertTo(dst, src.type());
+  denoiseLogger->debug("Converted back to original type");
 }
 
 // 单层离散小波分解(示例性拆分，不以真实小波为准)
 cv::Mat WaveletDenoiser::decompose_one_level(const cv::Mat &src) {
+  denoiseLogger->debug("Starting decompose one level");
   cv::Mat dst = src.clone();
   // 此处可进行实际小波分解，此处仅演示简化方法：
   // 例如：将图像分块(低频 + 高频)
@@ -64,12 +87,14 @@ cv::Mat WaveletDenoiser::decompose_one_level(const cv::Mat &src) {
   // 为了安全，在行方向拼接（可根据需求改变）
   cv::Mat combined;
   cv::vconcat(lowFreq, highFreq, combined);
+  denoiseLogger->debug("Decompose one level completed");
   return combined;
 }
 
 // 单层离散小波重构(示例性的逆过程)
 cv::Mat WaveletDenoiser::recompose_one_level(const cv::Mat &waveCoeffs,
                                              const cv::Size &originalSize) {
+  denoiseLogger->debug("Starting recompose one level");
   // 假设waveCoeffs是上下拼接的
   int rowCount = waveCoeffs.rows / 2;
   cv::Mat lowFreq = waveCoeffs(cv::Rect(0, 0, waveCoeffs.cols, rowCount));
@@ -82,13 +107,17 @@ cv::Mat WaveletDenoiser::recompose_one_level(const cv::Mat &waveCoeffs,
   // 保证输出大小与原图一致(多层变换后可能需要特别处理)
   if (combined.size() != originalSize) {
     cv::resize(combined, combined, originalSize, 0, 0, cv::INTER_LINEAR);
+    denoiseLogger->debug("Resized combined image to original size");
   }
+  denoiseLogger->debug("Recompose one level completed");
   return combined;
 }
 
 void WaveletDenoiser::process_blocks(
     cv::Mat &img, int block_size,
     const std::function<void(cv::Mat &)> &process_fn) {
+  denoiseLogger->debug("Starting process blocks with block size: {}",
+                       block_size);
   const int rows = img.rows;
   const int cols = img.cols;
 
@@ -101,6 +130,7 @@ void WaveletDenoiser::process_blocks(
       process_fn(block_roi);
     }
   }
+  denoiseLogger->debug("Process blocks completed");
 }
 
 // SIMD优化的小波变换
@@ -120,6 +150,9 @@ void WaveletDenoiser::wavelet_transform_simd(cv::Mat &data) {
 // 自适应阈值计算
 float WaveletDenoiser::compute_adaptive_threshold(const cv::Mat &coeffs,
                                                   double noise_estimate) {
+  denoiseLogger->debug("Starting compute adaptive threshold with noise "
+                       "estimate: {}",
+                       noise_estimate);
   cv::Mat abs_coeffs;
   cv::absdiff(coeffs, cv::Scalar(0), abs_coeffs);
 
@@ -141,13 +174,17 @@ float WaveletDenoiser::compute_adaptive_threshold(const cv::Mat &coeffs,
     }
   }
 
+  denoiseLogger->debug("Adaptive threshold computed: {}",
+                       median * noise_estimate);
   return static_cast<float>(median * noise_estimate);
 }
 
 void WaveletDenoiser::denoise(const cv::Mat &src, cv::Mat &dst,
                               const DenoiseParameters &params) {
+  denoiseLogger->info("Starting wavelet denoise with parameters");
   cv::Mat working;
   src.convertTo(working, CV_32F);
+  denoiseLogger->debug("Converted source to float type");
 
   // 分块并行处理
   process_blocks(working, params.block_size, [&params](cv::Mat &block) {
@@ -181,22 +218,24 @@ void WaveletDenoiser::denoise(const cv::Mat &src, cv::Mat &dst,
   });
 
   working.convertTo(dst, src.type());
+  denoiseLogger->info("Wavelet denoise completed");
 }
 
 ImageDenoiser::ImageDenoiser() {}
 
 cv::Mat ImageDenoiser::denoise(const cv::Mat &input,
                                const DenoiseParameters &params) {
+  denoiseLogger->info("Starting image denoise");
   if (input.empty()) {
-    spdlog::error("Input image is empty");
+    denoiseLogger->error("Input image is empty");
     throw std::invalid_argument("Empty input image");
   }
 
   // 支持8位单通道或三通道图像
   if (input.depth() != CV_8U ||
       (input.channels() != 1 && input.channels() != 3)) {
-    spdlog::error("Unsupported format: depth={} channels={}", input.depth(),
-              input.channels());
+    denoiseLogger->error("Unsupported format: depth={} channels={}",
+                         input.depth(), input.channels());
     throw std::invalid_argument("Unsupported image format");
   }
 
@@ -207,6 +246,7 @@ cv::Mat ImageDenoiser::denoise(const cv::Mat &input,
                             ? analyze_noise(input)
                             : params.method;
 
+    denoiseLogger->debug("Using denoise method: {}", method_to_string(method));
     switch (method) {
     case DenoiseMethod::Median:
       validate_median(params);
@@ -230,18 +270,21 @@ cv::Mat ImageDenoiser::denoise(const cv::Mat &input,
                                params.wavelet_threshold);
       break;
     default:
+      denoiseLogger->error("Unsupported denoising method");
       throw std::runtime_error("Unsupported denoising method");
     }
 
-    spdlog::info("Denoising completed using {}", method_to_string(method));
+    denoiseLogger->info("Denoising completed using {}",
+                        method_to_string(method));
     return processed;
   } catch (const cv::Exception &e) {
-    spdlog::error("OpenCV error: {}", e.what());
+    denoiseLogger->error("OpenCV error: {}", e.what());
     throw;
   }
 }
 
 DenoiseMethod ImageDenoiser::analyze_noise(const cv::Mat &img) {
+  denoiseLogger->info("Starting noise analysis");
   cv::Mat gray;
   if (img.channels() > 1) {
     cv::cvtColor(img, gray, cv::COLOR_BGR2GRAY);
@@ -258,16 +301,22 @@ DenoiseMethod ImageDenoiser::analyze_noise(const cv::Mat &img) {
   double salt_pepper_ratio = detect_salt_pepper(gray);
   double gaussian_likelihood = detect_gaussian(gray);
 
+  denoiseLogger->debug("Salt and pepper ratio: {}, Gaussian likelihood: {}",
+                       salt_pepper_ratio, gaussian_likelihood);
   if (salt_pepper_ratio > 0.1) {
+    denoiseLogger->info("Detected salt and pepper noise, using Median filter");
     return DenoiseMethod::Median;
   } else if (gaussian_likelihood > 0.7) {
+    denoiseLogger->info("Detected Gaussian noise, using Gaussian filter");
     return DenoiseMethod::Gaussian;
   } else {
+    denoiseLogger->info("Using Wavelet denoise method");
     return DenoiseMethod::Wavelet;
   }
 }
 
 double ImageDenoiser::detect_salt_pepper(const cv::Mat &gray) {
+  denoiseLogger->debug("Detecting salt and pepper noise");
   int height = gray.rows;
   int width = gray.cols;
   int salt_pepper_count = 0;
@@ -297,10 +346,13 @@ double ImageDenoiser::detect_salt_pepper(const cv::Mat &gray) {
     }
   }
 
-  return static_cast<double>(salt_pepper_count) / total_pixels;
+  double ratio = static_cast<double>(salt_pepper_count) / total_pixels;
+  denoiseLogger->debug("Salt and pepper noise ratio: {}", ratio);
+  return ratio;
 }
 
 double ImageDenoiser::detect_gaussian(const cv::Mat &gray) {
+  denoiseLogger->debug("Detecting Gaussian noise");
   cv::Mat blur, diff;
   cv::GaussianBlur(gray, blur, cv::Size(5, 5), 1.5);
   cv::absdiff(gray, blur, diff);
@@ -310,11 +362,14 @@ double ImageDenoiser::detect_gaussian(const cv::Mat &gray) {
 
   // 根据差异图的标准差估计高斯噪声的可能性
   double normalized_std = stddev[0] / 255.0;
-  return std::min(normalized_std * 3.0, 1.0); // 归一化到[0,1]范围
+  double likelihood = std::min(normalized_std * 3.0, 1.0); // 归一化到[0,1]范围
+  denoiseLogger->debug("Gaussian noise likelihood: {}", likelihood);
+  return likelihood;
 }
 
 void ImageDenoiser::process_bilateral(const cv::Mat &src, cv::Mat &dst,
                                       const DenoiseParameters &params) {
+  denoiseLogger->debug("Processing bilateral filter");
   if (src.channels() == 3) {
     // 转成Lab，先对亮度通道进行双边滤波，再转换回来
     cv::cvtColor(src, dst, cv::COLOR_BGR2Lab);
@@ -336,10 +391,12 @@ void ImageDenoiser::process_bilateral(const cv::Mat &src, cv::Mat &dst,
     cv::bilateralFilter(src, dst, params.bilateral_d, params.sigma_color,
                         params.sigma_space);
   }
+  denoiseLogger->debug("Bilateral filter completed");
 }
 
 void ImageDenoiser::process_nlm(const cv::Mat &src, cv::Mat &dst,
                                 const DenoiseParameters &params) {
+  denoiseLogger->debug("Processing NLM denoise");
   if (src.channels() == 3) {
     cv::fastNlMeansDenoisingColored(src, dst, params.nlm_h, params.nlm_h,
                                     params.nlm_template_size,
@@ -348,26 +405,33 @@ void ImageDenoiser::process_nlm(const cv::Mat &src, cv::Mat &dst,
     cv::fastNlMeansDenoising(src, dst, params.nlm_h, params.nlm_template_size,
                              params.nlm_search_size);
   }
+  denoiseLogger->debug("NLM denoise completed");
 }
 
 // 参数校验
 void ImageDenoiser::validate_median(const DenoiseParameters &params) {
   if (params.median_kernel % 2 == 0 || params.median_kernel < 3) {
+    denoiseLogger->error("Median kernel size must be odd and ≥3");
     throw std::invalid_argument("Median kernel size must be odd and ≥3");
   }
+  denoiseLogger->debug("Median parameters validated");
 }
 
 void ImageDenoiser::validate_gaussian(const DenoiseParameters &params) {
   if (params.gaussian_kernel.width % 2 == 0 ||
       params.gaussian_kernel.height % 2 == 0) {
+    denoiseLogger->error("Gaussian kernel size must be odd");
     throw std::invalid_argument("Gaussian kernel size must be odd");
   }
+  denoiseLogger->debug("Gaussian parameters validated");
 }
 
 void ImageDenoiser::validate_bilateral(const DenoiseParameters &params) {
   if (params.bilateral_d <= 0) {
+    denoiseLogger->error("Bilateral d must be positive");
     throw std::invalid_argument("Bilateral d must be positive");
   }
+  denoiseLogger->debug("Bilateral parameters validated");
 }
 
 const char *ImageDenoiser::method_to_string(DenoiseMethod method) {

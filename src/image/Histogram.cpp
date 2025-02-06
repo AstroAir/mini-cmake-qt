@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <opencv2/imgproc.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
 #include <vector>
@@ -10,21 +11,26 @@ namespace {
 const cv::Scalar DEFAULT_HIST_COLOR(255, 0, 0);
 constexpr int DEFAULT_LINE_TYPE = cv::LINE_AA;
 constexpr float DEFAULT_THRESHOLD = 4.0f;
+
+std::shared_ptr<spdlog::logger> histogramLogger =
+    spdlog::basic_logger_mt("HistogramLogger", "logs/histogram.log");
+
 } // namespace
 
 auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
     -> std::vector<cv::Mat> {
-  spdlog::info("Calculating BGR histograms with histSize: {}", config.histSize);
+  histogramLogger->info("Calculating BGR histograms with histSize: {}",
+                        config.histSize);
   if (img.empty()) {
-    spdlog::error("Input image for calculateHist is empty.");
+    histogramLogger->error("Input image for calculateHist is empty.");
     throw std::invalid_argument("Input image for calculateHist is empty.");
   }
   if (img.channels() != 3) {
-    spdlog::error("Input image does not have 3 channels.");
+    histogramLogger->error("Input image does not have 3 channels.");
     throw std::invalid_argument("Input image does not have 3 channels.");
   }
   if (config.histSize <= 0) {
-    spdlog::error("Histogram size must be positive.");
+    histogramLogger->error("Histogram size must be positive.");
     throw std::invalid_argument("Histogram size must be positive.");
   }
 
@@ -37,7 +43,8 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
 
   std::vector<cv::Mat> histograms(3);
 
-#pragma omp parallel for num_threads(config.numThreads) if (config.numThreads != 1)
+#pragma omp parallel for num_threads(                                          \
+        config.numThreads) if (config.numThreads != 1)
   for (int i = 0; i < 3; ++i) {
     try {
       cv::calcHist(&bgrPlanes[i], 1, channels.data(), cv::Mat(), histograms[i],
@@ -53,14 +60,14 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
 
       if (config.threshold > 0) {
         cv::threshold(histograms[i], histograms[i], config.threshold, 0,
-                     cv::THRESH_TOZERO);
+                      cv::THRESH_TOZERO);
       }
 
       if (config.normalize) {
         cv::normalize(histograms[i], histograms[i], 0, 1, cv::NORM_MINMAX);
       }
     } catch (const cv::Exception &e) {
-      spdlog::error("OpenCV error in channel {}: {}", i, e.what());
+      histogramLogger->error("OpenCV error in channel {}: {}", i, e.what());
       throw;
     }
   }
@@ -70,17 +77,18 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
 
 auto calculateGrayHist(const cv::Mat &img, const HistogramConfig &config)
     -> cv::Mat {
-  spdlog::info("Calculating grayscale histogram with histSize: {}", config.histSize);
+  histogramLogger->info("Calculating grayscale histogram with histSize: {}",
+                        config.histSize);
   if (img.empty()) {
-    spdlog::error("Input image for calculateGrayHist is empty.");
+    histogramLogger->error("Input image for calculateGrayHist is empty.");
     throw std::invalid_argument("Input image for calculateGrayHist is empty.");
   }
   if (img.channels() != 1) {
-    spdlog::error("Input image is not grayscale.");
+    histogramLogger->error("Input image is not grayscale.");
     throw std::invalid_argument("Input image is not grayscale.");
   }
   if (config.histSize <= 0) {
-    spdlog::error("Histogram size must be positive.");
+    histogramLogger->error("Histogram size must be positive.");
     throw std::invalid_argument("Histogram size must be positive.");
   }
 
@@ -88,8 +96,8 @@ auto calculateGrayHist(const cv::Mat &img, const HistogramConfig &config)
   const float *ranges[] = {config.range.data()};
 
   cv::Mat grayHist;
-  cv::calcHist(&img, 1, channels.data(), cv::Mat(), grayHist, 1, &config.histSize,
-               ranges);
+  cv::calcHist(&img, 1, channels.data(), cv::Mat(), grayHist, 1,
+               &config.histSize, ranges);
 
   if (config.useLog) {
     cv::log(grayHist + 1, grayHist);
@@ -107,18 +115,18 @@ auto calculateGrayHist(const cv::Mat &img, const HistogramConfig &config)
     cv::normalize(grayHist, grayHist, 0, 1, cv::NORM_MINMAX);
   }
 
-  spdlog::info("Completed grayscale histogram calculation.");
+  histogramLogger->info("Completed grayscale histogram calculation.");
   return grayHist;
 }
 
 auto calculateCDF(const cv::Mat &hist) -> cv::Mat {
-  spdlog::info("Calculating CDF.");
+  histogramLogger->info("Calculating CDF.");
   if (hist.empty()) {
-    spdlog::error("Input histogram for calculateCDF is empty.");
+    histogramLogger->error("Input histogram for calculateCDF is empty.");
     throw std::invalid_argument("Input histogram for calculateCDF is empty.");
   }
   if (hist.rows == 0) {
-    spdlog::error("Input histogram has no data.");
+    histogramLogger->error("Input histogram has no data.");
     throw std::invalid_argument("Input histogram has no data.");
   }
 
@@ -132,17 +140,17 @@ auto calculateCDF(const cv::Mat &hist) -> cv::Mat {
   }
 
   cv::normalize(cdf, cdf, 0, 1, cv::NORM_MINMAX);
-  spdlog::info("Completed CDF calculation.");
+  histogramLogger->info("Completed CDF calculation.");
   return cdf;
 }
 
 auto equalizeHistogram(const cv::Mat &img, const EqualizeConfig &config)
     -> cv::Mat {
-  spdlog::info("Starting histogram equalization with clip limit: {}",
-               config.clipLimit ? "enabled" : "disabled");
+  histogramLogger->info("Starting histogram equalization with clip limit: {}",
+                        config.clipLimit ? "enabled" : "disabled");
 
   if (img.empty()) {
-    spdlog::error("Input image is empty");
+    histogramLogger->error("Input image is empty");
     throw std::invalid_argument("Empty input image");
   }
 

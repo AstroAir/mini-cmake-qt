@@ -3,8 +3,14 @@
 #include <QImage>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <vector>
+
+namespace {
+std::shared_ptr<spdlog::logger> filterLogger =
+    spdlog::basic_logger_mt("FilterLogger", "logs/filter.log");
+} // namespace
 
 namespace ImageUtils {
 cv::Mat qtImageToMat(const QImage &img) {
@@ -14,6 +20,7 @@ cv::Mat qtImageToMat(const QImage &img) {
                    const_cast<uchar *>(img.bits()),
                    static_cast<size_t>(img.bytesPerLine()));
   } catch (...) {
+    filterLogger->error("Image conversion failed");
     throw ImageFilterException("Image conversion failed");
   }
 }
@@ -25,22 +32,28 @@ QImage matToQtImage(const cv::Mat &mat) {
                                       : QImage::Format_RGB888)
         .copy(); // 确保深拷贝
   } catch (...) {
+    filterLogger->error("Mat to QImage conversion failed");
     throw ImageFilterException("Mat to QImage conversion failed");
   }
 }
 
-}
+} // namespace ImageUtils
 
 void IFilterStrategy::validateImage(const cv::Mat &img) const {
-  if (img.empty())
+  if (img.empty()) {
+    filterLogger->error("Empty input image");
     throw ImageFilterException("Empty input image");
-  if (img.depth() != CV_8U)
+  }
+  if (img.depth() != CV_8U) {
+    filterLogger->error("Unsupported image depth");
     throw ImageFilterException("Unsupported image depth");
+  }
 }
 ImageFilterProcessor::ImageFilterProcessor(
     std::unique_ptr<IFilterStrategy> &&strategy)
     : strategy_(std::move(strategy)) {
   if (!strategy_) {
+    filterLogger->error("Null strategy provided");
     throw ImageFilterException("Null strategy provided");
   }
 }
@@ -57,10 +70,10 @@ QImage ImageFilterProcessor::process(const QImage &input) {
 
     return ImageUtils::matToQtImage(cvImage);
   } catch (const cv::Exception &e) {
-    spdlog::error("OpenCV exception: {}", e.what());
+    filterLogger->error("OpenCV exception: {}", e.what());
     throw ImageFilterException(e.what());
   } catch (...) {
-    spdlog::critical("Unknown processing error");
+    filterLogger->critical("Unknown processing error");
     throw;
   }
 }
@@ -69,6 +82,7 @@ ChainImageFilterProcessor::ChainImageFilterProcessor(
     std::vector<std::unique_ptr<IFilterStrategy>> &&strategies)
     : strategies_(std::move(strategies)) {
   if (strategies_.empty()) {
+    filterLogger->error("No strategies in chain");
     throw ImageFilterException("No strategies in chain");
   }
 }
@@ -85,10 +99,10 @@ QImage ChainImageFilterProcessor::process(const QImage &input) {
     }
     return ImageUtils::matToQtImage(cvImage);
   } catch (const cv::Exception &e) {
-    spdlog::error("OpenCV exception: {}", e.what());
+    filterLogger->error("OpenCV exception: {}", e.what());
     throw ImageFilterException(e.what());
   } catch (...) {
-    spdlog::critical("Unknown processing error");
+    filterLogger->critical("Unknown processing error");
     throw;
   }
 }
@@ -96,8 +110,10 @@ QImage ChainImageFilterProcessor::process(const QImage &input) {
 GaussianBlurFilter::GaussianBlurFilter(int kernelSize, double sigma)
     : kernelSize_(kernelSize | 1), sigma_(sigma) // 确保奇数核
 {
-  if (kernelSize_ < 3)
+  if (kernelSize_ < 3) {
+    filterLogger->error("Kernel size too small");
     throw ImageFilterException("Kernel size too small");
+  }
 }
 
 void GaussianBlurFilter::apply(cv::Mat &image) {
@@ -110,8 +126,10 @@ const char *GaussianBlurFilter::name() const { return "Gaussian Blur"; }
 
 MedianBlurFilter::MedianBlurFilter(int kernelSize)
     : kernelSize_(kernelSize | 1) { // 确保奇数核
-  if (kernelSize_ < 3)
+  if (kernelSize_ < 3) {
+    filterLogger->error("Kernel size too small");
     throw ImageFilterException("Kernel size too small");
+  }
 }
 
 void MedianBlurFilter::apply(cv::Mat &image) {
@@ -163,21 +181,22 @@ void HSVAdjustFilter::apply(cv::Mat &image) {
   validateImage(image);
   cv::Mat hsv;
   cv::cvtColor(image, hsv, cv::COLOR_BGR2HSV);
-  
+
   std::vector<cv::Mat> channels;
   cv::split(hsv, channels);
-  
-  channels[0] = channels[0] + hue_;  // 色相调整
-  channels[1] = channels[1] * saturation_;  // 饱和度调整
-  channels[2] = channels[2] * value_;  // 明度调整
-  
+
+  channels[0] = channels[0] + hue_;        // 色相调整
+  channels[1] = channels[1] * saturation_; // 饱和度调整
+  channels[2] = channels[2] * value_;      // 明度调整
+
   cv::merge(channels, hsv);
   cv::cvtColor(hsv, image, cv::COLOR_HSV2BGR);
 }
 
 const char *HSVAdjustFilter::name() const { return "HSV Adjust"; }
 
-ContrastBrightnessFilter::ContrastBrightnessFilter(double contrast, double brightness)
+ContrastBrightnessFilter::ContrastBrightnessFilter(double contrast,
+                                                   double brightness)
     : contrast_(contrast), brightness_(brightness) {}
 
 void ContrastBrightnessFilter::apply(cv::Mat &image) {
@@ -185,4 +204,6 @@ void ContrastBrightnessFilter::apply(cv::Mat &image) {
   image.convertTo(image, -1, contrast_, brightness_);
 }
 
-const char *ContrastBrightnessFilter::name() const { return "Contrast & Brightness"; }
+const char *ContrastBrightnessFilter::name() const {
+  return "Contrast & Brightness";
+}

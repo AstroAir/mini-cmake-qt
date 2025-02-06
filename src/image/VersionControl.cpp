@@ -2,25 +2,33 @@
 
 #include <fstream>
 
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
+
+
+namespace {
+std::shared_ptr<spdlog::logger> versionControlLogger =
+    spdlog::basic_logger_mt("VersionControlLogger", "logs/versioncontrol.log");
+} // namespace
 
 ImageVersionControl::ImageVersionControl(const fs::path &repo_path)
     : repo_root(repo_path), objects_dir(repo_path / "objects") {
   fs::create_directories(objects_dir);
-  spdlog::info("Initialized ImageVersionControl with repo path: {}",
-               repo_path.string());
+  versionControlLogger->info(
+      "Initialized ImageVersionControl with repo path: {}", repo_path.string());
 }
 
 void ImageVersionControl::commit(const cv::Mat &image,
                                  std::string_view author) {
   std::scoped_lock lock(commit_mutex_);
-  spdlog::info("Committing image by author: {}", author);
+  versionControlLogger->info("Committing image by author: {}", author);
 
   const auto current_hash = compute_shallow_hash(image);
-  spdlog::debug("Computed hash for current image: {}", current_hash);
+  versionControlLogger->debug("Computed hash for current image: {}",
+                              current_hash);
 
   if (!parent_hash_.empty() && current_hash == parent_hash_) {
-    spdlog::info(
+    versionControlLogger->info(
         "Current image is identical to the parent image. Skipping commit.");
     return;
   }
@@ -28,14 +36,17 @@ void ImageVersionControl::commit(const cv::Mat &image,
   try {
     if (parent_hash_.empty()) {
       save_full_image(image, current_hash);
-      spdlog::info("Saved full image with hash: {}", current_hash);
+      versionControlLogger->info("Saved full image with hash: {}",
+                                 current_hash);
     } else {
       const auto diff = compute_optimized_diff(load_image(parent_hash_), image);
       save_compressed_diff(diff, current_hash);
-      spdlog::info("Saved compressed diff with hash: {}", current_hash);
+      versionControlLogger->info("Saved compressed diff with hash: {}",
+                                 current_hash);
     }
     create_commit_object(current_hash, author);
-    spdlog::info("Created commit object for hash: {}", current_hash);
+    versionControlLogger->info("Created commit object for hash: {}",
+                               current_hash);
     parent_hash_ = current_hash;
   } catch (const std::exception &e) {
     handle_error(e);
@@ -44,17 +55,17 @@ void ImageVersionControl::commit(const cv::Mat &image,
 }
 
 cv::Mat ImageVersionControl::checkout(std::string_view target_hash) const {
-  spdlog::info("Checking out image with hash: {}", target_hash);
+  versionControlLogger->info("Checking out image with hash: {}", target_hash);
   auto commit_chain = build_commit_chain(target_hash);
   cv::Mat image;
 
   for (const auto &hash : commit_chain) {
     if (hash == commit_chain.front()) {
       image = load_image(hash);
-      spdlog::info("Loaded base image with hash: {}", hash);
+      versionControlLogger->info("Loaded base image with hash: {}", hash);
     } else {
       apply_diff(image, load_compressed_diff(hash));
-      spdlog::info("Applied diff with hash: {}", hash);
+      versionControlLogger->info("Applied diff with hash: {}", hash);
     }
   }
   return image;
@@ -212,6 +223,6 @@ cv::Mat ImageVersionControl::load_compressed_diff(std::string_view hash) const {
 }
 
 void ImageVersionControl::handle_error(const std::exception &e) const {
-  spdlog::error("Error: {}", e.what());
+  versionControlLogger->error("Error: {}", e.what());
   // 可以添加更多错误处理逻辑，如日志记录
 }

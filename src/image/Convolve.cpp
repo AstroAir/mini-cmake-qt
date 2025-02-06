@@ -5,9 +5,14 @@
 #include <fmt/format.h>
 #include <mutex>
 #include <opencv2/opencv.hpp>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <variant>
 
+namespace {
+std::shared_ptr<spdlog::logger> convolveLogger =
+    spdlog::basic_logger_mt("ConvolveLogger", "logs/convolve.log");
+} // namespace
 
 cv::Mat Convolve::process(
     const cv::Mat &input,
@@ -26,39 +31,48 @@ cv::Mat Convolve::process(
 }
 
 Convolve::ScopedTimer::ScopedTimer(const std::string &op)
-    : operation(op), start(std::chrono::steady_clock::now()) {}
+    : operation(op), start(std::chrono::steady_clock::now()) {
+  convolveLogger->debug("Starting operation: {}", operation);
+}
 
 Convolve::ScopedTimer::~ScopedTimer() {
   auto duration = std::chrono::steady_clock::now() - start;
   auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
-  spdlog::debug("{} took {} ms", operation, ms.count());
+  convolveLogger->debug("{} took {} ms", operation, ms.count());
 }
 
 cv::Mat Convolve::processMultiChannel(
     const cv::Mat &input,
     const std::function<cv::Mat(const cv::Mat &)> &processor) {
   ScopedTimer timer("Multi-channel Processing");
+  convolveLogger->info("Processing multi-channel image");
 
   std::vector<cv::Mat> channels;
   cv::split(input, channels);
+  convolveLogger->debug("Image split into {} channels", channels.size());
 
 #pragma omp parallel for if (channels.size() > 1)
   for (int i = 0; i < channels.size(); i++) {
+    convolveLogger->debug("Processing channel {}", i);
     channels[i] = processor(channels[i]);
   }
 
   cv::Mat result;
   cv::merge(channels, result);
+  convolveLogger->info("Channels merged back into a single image");
   return result;
 }
 
 // 优化的卷积实现
 cv::Mat Convolve::convolve(const cv::Mat &input, const ConvolutionConfig &cfg) {
+  convolveLogger->info("Starting convolution process");
   if (input.channels() > 1 && cfg.per_channel) {
+    convolveLogger->debug("Processing convolution per channel");
     return processMultiChannel(input, [&](const cv::Mat &channel) {
       return convolveSingleChannel(channel, cfg);
     });
   }
+  convolveLogger->debug("Processing convolution on a single channel");
   return convolveSingleChannel(input, cfg);
 }
 
@@ -66,8 +80,10 @@ cv::Mat Convolve::convolve(const cv::Mat &input, const ConvolutionConfig &cfg) {
 cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
                                         const ConvolutionConfig &cfg) {
   ScopedTimer timer("Optimized Convolution");
+  convolveLogger->info("Starting single channel convolution");
 
   const int tile_size = cfg.tile_size;
+  convolveLogger->debug("Using tile size: {}", tile_size);
   cv::Mat kernel = prepareKernel(cfg);
   cv::Mat output =
       cfg.use_memory_pool
@@ -79,6 +95,7 @@ cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
     cv::Mat warmup = input(
         cv::Rect(0, 0, std::min(64, input.cols), std::min(64, input.rows)));
     cv::filter2D(warmup, warmup, -1, kernel);
+    convolveLogger->debug("Memory pool warmup completed");
   }
 
   // 使用线程池进行分块处理
@@ -95,8 +112,14 @@ cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
 
         if (cfg.use_simd) {
           SIMDHelper::processImageTile(inputTile, outputTile, kernel, roi);
+          convolveLogger->debug("Processed tile with SIMD: ROI x={}, y={}, "
+                                "width={}, height={}",
+                                roi.x, roi.y, roi.width, roi.height);
         } else {
           cv::filter2D(inputTile, outputTile, -1, kernel);
+          convolveLogger->debug("Processed tile with filter2D: ROI x={}, y={}, "
+                                "width={}, height={}",
+                                roi.x, roi.y, roi.width, roi.height);
         }
       }));
     }
@@ -107,6 +130,7 @@ cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
     future.wait();
   }
 
+  convolveLogger->info("Single channel convolution completed");
   return output;
 }
 
@@ -114,10 +138,12 @@ cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
 cv::Mat Convolve::deconvolve(const cv::Mat &input,
                              const DeconvolutionConfig &cfg) {
   ScopedTimer timer("Deconvolution");
+  convolveLogger->info("Starting deconvolution process");
   validateDeconvolutionConfig(input, cfg);
 
   // 如果是多通道图像且需要分通道处理
   if (input.channels() > 1 && cfg.per_channel) {
+    convolveLogger->debug("Processing deconvolution per channel");
     return processMultiChannel(input, [&](const cv::Mat &channel) {
       return deconvolveSingleChannel(channel, cfg);
     });
@@ -130,27 +156,32 @@ cv::Mat Convolve::deconvolve(const cv::Mat &input,
   // 根据不同的反卷积方法选择对应的实现
   switch (cfg.method) {
   case DeconvMethod::RICHARDSON_LUCY: {
+    convolveLogger->debug("Using Richardson-Lucy deconvolution method");
     // 使用内存池分配输出内存
     output = MemoryPool::allocate(input.rows, input.cols, input.type());
     richardsonLucyDeconv(input, psf, output, cfg);
     break;
   }
   case DeconvMethod::WIENER: {
+    convolveLogger->debug("Using Wiener deconvolution method");
     output = MemoryPool::allocate(input.rows, input.cols, input.type());
     wienerDeconv(input, psf, output, cfg);
     break;
   }
   case DeconvMethod::TIKHONOV: {
+    convolveLogger->debug("Using Tikhonov deconvolution method");
     output = MemoryPool::allocate(input.rows, input.cols, input.type());
     tikhonovDeconv(input, psf, output, cfg);
     break;
   }
   default:
+    convolveLogger->error("Unsupported deconvolution method");
     throw std::invalid_argument("Unsupported deconvolution method");
   }
 
   // 处理完成后确保输出图像在有效范围内
   cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, CV_8U);
+  convolveLogger->info("Deconvolution completed");
 
   return output;
 }
@@ -158,6 +189,7 @@ cv::Mat Convolve::deconvolve(const cv::Mat &input,
 // 单通道反卷积实现
 cv::Mat Convolve::deconvolveSingleChannel(const cv::Mat &input,
                                           const DeconvolutionConfig &cfg) {
+  convolveLogger->info("Starting single channel deconvolution");
   validateDeconvolutionConfig(input, cfg);
 
   cv::Mat output;
@@ -165,18 +197,23 @@ cv::Mat Convolve::deconvolveSingleChannel(const cv::Mat &input,
 
   switch (cfg.method) {
   case DeconvMethod::RICHARDSON_LUCY:
+    convolveLogger->debug("Using Richardson-Lucy deconvolution method");
     richardsonLucyDeconv(input, psf, output, cfg);
     break;
   case DeconvMethod::WIENER:
+    convolveLogger->debug("Using Wiener deconvolution method");
     wienerDeconv(input, psf, output, cfg);
     break;
   case DeconvMethod::TIKHONOV:
+    convolveLogger->debug("Using Tikhonov deconvolution method");
     tikhonovDeconv(input, psf, output, cfg);
     break;
   default:
+    convolveLogger->error("Unsupported deconvolution method");
     throw std::invalid_argument("Unsupported deconvolution method");
   }
 
+  convolveLogger->info("Single channel deconvolution completed");
   return output;
 }
 
@@ -184,6 +221,7 @@ cv::Mat Convolve::deconvolveSingleChannel(const cv::Mat &input,
 void Convolve::richardsonLucyDeconv(const cv::Mat &input, const cv::Mat &psf,
                                     cv::Mat &output,
                                     const DeconvolutionConfig &cfg) {
+  convolveLogger->debug("Starting Richardson-Lucy deconvolution");
   cv::Mat imgEstimate = input.clone();
   cv::Mat psfFlip;
   cv::flip(psf, psfFlip, -1);
@@ -216,15 +254,18 @@ void Convolve::richardsonLucyDeconv(const cv::Mat &input, const cv::Mat &psf,
         [&]() { cv::multiply(imgEstimate, errorEstimate, imgEstimate); });
 
     task4.wait();
+    convolveLogger->debug("Richardson-Lucy iteration {} completed", i);
   }
 
   imgEstimate.convertTo(output, CV_8U);
+  convolveLogger->info("Richardson-Lucy deconvolution completed");
 }
 
 // 完整的Wiener反卷积实现
 void Convolve::wienerDeconv(const cv::Mat &input, const cv::Mat &psf,
                             cv::Mat &output, const DeconvolutionConfig &cfg) {
   ScopedTimer timer("Wiener Deconvolution");
+  convolveLogger->debug("Starting Wiener deconvolution");
 
   // 准备输入
   cv::Mat inputF, psfF;
@@ -256,11 +297,13 @@ void Convolve::wienerDeconv(const cv::Mat &input, const cv::Mat &psf,
   // 反变换
   cv::idft(result, output, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
   cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, CV_8U);
+  convolveLogger->info("Wiener deconvolution completed");
 }
 
 // Tikhonov 正则化反卷积
 void Convolve::tikhonovDeconv(const cv::Mat &input, const cv::Mat &psf,
                               cv::Mat &output, const DeconvolutionConfig &cfg) {
+  convolveLogger->debug("Starting Tikhonov deconvolution");
   cv::Mat inputF, psfF;
   input.convertTo(inputF, CV_32F);
   psf.convertTo(psfF, CV_32F);
@@ -292,62 +335,71 @@ void Convolve::tikhonovDeconv(const cv::Mat &input, const cv::Mat &psf,
 
   cv::idft(result, output, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
   cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, CV_8U);
+  convolveLogger->info("Tikhonov deconvolution completed");
 }
 
 // 参数校验
 void Convolve::validateConvolutionConfig(const cv::Mat &input,
                                          const ConvolutionConfig &cfg) {
   if (input.empty()) {
-    spdlog::error("Input image is empty");
+    convolveLogger->error("Input image is empty");
     throw std::invalid_argument("Empty input image");
   }
 
   if (!cfg.per_channel && input.channels() > 1) {
-    spdlog::warn("Multi-channel image will be processed as a whole");
+    convolveLogger->warn("Multi-channel image will be processed as a whole");
   }
 
   if (cfg.kernel_size % 2 == 0 || cfg.kernel_size < 3) {
-    spdlog::error("Invalid kernel size: {}", cfg.kernel_size);
+    convolveLogger->error("Invalid kernel size: {}", cfg.kernel_size);
     throw std::invalid_argument("Kernel size must be odd and >=3");
   }
 
   if (cfg.kernel.size() !=
       static_cast<size_t>(cfg.kernel_size * cfg.kernel_size)) {
-    spdlog::error("Kernel size mismatch: expected {}, got {}",
-                  cfg.kernel_size * cfg.kernel_size, cfg.kernel.size());
+    convolveLogger->error("Kernel size mismatch: expected {}, got {}",
+                          cfg.kernel_size * cfg.kernel_size, cfg.kernel.size());
     throw std::invalid_argument("Kernel dimensions mismatch");
   }
+  convolveLogger->debug("Convolution config validated");
 }
 
 // 改进的验证函数
 void Convolve::validateDeconvolutionConfig(const cv::Mat &input,
                                            const DeconvolutionConfig &cfg) {
   if (input.empty()) {
+    convolveLogger->error("Input image is empty");
     throw std::invalid_argument("Empty input image");
   }
 
   if (cfg.iterations <= 0 || cfg.iterations > 1000) {
+    convolveLogger->error("Invalid iterations count: {}", cfg.iterations);
     throw std::invalid_argument(
         fmt::format("Invalid iterations count: {}", cfg.iterations));
   }
 
   if (cfg.noise_power < 0.0 || cfg.noise_power > 1.0) {
+    convolveLogger->error("Invalid noise power: {}", cfg.noise_power);
     throw std::invalid_argument(
         fmt::format("Invalid noise power: {}", cfg.noise_power));
   }
 
   if (cfg.regularization <= 0.0 || cfg.regularization > 1.0) {
+    convolveLogger->error("Invalid regularization parameter: {}",
+                          cfg.regularization);
     throw std::invalid_argument(fmt::format(
         "Invalid regularization parameter: {}", cfg.regularization));
   }
 
   if (!cfg.per_channel && input.channels() > 1) {
-    spdlog::warn("Multi-channel image will be processed as a whole");
+    convolveLogger->warn("Multi-channel image will be processed as a whole");
   }
+  convolveLogger->debug("Deconvolution config validated");
 }
 
 // 准备OpenCV兼容的核
 cv::Mat Convolve::prepareKernel(const ConvolutionConfig &cfg) {
+  convolveLogger->debug("Preparing convolution kernel");
   cv::Mat kernel(cfg.kernel_size, cfg.kernel_size, CV_32F);
   std::copy(cfg.kernel.begin(), cfg.kernel.end(), kernel.ptr<float>());
 
@@ -355,8 +407,10 @@ cv::Mat Convolve::prepareKernel(const ConvolutionConfig &cfg) {
     double sum = cv::sum(kernel)[0];
     if (sum != 0)
       kernel /= sum;
+    convolveLogger->debug("Kernel normalized");
   }
 
+  convolveLogger->debug("Kernel prepared successfully");
   return kernel;
 }
 
@@ -379,6 +433,8 @@ int Convolve::getOpenCVBorderType(BorderMode mode) {
 // 优化的PSF估计
 cv::Mat Convolve::estimatePSF(cv::Size imgSize) {
   ScopedTimer timer("PSF Estimation");
+  convolveLogger->debug("Estimating PSF for image size: width={}, height={}",
+                        imgSize.width, imgSize.height);
 
   const int optimal_size =
       cv::getOptimalDFTSize(std::max(imgSize.width, imgSize.height));
@@ -399,20 +455,27 @@ cv::Mat Convolve::estimatePSF(cv::Size imgSize) {
   }
 
   cv::normalize(psf, psf, 1.0, 0.0, cv::NORM_L1);
-  return psf(cv::Rect(0, 0, imgSize.width, imgSize.height));
+  cv::Mat croppedPsf = psf(cv::Rect(0, 0, imgSize.width, imgSize.height));
+  convolveLogger->info("PSF estimated successfully");
+  return croppedPsf;
 }
 
 // 优化内存池管理
 cv::Mat Convolve::MemoryPool::allocate(int rows, int cols, int type) {
   std::lock_guard<std::mutex> lock(pool_mutex_);
+  convolveLogger->debug(
+      "Allocating memory from pool: rows={}, cols={}, type={}", rows, cols,
+      type);
 
   for (auto it = pool_.begin(); it != pool_.end(); ++it) {
     if (it->rows == rows && it->cols == cols && it->type() == type) {
       cv::Mat mat = *it;
       pool_.erase(it);
+      convolveLogger->debug("Memory allocated from pool");
       return mat;
     }
   }
+  convolveLogger->debug("No suitable memory found in pool, allocating new");
   return cv::Mat(rows, cols, type);
 }
 
@@ -420,7 +483,11 @@ void Convolve::MemoryPool::deallocate(cv::Mat &mat) {
   if (!mat.empty()) {
     std::lock_guard<std::mutex> lock(pool_mutex_);
     if (pool_.size() < max_pool_size_) {
+      convolveLogger->debug("Deallocating memory to pool");
       pool_.push_back(mat);
+    } else {
+      convolveLogger->warn(
+          "Memory pool is full, discarding deallocated memory");
     }
     mat = cv::Mat();
   }
@@ -428,6 +495,7 @@ void Convolve::MemoryPool::deallocate(cv::Mat &mat) {
 
 void Convolve::MemoryPool::clear() {
   std::lock_guard<std::mutex> lock(pool_mutex_);
+  convolveLogger->warn("Clearing memory pool");
   pool_.clear();
 }
 

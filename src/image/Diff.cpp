@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <ranges>
-#include <spdlog/sinks/rotating_file_sink.h>
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stack>
 #include <vector>
@@ -23,6 +23,11 @@
 #include <QWidget>
 #include <QtConcurrent>
 
+namespace {
+std::shared_ptr<spdlog::logger> diffLogger =
+    spdlog::basic_logger_mt("DiffLogger", "logs/diff.log");
+} // namespace
+
 std::tuple<int, int, int> qUnpack(QRgb rgb) {
   return {qRed(rgb), qGreen(rgb), qBlue(rgb)};
 }
@@ -38,12 +43,12 @@ CIELAB RGB2LAB(QRgb rgb) {
 
 bool ImageDiff::validateImages(const QImage &img1, const QImage &img2) {
   if (img1.isNull() || img2.isNull()) {
-    spdlog::error("Invalid input images");
+    diffLogger->error("Invalid input images");
     return false;
   }
 
   if (img1.size() != img2.size()) {
-    spdlog::warn("Image size mismatch: {} vs {}", img1.size(), img2.size());
+    diffLogger->warn("Image size mismatch: {} vs {}", img1.size(), img2.size());
     return false;
   }
 
