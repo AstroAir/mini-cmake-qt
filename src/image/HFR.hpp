@@ -73,4 +73,13 @@ auto starDetectAndHfr(const Mat &img, bool if_removehotpixel,
                       bool down_sample_mean_std, Mat mark_img)
     -> tuple<Mat, int, double, json>;
 
+// 添加SIMD优化相关函数声明
+#ifdef __AVX2__
+auto processStarsAVX2(const cv::Mat &img, float radius) -> double;
+#endif
+
+// 添加并行处理相关函数声明  
+auto processStarsParallel(const cv::Mat &img, bool if_removehotpixel,
+                         bool if_noiseremoval) -> void;
+
 #endif // HFR_HPP

@@ -187,4 +187,30 @@ private:
    */
   void floodFill(const QImage &img, QImage &visited, int x, int y,
                  int threshold, QRect &region) const;
+
+  static constexpr int BLOCK_SIZE = 16;  // 缓存优化的块大小
+  static constexpr int SUBSAMPLE_FACTOR = 2;  // 降采样因子
+
+  /**
+   * @brief 使用SIMD优化的像素比较
+   */
+  void compareBlockSIMD(const uchar* block1, const uchar* block2, 
+                        uchar* dest, size_t size) const;
+
+  /**
+   * @brief 图像预处理
+   */
+  QImage preprocessImage(const QImage& img) const;
+
+  /**
+   * @brief 使用并查集的连通区域分析
+   */
+  class DisjointSet {
+    std::vector<int> parent;
+    std::vector<int> rank;
+  public:
+    DisjointSet(int size);
+    int find(int x);
+    void unite(int x, int y);
+  };
 };

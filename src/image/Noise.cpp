@@ -1,52 +1,16 @@
-#include <functional>
-#include <opencv2/opencv.hpp>
+#include "Noise.hpp"
+#include <omp.h>
 #include <random>
 #include <spdlog/spdlog.h>
-#include <stdexcept>
-#include <variant>
 
 
-enum class NoiseType {
-  GAUSSIAN,
-  SALT_AND_PEPPER,
-  POISSON,
-  SPECKLE,
-  PERIODIC,
-  LAPLACIAN
-};
+namespace {
 
-// 扩展参数结构体
-struct GaussianParams {
-  double mean = 0.0;
-  double stddev = 25.0;
-};
-
-struct SaltAndPepperParams {
-  double density = 0.05;
-  double salt_prob = 0.5;
-};
-
-struct SpeckleParams {
-  double intensity = 0.1;
-};
-
-struct PeriodicParams {
-  double amplitude = 10.0;
-  double frequency = 0.1;
-};
-
-struct LaplacianParams {
-  double scale = 1.0;
-};
-
-using NoiseParams =
-    std::variant<GaussianParams, SaltAndPepperParams, SpeckleParams,
-                 PeriodicParams, LaplacianParams>;
-
-// 进度回调类型
-using ProgressCallback = std::function<void(float)>;
+// Internal helper functions in an anonymous namespace
 
 namespace detail {
+
+// Gaussian noise using OpenCV's randn (vectorized)
 void add_gaussian_noise(const cv::Mat &input, cv::Mat &output,
                         const GaussianParams &params) {
   cv::Mat noise(input.size(), input.type());
@@ -55,52 +19,53 @@ void add_gaussian_noise(const cv::Mat &input, cv::Mat &output,
   output.convertTo(output, input.type());
 }
 
+// Salt and Pepper noise using random pixel selection
 void add_salt_and_pepper(const cv::Mat &input, cv::Mat &output,
                          const SaltAndPepperParams &params) {
   input.copyTo(output);
-
   const int num_pixels = input.rows * input.cols * input.channels();
   const int num_salt =
       static_cast<int>(num_pixels * params.density * params.salt_prob);
   const int num_pepper =
       static_cast<int>(num_pixels * params.density * (1 - params.salt_prob));
-
   static thread_local std::mt19937 gen{std::random_device{}()};
   std::uniform_int_distribution<> dis(0, num_pixels - 1);
 
-  // Salt noise
   for (int i = 0; i < num_salt; ++i) {
     const int idx = dis(gen);
     output.data[idx] = 255;
   }
-
-  // Pepper noise
   for (int i = 0; i < num_pepper; ++i) {
     const int idx = dis(gen);
     output.data[idx] = 0;
   }
 }
 
+// Poisson noise (simplified version)
+// Note: More advanced simulation would use the actual Poisson distribution.
 void add_poisson_noise(const cv::Mat &input, cv::Mat &output) {
   cv::Mat noise(input.size(), input.type());
   cv::randn(noise, 0, 1);
-  noise = noise * 0.5 + 0.5; // 转换到[0,1)范围
-  cv::exp(-input, noise);
-  cv::threshold(noise, noise, cv::randu<double>(), 255, cv::THRESH_BINARY);
-  cv::multiply(input, noise, output);
+  noise = noise * 0.5 + 0.5; // Normalize to [0,1)
+  cv::Mat exp_input;
+  cv::exp(-input, exp_input);
+  cv::Mat thresholded;
+  cv::threshold(exp_input, thresholded, 0.5, 255, cv::THRESH_BINARY);
+  cv::multiply(input, thresholded, output);
   output.convertTo(output, input.type());
 }
 
+// Speckle noise using multiplicative noise
 void add_speckle_noise(const cv::Mat &input, cv::Mat &output,
                        const SpeckleParams &params) {
   cv::Mat noise(input.size(), CV_32F);
   cv::randn(noise, 0, params.intensity);
-
   input.convertTo(output, CV_32F);
   output = output.mul(1.0f + noise);
   output.convertTo(output, input.type());
 }
 
+// Periodic noise with a sinusoidal pattern (parallelized with OpenMP)
 void add_periodic_noise(const cv::Mat &input, cv::Mat &output,
                         const PeriodicParams &params) {
   output = input.clone();
@@ -119,39 +84,45 @@ void add_periodic_noise(const cv::Mat &input, cv::Mat &output,
   }
 }
 
+// Laplacian noise using an exponential distribution (parallelized with OpenMP)
 void add_laplacian_noise(const cv::Mat &input, cv::Mat &output,
                          const LaplacianParams &params) {
   cv::Mat noise(input.size(), input.type());
   static thread_local std::mt19937 gen{std::random_device{}()};
   std::exponential_distribution<> d(1.0 / params.scale);
-
 #pragma omp parallel for
   for (int i = 0; i < noise.total(); i++) {
     noise.data[i] = cv::saturate_cast<uchar>(d(gen));
   }
-
   cv::add(input, noise, output);
 }
 
-} // namespace detail
+// Uniform noise based on a uniform distribution.
+void add_uniform_noise(const cv::Mat &input, cv::Mat &output,
+                       const UniformParams &params) {
+  cv::Mat noise(input.size(), input.type());
+  cv::randu(noise, params.low, params.high);
+  cv::add(input, noise, output);
+  output.convertTo(output, input.type());
+}
+
+} // end namespace detail
+
+} // end anonymous namespace
+
+namespace imgnoise {
 
 void add_image_noise(const cv::Mat &input, cv::Mat &output, NoiseType type,
-                     const NoiseParams &params,
-                     ProgressCallback progress = nullptr) {
-  // 输入验证
+                     const NoiseParams &params, ProgressCallback progress) {
   if (input.empty()) {
     spdlog::error("Input image is empty");
     throw std::invalid_argument("Input image is empty");
   }
-
   if (input.depth() != CV_8U && input.depth() != CV_32F) {
     spdlog::error("Unsupported image depth: {}", input.depth());
     throw std::invalid_argument("Unsupported image depth");
   }
-
-  // 处理不同噪声类型
   try {
-    float progress_value = 0.0f;
     switch (type) {
     case NoiseType::GAUSSIAN: {
       const auto &p = std::get<GaussianParams>(params);
@@ -189,15 +160,18 @@ void add_image_noise(const cv::Mat &input, cv::Mat &output, NoiseType type,
       detail::add_laplacian_noise(input, output, p);
       break;
     }
+    case NoiseType::UNIFORM: {
+      const auto &p = std::get<UniformParams>(params);
+      detail::add_uniform_noise(input, output, p);
+      break;
+    }
     default:
       spdlog::error("Unknown noise type: {}", static_cast<int>(type));
       throw std::invalid_argument("Unknown noise type");
     }
-
     if (progress) {
       progress(1.0f);
     }
-
   } catch (const cv::Exception &e) {
     spdlog::error("OpenCV exception: {}", e.what());
     throw;
@@ -206,13 +180,33 @@ void add_image_noise(const cv::Mat &input, cv::Mat &output, NoiseType type,
     throw;
   }
 
-  // 后处理
+  // Normalize output if output memory differs from input memory.
   if (input.data != output.data) {
     cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, input.type());
   }
 }
 
-// 新增：噪声估计函数
+void add_mixed_noise(
+    const cv::Mat &input, cv::Mat &output,
+    const std::vector<std::pair<NoiseType, NoiseParams>> &noise_list,
+    ProgressCallback progress) {
+  if (input.empty()) {
+    spdlog::error("Input image is empty");
+    throw std::invalid_argument("Input image is empty");
+  }
+  cv::Mat temp = input.clone();
+  int total = static_cast<int>(noise_list.size());
+  for (size_t i = 0; i < noise_list.size(); ++i) {
+    NoiseType type = noise_list[i].first;
+    NoiseParams params = noise_list[i].second;
+    add_image_noise(temp, temp, type, params);
+    if (progress) {
+      progress(static_cast<float>(i + 1) / total);
+    }
+  }
+  output = temp;
+}
+
 double estimate_noise_level(const cv::Mat &image) {
   cv::Mat gray;
   if (image.channels() > 1) {
@@ -220,12 +214,32 @@ double estimate_noise_level(const cv::Mat &image) {
   } else {
     gray = image;
   }
-
   cv::Mat laplacian;
   cv::Laplacian(gray, laplacian, CV_64F);
-
   cv::Scalar mean, stddev;
   cv::meanStdDev(laplacian, mean, stddev);
-
   return stddev[0];
 }
+
+void add_roi_noise(const cv::Mat &input, cv::Mat &output, const cv::Rect &roi,
+                   NoiseType type, const NoiseParams &params,
+                   ProgressCallback progress) {
+  if (input.empty()) {
+    spdlog::error("Input image is empty");
+    throw std::invalid_argument("Input image is empty");
+  }
+  if ((roi.x < 0) || (roi.y < 0) || (roi.x + roi.width > input.cols) ||
+      (roi.y + roi.height > input.rows)) {
+    spdlog::error("ROI is out of image bounds");
+    throw std::invalid_argument("ROI is out of image bounds");
+  }
+  // Start with the full image copy.
+  input.copyTo(output);
+  // Extract ROI from output, apply noise on that area
+  cv::Mat roiMat = output(roi);
+  cv::Mat noisyRoi;
+  add_image_noise(roiMat, noisyRoi, type, params, progress);
+  noisyRoi.copyTo(roiMat);
+}
+
+} // namespace imgnoise

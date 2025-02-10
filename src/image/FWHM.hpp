@@ -106,4 +106,9 @@ private:
   static bool validate_parameters(const cv::Mat &params);
 };
 
+// 添加性能优化相关常量
+constexpr int PARALLEL_THRESHOLD = 1000; // 并行处理的最小数据量阈值
+constexpr int SIMD_ALIGNMENT = 32; // AVX-256 对齐要求
+constexpr int BLOCK_SIZE = 16; // 缓存友好的块大小
+
 } // namespace GaussianFit

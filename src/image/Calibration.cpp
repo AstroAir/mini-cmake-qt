@@ -1,10 +1,13 @@
 #include "Calibration.hpp"
-
 #include <cmath>
+#include <opencv2/core/ocl.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 #include <tuple>
+
 
 namespace {
 std::shared_ptr<spdlog::logger> calibrationLogger =
@@ -24,6 +27,41 @@ cv::Mat instrument_response_correction(cv::InputArray &image,
   cv::multiply(image, response_function, corrected);
   calibrationLogger->info("Instrument response correction applied.");
   return corrected;
+}
+
+cv::Mat
+instrument_response_correction_optimized(cv::InputArray &image,
+                                         cv::InputArray &response_function,
+                                         const OptimizationParams &params) {
+  if (params.use_gpu && cv::ocl::haveOpenCL()) {
+    cv::UMat uImage = image.getUMat();
+    cv::UMat uResponse = response_function.getUMat();
+    cv::UMat uResult;
+    cv::multiply(uImage, uResponse, uResult);
+    return uResult.getMat(cv::ACCESS_READ);
+  }
+
+  cv::Mat result;
+  if (params.use_parallel) {
+    cv::Mat img = image.getMat();
+    cv::Mat resp = response_function.getMat();
+    result = cv::Mat::zeros(img.size(), img.type());
+
+    tbb::parallel_for(tbb::blocked_range<int>(0, img.rows),
+                      [&](const tbb::blocked_range<int> &range) {
+                        for (int i = range.begin(); i < range.end(); ++i) {
+                          auto *img_ptr = img.ptr<float>(i);
+                          auto *resp_ptr = resp.ptr<float>(i);
+                          auto *result_ptr = result.ptr<float>(i);
+                          for (int j = 0; j < img.cols; ++j) {
+                            result_ptr[j] = img_ptr[j] * resp_ptr[j];
+                          }
+                        }
+                      });
+    return result;
+  }
+
+  return instrument_response_correction(image, response_function);
 }
 
 cv::Mat background_noise_correction(cv::InputArray &image) {
@@ -88,41 +126,50 @@ std::tuple<cv::Mat, double, double, double>
 flux_calibration_ex(const cv::Mat &image, const CalibrationParams &params,
                     const cv::Mat *response_function, const cv::Mat *flat_field,
                     const cv::Mat *dark_frame, bool enable_optimization) {
-  calibrationLogger->debug("Starting extended flux calibration process.");
+  calibrationLogger->debug("Starting optimized flux calibration process.");
+
+  OptimizationParams optParams;
+  optParams.use_gpu = enable_optimization;
+  optParams.use_parallel = enable_optimization;
+
   try {
     cv::Mat img;
-    // 如果启用优化，则利用 UMat（若 OpenCL/OpenVX 后端支持则可能加速）
-    if (enable_optimization) {
-      cv::UMat uimg;
-      image.copyTo(uimg);
+    if (optParams.use_gpu && cv::ocl::haveOpenCL()) {
+      cv::UMat uimg = image.getUMat(cv::ACCESS_READ);
       img = uimg.getMat(cv::ACCESS_READ);
-      calibrationLogger->debug("Performance optimization enabled: using UMat.");
     } else {
       img = image.clone();
     }
 
-    // 仪器响应校正
     if (response_function != nullptr) {
-      calibrationLogger->debug("Applying instrument response correction.");
-      img = instrument_response_correction(img, *response_function);
-    }
-    // 平场校正
-    if (flat_field != nullptr) {
-      calibrationLogger->debug("Applying flat-field correction.");
-      img = apply_flat_field_correction(img, *flat_field);
-    }
-    // 暗场扣除
-    if (dark_frame != nullptr) {
-      calibrationLogger->debug("Applying dark frame subtraction.");
-      img = apply_dark_frame_subtraction(img, *dark_frame);
+      img = instrument_response_correction_optimized(img, *response_function,
+                                                     optParams);
     }
 
-    // 计算 FLX2DN
+#pragma omp parallel sections if (optParams.use_parallel)
+    {
+#pragma omp section
+      if (flat_field != nullptr) {
+        img = apply_flat_field_correction(img, *flat_field);
+      }
+
+#pragma omp section
+      if (dark_frame != nullptr) {
+        img = apply_dark_frame_subtraction(img, *dark_frame);
+      }
+    }
+
     double FLX2DN = compute_flx2dn(params);
-    // 流量校准：像素值除以 FLX2DN
+
     cv::Mat calibrated;
-    cv::divide(img, FLX2DN, calibrated);
-    calibrationLogger->debug("Applied FLX2DN conversion.");
+    if (optParams.use_gpu && cv::ocl::haveOpenCL()) {
+      cv::UMat uimg = img.getUMat(cv::ACCESS_READ);
+      cv::UMat ucalibrated;
+      cv::divide(uimg, FLX2DN, ucalibrated);
+      calibrated = ucalibrated.getMat(cv::ACCESS_READ);
+    } else {
+      cv::divide(img, FLX2DN, calibrated);
+    }
 
     // 背景噪声校正
     calibrated = background_noise_correction(calibrated);
@@ -142,7 +189,7 @@ flux_calibration_ex(const cv::Mat &image, const CalibrationParams &params,
 
     return {rescaled, FLXMIN, FLXRANGE, FLX2DN};
   } catch (const std::exception &e) {
-    calibrationLogger->error("Extended flux calibration failed: {}", e.what());
-    throw std::runtime_error("Extended flux calibration process failed.");
+    calibrationLogger->error("Optimized flux calibration failed: {}", e.what());
+    throw std::runtime_error("Optimized flux calibration process failed.");
   }
 }

@@ -15,12 +15,20 @@ public:
   void showChannelHistograms();
   void exportHistogramData();
   void compareHistograms(const cv::Mat& image1, const cv::Mat& image2);
+  void showHistogramWithEqualization(const cv::Mat &image);
+  void performHistogramMatching(const cv::Mat &source, const cv::Mat &reference);
+  void addHistogramSeries(const cv::Mat &image, const QString &name);
+  void clearHistograms();
 
 private slots:
   void updateHistogramView();
   void saveHistogramAsImage();
   void toggleLogScale();
   void changeBinCount(int bins);
+  void toggleEqualizationPreview();
+  void exportToFormat();
+  void removeSelectedSeries();
+  void showHistogramAnalysis();
 
 private:
   QVBoxLayout layout;
@@ -48,6 +56,11 @@ private:
   QLabel* statusLabel;
   QTimer* updateTimer;
   std::atomic<bool> processingFlag;
+  QComboBox* exportFormatCombo;
+  QCheckBox* equalizationCheckBox;
+  QListWidget* seriesList;
+  QPushButton* analyzeButton;
+  QPushButton* removeSeriesButton;
     
   // 添加新的方法
   void showError(const QString& message);
@@ -55,6 +68,12 @@ private:
   void resetProgress();
   void enableControls(bool enable);
   void processWithProgress(const std::function<void()>& task);
+  void setupAdvancedUI(QVBoxLayout *parent);
+  void updateEqualizationPreview();
+  cv::Mat performEqualization(const cv::Mat &input);
+  void exportHistogramAs(const QString &format);
+  QString generateHistogramReport();
+  void showAnalysisDialog();
 };
 
 void showImageHistogram(QWidget *parent, const cv::Mat &image);

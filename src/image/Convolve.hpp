@@ -30,6 +30,10 @@ struct ConvolutionConfig {
   bool use_simd = true;           ///< 启用SIMD优化
   bool use_memory_pool = true;    ///< 使用内存池
   int tile_size = 256;            ///< 分块处理大小，用于缓存优化
+  bool use_fft = false;           ///< 使用FFT加速大型卷积
+  int thread_count = 0;           ///< 线程数(0表示自动)
+  bool use_avx = true;            ///< 启用AVX指令集
+  int block_size = 32;            ///< 缓存块大小
 };
 
 /**
@@ -48,6 +52,10 @@ struct DeconvolutionConfig {
   bool use_simd = true;        ///< 启用SIMD优化
   bool use_memory_pool = true; ///< 使用内存池
   int tile_size = 256;         ///< 分块处理大小
+  bool use_fft = true;         ///< 使用FFT加速
+  int thread_count = 0;        ///< 线程数(0表示自动)
+  bool use_avx = true;         ///< 启用AVX指令集
+  int block_size = 32;         ///< 缓存块大小
 };
 
 /**
@@ -215,4 +223,13 @@ private:
     static std::mutex pool_mutex_;
     static const int max_pool_size_ = 100;
   };
+
+  // 新增优化方法
+  static void optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output, 
+                                  const cv::Mat &kernel, const ConvolutionConfig &cfg);
+  static void fftConvolve(const cv::Mat &input, cv::Mat &output, 
+                         const cv::Mat &kernel);
+  static void blockProcessing(const cv::Mat &input, cv::Mat &output,
+                            const std::function<void(const cv::Mat&, cv::Mat&)>& processor,
+                            int blockSize);
 };

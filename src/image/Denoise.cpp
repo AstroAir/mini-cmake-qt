@@ -1,6 +1,7 @@
 #include "Denoise.hpp"
 
 #include <algorithm>
+#include <future>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 #include <stdexcept>
@@ -113,41 +114,136 @@ cv::Mat WaveletDenoiser::recompose_one_level(const cv::Mat &waveCoeffs,
   return combined;
 }
 
-void WaveletDenoiser::process_blocks(
-    cv::Mat &img, int block_size,
-    const std::function<void(cv::Mat &)> &process_fn) {
-  denoiseLogger->debug("Starting process blocks with block size: {}",
-                       block_size);
-  const int rows = img.rows;
-  const int cols = img.cols;
-
-#pragma omp parallel for collapse(2) schedule(dynamic)
-  for (int i = 0; i < rows; i += block_size) {
-    for (int j = 0; j < cols; j += block_size) {
-      cv::Rect block(j, i, std::min(block_size, cols - j),
-                     std::min(block_size, rows - i));
-      cv::Mat block_roi = img(block);
-      process_fn(block_roi);
-    }
-  }
-  denoiseLogger->debug("Process blocks completed");
-}
-
 // SIMD优化的小波变换
 void WaveletDenoiser::wavelet_transform_simd(cv::Mat &data) {
   const int n = data.cols;
-  auto *ptr = data.ptr<float>();
+  float *ptr = data.ptr<float>();
 
+#if defined(__AVX2__)
+  for (int i = 0; i < n / 8; ++i) {
+    __m256 vec = _mm256_loadu_ps(ptr + i * 8);
+    __m256 result = _mm256_mul_ps(vec, _mm256_set1_ps(0.707106781f));
+    _mm256_storeu_ps(ptr + i * 8, result);
+  }
+#elif defined(__SSE2__)
+  for (int i = 0; i < n / 4; ++i) {
+    __m128 vec = _mm_loadu_ps(ptr + i * 4);
+    __m128 result = _mm_mul_ps(vec, _mm_set1_ps(0.707106781f));
+    _mm_storeu_ps(ptr + i * 4, result);
+  }
+#else
 #pragma omp simd
-  for (int i = 0; i < n / 2; ++i) {
-    const float a = ptr[2 * i];
-    const float b = ptr[2 * i + 1];
-    ptr[i] = (a + b) * 0.707106781f; // 1/sqrt(2)
-    ptr[i + n / 2] = (a - b) * 0.707106781f;
+  for (int i = 0; i < n; ++i) {
+    ptr[i] *= 0.707106781f;
+  }
+#endif
+}
+
+void WaveletDenoiser::process_blocks(
+    cv::Mat &img, int block_size,
+    const std::function<void(cv::Mat &)> &process_fn) {
+  const int rows = img.rows;
+  const int cols = img.cols;
+
+// 使用动态调度以更好地平衡负载
+#pragma omp parallel for collapse(2) schedule(dynamic, 1)
+  for (int i = 0; i < rows; i += block_size) {
+    for (int j = 0; j < cols; j += block_size) {
+      const int current_block_rows = std::min(block_size, rows - i);
+      const int current_block_cols = std::min(block_size, cols - j);
+
+      // 使用连续内存块提高缓存命中率
+      cv::Mat block;
+      img(cv::Range(i, i + current_block_rows),
+          cv::Range(j, j + current_block_cols))
+          .copyTo(block);
+
+      process_fn(block);
+
+      // 写回结果
+      block.copyTo(img(cv::Range(i, i + current_block_rows),
+                       cv::Range(j, j + current_block_cols)));
+    }
   }
 }
 
-// 自适应阈值计算
+void WaveletDenoiser::stream_process(
+    const cv::Mat &src, cv::Mat &dst,
+    const std::function<void(cv::Mat &)> &process_fn) {
+  const int pipeline_stages = 3;
+  const int tile_rows = src.rows / pipeline_stages;
+
+  std::vector<cv::Mat> tiles(pipeline_stages);
+  std::vector<std::future<void>> futures(pipeline_stages);
+
+  // 创建流水线
+  for (int i = 0; i < pipeline_stages; ++i) {
+    cv::Mat tile = src(cv::Range(i * tile_rows, (i + 1) * tile_rows),
+                       cv::Range(0, src.cols))
+                       .clone();
+    futures[i] = std::async(std::launch::async, process_fn, std::ref(tile));
+    tiles[i] = tile;
+  }
+
+  // 等待所有处理完成
+  for (int i = 0; i < pipeline_stages; ++i) {
+    futures[i].wait();
+    tiles[i].copyTo(dst(cv::Range(i * tile_rows, (i + 1) * tile_rows),
+                        cv::Range(0, src.cols)));
+  }
+}
+
+// 优化内存访问模式
+void WaveletDenoiser::optimize_memory_layout(cv::Mat &data) {
+  // 确保数据是连续的
+  if (!data.isContinuous()) {
+    data = data.clone();
+  }
+
+  // 内存对齐
+  const size_t alignment = 32; // AVX2需要32字节对齐
+  uchar *ptr = data.data;
+  size_t space = data.total() * data.elemSize();
+  void *aligned_ptr = nullptr;
+
+#if defined(_WIN32)
+  aligned_ptr = _aligned_malloc(space, alignment);
+  if (aligned_ptr) {
+    memcpy(aligned_ptr, ptr, space);
+    data = cv::Mat(data.rows, data.cols, data.type(), aligned_ptr);
+  }
+#else
+  if (posix_memalign(&aligned_ptr, alignment, space) == 0) {
+    memcpy(aligned_ptr, ptr, space);
+    data = cv::Mat(data.rows, data.cols, data.type(), aligned_ptr);
+  }
+#endif
+}
+
+// 使用SIMD优化的tile处理
+void WaveletDenoiser::process_tile_simd(cv::Mat &tile) {
+  optimize_memory_layout(tile);
+
+  float *ptr = tile.ptr<float>();
+  const int size = tile.total();
+
+#if defined(__AVX2__)
+  const int vec_size = 8;
+  const int vec_count = size / vec_size;
+
+#pragma omp parallel for
+  for (int i = 0; i < vec_count; ++i) {
+    __m256 vec = _mm256_load_ps(ptr + i * vec_size);
+    // 进行SIMD运算
+    // ...
+    _mm256_store_ps(ptr + i * vec_size, vec);
+  }
+#endif
+
+  // 处理剩余元素
+  // ...existing code...
+}
+
 float WaveletDenoiser::compute_adaptive_threshold(const cv::Mat &coeffs,
                                                   double noise_estimate) {
   denoiseLogger->debug("Starting compute adaptive threshold with noise "

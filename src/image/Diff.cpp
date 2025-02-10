@@ -2,11 +2,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <ranges>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
-#include <stack>
 #include <vector>
+#include <immintrin.h>  // SIMD指令
 
 #include <QApplication>
 #include <QComboBox>
@@ -75,104 +76,155 @@ void processRows(const QImage &img, int height,
 
 ComparisonResult
 PixelDifferenceStrategy::compare(const QImage &img1, const QImage &img2,
-                                 QPromise<ComparisonResult> &promise) const {
-  QImage diffImg(img1.size(), QImage::Format_ARGB32);
-  std::atomic_uint64_t totalDiff{0};
-  std::atomic_int progress{0};
+                                QPromise<ComparisonResult> &promise) const {
+    // 预处理图像
+    QImage processed1 = preprocessImage(img1);
+    QImage processed2 = preprocessImage(img2);
+    
+    QImage diffImg(processed1.size(), QImage::Format_ARGB32);
+    std::atomic_uint64_t totalDiff{0};
+    std::atomic_int progress{0};
 
-  const int height = img1.height();
-  const int bytesPerLine = img1.bytesPerLine();
+    const int height = processed1.height();
+    const int width = processed1.width();
+    const int bytesPerLine = processed1.bytesPerLine();
 
-#pragma omp parallel for reduction(+ : totalDiff) schedule(dynamic)
-  for (int y = 0; y < height; ++y) {
-    if (promise.isCanceled())
-      continue;
+    // OpenMP并行处理
+    #pragma omp parallel for collapse(2) reduction(+:totalDiff) schedule(dynamic)
+    for (int y = 0; y < height; y += BLOCK_SIZE) {
+        for (int x = 0; x < width; x += BLOCK_SIZE) {
+            if (promise.isCanceled()) continue;
 
-    const uchar *line1 = img1.scanLine(y);
-    const uchar *line2 = img2.scanLine(y);
-    uchar *dest = diffImg.scanLine(y);
+            const int blockHeight = std::min(BLOCK_SIZE, height - y);
+            const int blockWidth = std::min(BLOCK_SIZE, width - x);
 
-    for (int x = 0; x < bytesPerLine; ++x) {
-      int diff =
-          std::abs(static_cast<int>(line1[x]) - static_cast<int>(line2[x]));
-      dest[x] = static_cast<uchar>(diff);
-      totalDiff += diff;
+            for (int by = 0; by < blockHeight; ++by) {
+                const uchar* line1 = processed1.scanLine(y + by) + x * 4;
+                const uchar* line2 = processed2.scanLine(y + by) + x * 4;
+                uchar* dest = diffImg.scanLine(y + by) + x * 4;
+                
+                compareBlockSIMD(line1, line2, dest, blockWidth * 4);
+            }
+            
+            #pragma omp atomic
+            progress += blockHeight;
+        }
+        
+        if (progress % (height/10) == 0) {
+            promise.setProgressValue(static_cast<int>(progress * 100.0 / height));
+        }
     }
 
-#pragma omp atomic
-    ++progress;
+    // 找出差异区域
+    auto regions = findDifferenceRegions(diffImg);
+    
+    // 计算相似度
+    double mse = static_cast<double>(totalDiff) / (width * height * 4);
+    double similarity = 100.0 * (1.0 - std::sqrt(mse) / 255.0);
 
-    if (progress % 10 == 0) {
-#pragma omp critical
-      {
-        promise.setProgressValue(static_cast<int>(progress * 100.0 / height));
-      }
-    }
-  }
-  double mse =
-      static_cast<double>(totalDiff) / (img1.width() * img1.height() * 4);
-  double rmse = std::sqrt(mse);
-  double similarity = 100.0 * (1.0 - rmse / 255.0);
-
-  return {diffImg, similarity, findDifferenceRegions(diffImg)};
+    return {diffImg, similarity, regions};
 }
 
-QString PixelDifferenceStrategy::name() const { return "Pixel Difference"; }
+void PixelDifferenceStrategy::compareBlockSIMD(const uchar* block1, 
+                                              const uchar* block2,
+                                              uchar* dest, 
+                                              size_t size) const {
+    size_t i = 0;
+    // 使用AVX2指令集进行SIMD优化
+    #ifdef __AVX2__
+    for (; i + 32 <= size; i += 32) {
+        __m256i a = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block1 + i));
+        __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(block2 + i));
+        __m256i diff = _mm256_sub_epi8(_mm256_max_epu8(a, b), 
+                                      _mm256_min_epu8(a, b));
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dest + i), diff);
+    }
+    #endif
+
+    // 处理剩余的像素
+    for (; i < size; ++i) {
+        dest[i] = std::abs(block1[i] - block2[i]);
+    }
+}
+
+QImage PixelDifferenceStrategy::preprocessImage(const QImage& img) const {
+    // 降采样以减少计算量
+    if (SUBSAMPLE_FACTOR > 1) {
+        return img.scaled(img.width() / SUBSAMPLE_FACTOR, 
+                         img.height() / SUBSAMPLE_FACTOR,
+                         Qt::IgnoreAspectRatio, 
+                         Qt::FastTransformation);
+    }
+    return img;
+}
 
 std::vector<QRect>
 PixelDifferenceStrategy::findDifferenceRegions(const QImage &diffImg) const {
-  // 连通区域分析实现
-  std::vector<QRect> regions;
-  QImage visited(diffImg.size(), QImage::Format_Mono);
-  visited.fill(0);
-
-  const int threshold = 32;
-  const QPoint directions[] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-
-  for (int y = 0; y < diffImg.height(); ++y) {
-    for (int x = 0; x < diffImg.width(); ++x) {
-      if (qGray(diffImg.pixel(x, y)) > threshold && !visited.pixelIndex(x, y)) {
-        QRect region;
-        floodFill(diffImg, visited, x, y, threshold, region);
-        regions.push_back(region);
-      }
+    const int width = diffImg.width();
+    const int height = diffImg.height();
+    const int threshold = 32;
+    
+    // 使用并查集优化连通区域分析
+    DisjointSet ds(width * height);
+    std::vector<std::pair<int, int>> diffPoints;
+    std::map<int, QRect> regionMap;
+    
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (qGray(diffImg.pixel(x, y)) > threshold) {
+                diffPoints.emplace_back(x, y);
+                const int idx = y * width + x;
+                
+                // 检查4个方向，使用std::pair正确构造
+                std::array<std::pair<int,int>, 4> directions = {
+                    std::make_pair(-1, 0),
+                    std::make_pair(0, -1),
+                    std::make_pair(1, 0),
+                    std::make_pair(0, 1)
+                };
+                
+                for (const auto& [dx, dy] : directions) {
+                    int nx = x + dx, ny = y + dy;
+                    if (nx >= 0 && nx < width && ny >= 0 && ny < height &&
+                        qGray(diffImg.pixel(nx, ny)) > threshold) {
+                        ds.unite(idx, ny * width + nx);
+                    }
+                }
+            }
+        }
     }
-  }
-
-  return regions;
+    
+    // 使用迭代器构建返回值
+    std::vector<QRect> result;
+    for (const auto& [setId, rect] : regionMap) {
+        result.push_back(rect);
+    }
+    
+    return result;
 }
 
-void PixelDifferenceStrategy::floodFill(const QImage &img, QImage &visited,
-                                        int x, int y, int threshold,
-                                        QRect &region) const {
-  const std::array<QPoint, 4> directions = {QPoint{1, 0}, QPoint{-1, 0},
-                                            QPoint{0, 1}, QPoint{0, -1}};
-  std::stack<QPoint> stack;
-  stack.emplace(x, y);
-  visited.setPixel(x, y, 1);
+PixelDifferenceStrategy::DisjointSet::DisjointSet(int size) 
+    : parent(size), rank(size, 0) {
+    std::iota(parent.begin(), parent.end(), 0);
+}
 
-  int minX = x, maxX = x;
-  int minY = y, maxY = y;
-
-  while (!stack.empty()) {
-    auto [cx, cy] = stack.top();
-    stack.pop();
-
-    minX = std::min(minX, cx);
-    maxX = std::max(maxX, cx);
-    minY = std::min(minY, cy);
-    maxY = std::max(maxY, cy);
-
-    for (const auto &[dx, dy] : directions) {
-      const int nx = cx + dx;
-      const int ny = cy + dy;
-      if (nx >= 0 && nx < img.width() && ny >= 0 && ny < img.height() &&
-          !visited.pixelIndex(nx, ny) && qGray(img.pixel(nx, ny)) > threshold) {
-        visited.setPixel(nx, ny, 1);
-        stack.emplace(nx, ny);
-      }
+int PixelDifferenceStrategy::DisjointSet::find(int x) {
+    if (parent[x] != x) {
+        parent[x] = find(parent[x]); // 路径压缩
     }
-  }
+    return parent[x];
+}
 
-  region = QRect(QPoint(minX, minY), QPoint(maxX, maxY));
+void PixelDifferenceStrategy::DisjointSet::unite(int x, int y) {
+    x = find(x);
+    y = find(y);
+    if (x != y) {
+        if (rank[x] < rank[y]) {
+            std::swap(x, y);
+        }
+        parent[y] = x;
+        if (rank[x] == rank[y]) {
+            ++rank[x];
+        }
+    }
 }

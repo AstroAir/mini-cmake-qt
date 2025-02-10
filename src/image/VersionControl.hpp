@@ -9,6 +9,9 @@
 #include <span>
 #include <vector>
 #include <zlib.h>
+#include <unordered_map>
+#include <chrono>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -47,6 +50,45 @@ public:
    * @return The computed hash as a string.
    */
   [[nodiscard]] std::string compute_shallow_hash(const cv::Mat &image) const;
+
+  // 设置缓存大小（以MB为单位）
+  void set_cache_size(size_t size_mb);
+
+  // 分支管理
+  void create_branch(std::string_view branch_name);
+  void switch_branch(std::string_view branch_name);
+  std::vector<std::string> list_branches() const;
+  void merge_branch(std::string_view source_branch);
+
+  // 标签管理
+  void create_tag(std::string_view tag_name, std::string_view commit_hash);
+  void delete_tag(std::string_view tag_name);
+  std::vector<std::string> list_tags() const;
+
+  // 历史查询
+  struct CommitInfo {
+      std::string hash;
+      std::string author;
+      std::string date;
+      std::string message;
+      std::string parent_hash;
+  };
+  std::vector<CommitInfo> get_history() const;
+  
+  // 图像对比和合并
+  struct DiffResult {
+      cv::Mat visual_diff;     // 可视化的差异图
+      double diff_percentage;   // 差异百分比
+      std::vector<cv::Rect> diff_regions; // 差异区域
+  };
+  DiffResult compare_images(const cv::Mat& img1, const cv::Mat& img2) const;
+  cv::Mat merge_images(const cv::Mat& base, const cv::Mat& img1, const cv::Mat& img2) const;
+
+  // 元数据管理
+  void add_metadata(std::string_view commit_hash, 
+                   const std::unordered_map<std::string, std::string>& metadata);
+  std::unordered_map<std::string, std::string> 
+  get_metadata(std::string_view commit_hash) const;
 
 private:
   /**
@@ -137,8 +179,71 @@ private:
    */
   void handle_error(const std::exception &e) const;
 
+  /**
+   * @brief 使用分块并行处理计算图像差异
+   */
+  cv::Mat compute_parallel_diff(const cv::Mat &base, const cv::Mat &current) const;
+
+  /**
+   * @brief 对图像进行分块处理
+   */
+  void process_image_blocks(cv::Mat &image, 
+                            const std::function<void(cv::Mat&)>& processor) const;
+
+  /**
+   * @brief LRU缓存最近使用的图像
+   */
+  struct CacheEntry {
+      cv::Mat image;
+      std::chrono::system_clock::time_point last_access;
+  };
+
+  mutable std::unordered_map<std::string, CacheEntry> image_cache_;
+  mutable std::mutex cache_mutex_;
+  size_t max_cache_size_ = 1024 * 1024 * 512; // 默认512MB
+
+  /**
+   * @brief 从缓存中获取图像
+   */
+  cv::Mat get_from_cache(const std::string& hash) const;
+
+  /**
+   * @brief 将图像添加到缓存
+   */
+  void add_to_cache(const std::string& hash, const cv::Mat& image) const;
+
+  /**
+   * @brief 清理过期缓存
+   */
+  void cleanup_cache() const;
+
+  struct Branch {
+      std::string name;
+      std::string head_commit;
+      std::chrono::system_clock::time_point created_at;
+  };
+
+  struct Tag {
+      std::string name;
+      std::string commit_hash;
+      std::string message;
+      std::chrono::system_clock::time_point created_at;
+  };
+
+  // 新增私有方法
+  void save_branch_info(const Branch& branch) const;
+  void save_tag_info(const Tag& tag) const;
+  Branch load_branch_info(std::string_view branch_name) const;
+  Tag load_tag_info(std::string_view tag_name) const;
+  void update_branch_head(std::string_view branch_name, std::string_view commit_hash);
+  cv::Mat find_conflict_regions(const cv::Mat& base, const cv::Mat& img1, const cv::Mat& img2) const;
+
   fs::path repo_root;               ///< Root path of the repository.
   fs::path objects_dir;             ///< Directory for storing objects.
   std::string parent_hash_;         ///< Hash of the parent commit.
   mutable std::mutex commit_mutex_; ///< Mutex for synchronizing commits.
+  std::string current_branch_ = "main";
+  fs::path branches_dir_;
+  fs::path tags_dir_;
+  fs::path metadata_dir_;
 };

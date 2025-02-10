@@ -14,6 +14,9 @@ struct HistogramConfig {
     double gamma{1.0};       // gamma校正值
     std::array<float, 2> range{0.0f, 256.0f};  // 添加范围成员
     int channel{0};                             // 添加通道成员
+    bool useGPU{false};        // 是否使用GPU加速
+    bool useSIMD{true};        // 是否使用SIMD指令
+    size_t blockSize{256};     // 分块处理大小
 };
 
 struct HistogramStats {

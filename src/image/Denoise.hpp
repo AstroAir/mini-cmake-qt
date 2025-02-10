@@ -52,6 +52,12 @@ struct DenoiseParameters {
   bool use_adaptive_threshold = true;           ///< Use adaptive thresholding
   double noise_estimate = 0.0;                  ///< Estimated noise level
   int block_size = 32;                          ///< Block size for processing
+
+  // Optimization parameters
+  bool use_simd = true;           ///< 使用SIMD优化
+  bool use_opencl = false;        ///< 使用OpenCL GPU加速
+  int tile_size = 256;            ///< 分块大小
+  bool use_stream = true;         ///< 使用流水线处理
 };
 
 /**
@@ -80,6 +86,13 @@ private:
   static void wavelet_transform_simd(cv::Mat &data);
   static float compute_adaptive_threshold(const cv::Mat &coeffs,
                                           double noise_estimate);
+
+  // 新增优化方法
+  static void process_tile_simd(cv::Mat& tile);
+  static void parallel_wavelet_transform(cv::Mat& data);
+  static void optimize_memory_layout(cv::Mat& data);
+  static void stream_process(const cv::Mat& src, cv::Mat& dst, 
+                             const std::function<void(cv::Mat&)>& process_fn);
 
 public:
   /**

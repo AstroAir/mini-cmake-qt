@@ -76,6 +76,8 @@ qt_standard_project_setup()
 
 add_executable(${PROJECT_NAME} WIN32 MACOSX_BUNDLE
     ${SOURCE_FILES} ${META_FILES_TO_INCLUDE} ${RESOURCE_FILES}
+    src/image/ImageManager.cpp
+    src/image/ImageManager.h
 )
 
 target_link_directories(${PROJECT_NAME} PRIVATE ${OpenCV_LIB_DIR})

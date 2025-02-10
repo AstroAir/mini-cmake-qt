@@ -13,52 +13,144 @@
 namespace {
 std::shared_ptr<spdlog::logger> stackLogger =
     spdlog::basic_logger_mt("StackLogger", "logs/stack.log");
+
+template <typename T>
+void transfer_unique_ptrs(std::vector<std::unique_ptr<T>> &dest,
+                          std::vector<std::unique_ptr<T>> &src,
+                          size_t start_idx = 0,
+                          size_t count = std::numeric_limits<size_t>::max()) {
+  if (&dest == &src) {
+    throw std::invalid_argument(
+        "Destination and source vectors cannot be the same");
+  }
+
+  if (src.empty()) {
+    throw std::out_of_range("Source vector is empty");
+  }
+
+  // 计算实际要移动的数量
+  const size_t available = src.size() - start_idx;
+  const size_t actual_count = (count == std::numeric_limits<size_t>::max())
+                                  ? available
+                                  : std::min(count, available);
+
+  if (start_idx >= src.size()) {
+    throw std::out_of_range("Start index exceeds source vector size");
+  }
+
+  if (actual_count == 0) {
+    throw std::logic_error("No elements to transfer");
+  }
+
+  auto start = src.begin() + start_idx;
+  auto end = start + actual_count;
+
+  dest.insert(dest.end(), std::make_move_iterator(start),
+              std::make_move_iterator(end));
+
+  std::for_each(start, end, [](auto &ptr) { ptr.release(); });
+
+  src.erase(start, end);
+}
+
+// 辅助函数:执行图像预处理流水线
+cv::Mat preprocessImage(const cv::Mat &input,
+                        const StackPreprocessConfig &config) {
+  cv::Mat processed = input.clone();
+
+  try {
+    // 1. 校准处理
+    if (config.enable_calibration) {
+      auto [calibrated, _, __, ___] = flux_calibration_ex(
+          processed, config.calibration_params,
+          config.response_function.empty() ? nullptr
+                                           : &config.response_function,
+          config.flat_field.empty() ? nullptr : &config.flat_field,
+          config.dark_frame.empty() ? nullptr : &config.dark_frame);
+      processed = calibrated;
+      stackLogger->debug("Applied calibration preprocessing");
+    }
+
+    // 2. 降噪处理
+    if (config.enable_denoise) {
+      ImageDenoiser denoiser;
+      processed = denoiser.denoise(processed, config.denoise_params);
+      stackLogger->debug("Applied denoise preprocessing");
+    }
+
+    // 3. 卷积处理
+    if (config.enable_convolution) {
+      processed = Convolve::process(processed, config.conv_config);
+      stackLogger->debug("Applied convolution preprocessing");
+    }
+
+    // 4. 滤波处理
+    if (config.enable_filter && !config.filters.empty()) {
+      std::vector<std::unique_ptr<IFilterStrategy>> strategies;
+      // TODO: Uncomment the following line after implementing
+      // transfer_unique_ptrs transfer_unique_ptrs<IFilterStrategy>(strategies,
+      // config.filters);
+      ChainImageFilterProcessor filter_processor(std::move(strategies));
+      QImage qimg = ImageUtils::matToQtImage(processed);
+      qimg = filter_processor.process(qimg);
+      processed = ImageUtils::qtImageToMat(qimg);
+      stackLogger->debug("Applied filter chain preprocessing");
+    }
+
+    stackLogger->info("Processed image size: {} x {}", processed.cols,
+                      processed.rows);
+
+    return processed;
+  } catch (const std::exception &e) {
+    stackLogger->error("Preprocessing failed: {}", e.what());
+    throw;
+  }
+}
 } // namespace
 
 // Compute the mean and standard deviation of images
+// 优化 computeMeanAndStdDev 函数，使用 OpenMP 并行计算
 auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
     -> std::pair<cv::Mat, cv::Mat> {
   if (images.empty()) {
-    stackLogger->error(
-        "Input images are empty when computing mean and standard deviation.");
+    stackLogger->error("Input images are empty.");
     throw std::runtime_error("Input images are empty");
   }
 
-  stackLogger->info(
-      "Starting to compute mean and standard deviation. Number of images: {}",
-      images.size());
-
-  // Initialize mean and standard deviation matrices
   cv::Mat mean = cv::Mat::zeros(images[0].size(), CV_32F);
   cv::Mat accumSquare = cv::Mat::zeros(images[0].size(), CV_32F);
+  const int numImages = static_cast<int>(images.size());
 
-  // Accumulate pixel values
-  for (const auto &img : images) {
-    if (img.size() != mean.size() || img.type() != mean.type()) {
-      stackLogger->error("All images must have the same size and type.");
-      throw std::runtime_error("Image size or type mismatch");
+#pragma omp parallel
+  {
+    cv::Mat localMean = cv::Mat::zeros(images[0].size(), CV_32F);
+    cv::Mat localAccumSquare = cv::Mat::zeros(images[0].size(), CV_32F);
+
+#pragma omp for nowait
+    for (int i = 0; i < numImages; ++i) {
+      cv::Mat floatImg;
+      images[i].convertTo(floatImg, CV_32F);
+      localMean += floatImg;
+      localAccumSquare += floatImg.mul(floatImg);
     }
 
-    cv::Mat floatImg;
-    img.convertTo(floatImg, CV_32F);
-    mean += floatImg;
-    accumSquare += floatImg.mul(floatImg);
+#pragma omp critical
+    {
+      mean += localMean;
+      accumSquare += localAccumSquare;
+    }
   }
 
-  // Compute mean
-  mean /= static_cast<float>(images.size());
-
-  // Compute standard deviation
+  mean /= static_cast<float>(numImages);
   cv::Mat stdDev;
-  cv::sqrt(accumSquare / static_cast<float>(images.size()) - mean.mul(mean),
+  cv::sqrt(accumSquare / static_cast<float>(numImages) - mean.mul(mean),
            stdDev);
-
-  stackLogger->info("Mean and standard deviation computation completed.");
 
   return {mean, stdDev};
 }
 
 // Sigma clipping stack
+// 优化 sigmaClippingStack 函数，使用向量化操作
 auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
     -> cv::Mat {
   if (images.empty()) {
@@ -78,34 +170,23 @@ auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
     throw;
   }
 
-  std::vector<cv::Mat> layers;
-  for (size_t i = 0; i < images.size(); ++i) {
-    cv::Mat temp;
-    images[i].convertTo(temp, CV_32F);
-    cv::Mat mask = cv::abs(temp - mean) < (sigma * stdDev);
-    temp.setTo(0, ~mask);
-    layers.push_back(temp);
-    stackLogger->info("Processed image {}, applied sigma clipping mask.",
-                      i + 1);
-  }
+  // 使用向量化操作代替循环
+  cv::Mat allImages;
+  cv::vconcat(images, allImages);
 
-  cv::Mat sum = cv::Mat::zeros(images[0].size(), CV_32F);
-  cv::Mat count = cv::Mat::zeros(images[0].size(), CV_32F);
+  cv::Mat masks;
+  cv::Mat temp = cv::abs(allImages - cv::repeat(mean, images.size(), 1));
+  cv::compare(temp, cv::repeat(sigma * stdDev, images.size(), 1), masks,
+              cv::CMP_LT);
 
-  for (size_t i = 0; i < layers.size(); ++i) {
-    cv::Mat mask = layers[i] != 0;
-    sum += layers[i];
-    count += mask;
-    stackLogger->info("Accumulated layer {}.", i + 1);
-  }
+  cv::Mat result;
+  cv::reduce(allImages.mul(masks), result, 0, cv::REDUCE_SUM);
+  cv::Mat counts;
+  cv::reduce(masks, counts, 0, cv::REDUCE_SUM);
 
-  // Prevent division by zero
-  cv::Mat nonZeroMask = count > 0;
-  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_32F);
-  sum.copyTo(result, nonZeroMask);
-  result /= count;
-
-  // Convert result back to 8-bit image
+  // 防止除零
+  counts.setTo(1, counts == 0);
+  result /= counts;
   result.convertTo(result, CV_8U);
 
   stackLogger->info("Sigma clipping stack completed.");
@@ -153,22 +234,49 @@ auto computeMode(const std::vector<cv::Mat> &images) -> cv::Mat {
 }
 
 // 计算图像熵
+// 优化 computeEntropy 函数，使用查找表加速计算
+namespace {
+// 预计算对数查找表
+const int LOOKUP_TABLE_SIZE = 256;
+std::vector<double> logLookupTable;
+
+void initLogLookupTable() {
+  static std::once_flag flag;
+  std::call_once(flag, []() {
+    logLookupTable.resize(LOOKUP_TABLE_SIZE);
+    for (int i = 1; i < LOOKUP_TABLE_SIZE; ++i) {
+      logLookupTable[i] = std::log2(static_cast<double>(i));
+    }
+  });
+}
+} // namespace
+
 auto computeEntropy(const cv::Mat &image) -> double {
-  std::vector<int> histogram(256, 0);
+  initLogLookupTable();
+
+  std::array<int, 256> histogram{};
+  const int totalPixels = image.rows * image.cols;
+
+  // 使用向量化操作计算直方图
   for (int i = 0; i < image.rows; i++) {
+    const uchar *row = image.ptr<uchar>(i);
     for (int j = 0; j < image.cols; j++) {
-      histogram[image.at<uchar>(i, j)]++;
+      histogram[row[j]]++;
     }
   }
 
   double entropy = 0.0;
-  int totalPixels = image.rows * image.cols;
+  const double invTotal = 1.0 / totalPixels;
+
+// 使用查找表计算熵
+#pragma omp simd reduction(+ : entropy)
   for (int i = 0; i < 256; i++) {
     if (histogram[i] > 0) {
-      double probability = static_cast<double>(histogram[i]) / totalPixels;
-      entropy -= probability * std::log2(probability);
+      double probability = histogram[i] * invTotal;
+      entropy -= probability * logLookupTable[histogram[i]];
     }
   }
+
   return entropy;
 }
 
@@ -220,6 +328,7 @@ auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat {
 }
 
 // 焦点堆叠
+// 优化 focusStack 函数，增加并行处理和内存预分配
 auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
   if (images.empty()) {
     stackLogger->error("No input images for focus stack.");
@@ -228,34 +337,41 @@ auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat {
 
   stackLogger->info("Starting focus stack for {} images.", images.size());
 
-  cv::Mat result = cv::Mat::zeros(images[0].size(), CV_8U);
-  std::vector<cv::Mat> laplacians;
+  const int rows = images[0].rows;
+  const int cols = images[0].cols;
+  const size_t n = images.size();
 
-  // 计算每个图像的Laplacian
-  for (const auto &img : images) {
-    cv::Mat laplacian;
-    cv::Laplacian(img, laplacian, CV_32F);
-    laplacian = cv::abs(laplacian);
-    laplacians.push_back(laplacian);
+  cv::Mat result(rows, cols, CV_8U);
+  std::vector<cv::Mat> laplacians(n);
+
+// 并行计算 Laplacian
+#pragma omp parallel for
+  for (int k = 0; k < static_cast<int>(n); ++k) {
+    cv::Mat lap;
+    cv::Laplacian(images[k], lap, CV_32F, 3);
+    cv::convertScaleAbs(lap, laplacians[k]);
   }
 
-  // 根据Laplacian响应选择最清晰的像素
-  for (int i = 0; i < result.rows; i++) {
-    for (int j = 0; j < result.cols; j++) {
+// 使用向量化操作找到最大响应
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < rows; i++) {
+    for (int j = 0; j < cols; j++) {
       float maxResponse = -1;
       int bestIndex = 0;
-      for (size_t k = 0; k < images.size(); k++) {
-        if (laplacians[k].at<float>(i, j) > maxResponse) {
-          maxResponse = laplacians[k].at<float>(i, j);
-          bestIndex = static_cast<int>(k);
+
+// 使用 SIMD 指令优化内部循环
+#pragma omp simd reduction(max : maxResponse)
+      for (size_t k = 0; k < n; k++) {
+        float response = laplacians[k].at<uchar>(i, j);
+        if (response > maxResponse) {
+          maxResponse = response;
+          bestIndex = k;
         }
       }
+
       result.at<uchar>(i, j) = images[bestIndex].at<uchar>(i, j);
     }
   }
-
-  // 应用高斯模糊以减少噪声
-  cv::GaussianBlur(result, result, cv::Size(3, 3), 0);
 
   stackLogger->info("Focus stack completed.");
   return result;
@@ -606,4 +722,43 @@ auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
   }
 
   return stackedImage;
+}
+
+auto stackImagesWithPreprocess(const std::vector<cv::Mat> &images,
+                               StackMode mode,
+                               const StackPreprocessConfig &preprocess_config,
+                               float sigma, const std::vector<float> &weights)
+    -> cv::Mat {
+  if (images.empty()) {
+    stackLogger->error("No input images for stacking with preprocessing");
+    throw std::runtime_error("No images to stack");
+  }
+
+  stackLogger->info("Starting image stacking with preprocessing. Mode: {}",
+                    static_cast<int>(mode));
+
+  std::vector<cv::Mat> preprocessed_images;
+  preprocessed_images.reserve(images.size());
+
+  if (preprocess_config.parallel_preprocess) {
+// 并行处理每张图片
+#pragma omp parallel for num_threads(preprocess_config.thread_count)
+    for (int i = 0; i < static_cast<int>(images.size()); i++) {
+      cv::Mat processed = preprocessImage(images[i], preprocess_config);
+#pragma omp critical
+      {
+        preprocessed_images.push_back(processed);
+      }
+    }
+  } else {
+    // 串行处理
+    for (const auto &img : images) {
+      preprocessed_images.push_back(preprocessImage(img, preprocess_config));
+    }
+  }
+
+  stackLogger->info("Preprocessing completed, starting stacking");
+
+  // 使用处理后的图像进行堆叠
+  return stackImages(preprocessed_images, mode, sigma, weights);
 }

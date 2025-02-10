@@ -1,9 +1,38 @@
 #include "UpdateCheck.h"
+#include <QFile>
+#include <QMutex>
+#include <QTextStream>
 #include <QtNetwork>
 #include <QtWidgets>
-#include <fstream>
 #include <semver.hpp>
-#include <sstream>
+
+class Logger {
+public:
+  Logger(const QString &filename) : logFile(filename) {
+    logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+    logStream.setDevice(&logFile);
+  }
+
+  ~Logger() {
+    if (logFile.isOpen()) {
+      logFile.close();
+    }
+  }
+
+  void log(const QString &message) {
+    QMutexLocker locker(&mutex);
+    logStream << QDateTime::currentDateTime().toString(Qt::ISODate) << " "
+              << message << Qt::endl;
+    logStream.flush();
+  }
+
+private:
+  QFile logFile;
+  QTextStream logStream;
+  QMutex mutex;
+};
+
+static Logger logger("update_check.log");
 
 UpdateChecker::UpdateChecker(QObject *parent)
     : QObject(parent), manager(new QNetworkAccessManager(this)) {
@@ -12,7 +41,9 @@ UpdateChecker::UpdateChecker(QObject *parent)
 }
 
 void UpdateChecker::checkForUpdates(bool force) {
+  logger.log("Checking for updates..."); // Log activity
   if (!force && !shouldCheck()) {
+    logger.log("Skipping update check, not due yet.");
     emit updateNotAvailable();
     return;
   }
@@ -41,12 +72,14 @@ void UpdateChecker::onUpdateInfoReceived(QNetworkReply *reply) {
   const auto process = qScopeGuard([reply] { reply->deleteLater(); });
 
   if (reply->error() != QNetworkReply::NoError) {
+    logger.log(QString("Network error: %1").arg(reply->errorString()));
     emit updateError(tr("Network error: %1").arg(reply->errorString()));
     return;
   }
 
   const auto processResult = parseUpdateInfo(reply->readAll());
   if (processResult.hasError()) {
+    logger.log(processResult.error());
     emit updateError(processResult.error());
     return;
   }
@@ -60,8 +93,10 @@ UpdateChecker::parseUpdateInfo(const QByteArray &data) noexcept {
   QJsonParseError parseError;
   const auto doc = QJsonDocument::fromJson(data, &parseError);
   if (parseError.error != QJsonParseError::NoError) {
-    return Result<QJsonObject>(
-        tr("JSON parse error: %1").arg(parseError.errorString()));
+    const QString errorMsg =
+        tr("JSON parse error: %1").arg(parseError.errorString());
+    logger.log(errorMsg);
+    return Result<QJsonObject>(errorMsg);
   }
 
   const auto currentVersion =
@@ -70,6 +105,7 @@ UpdateChecker::parseUpdateInfo(const QByteArray &data) noexcept {
       semver::version{doc["version"].toString().toStdString()};
 
   if (latestVersion <= currentVersion) {
+    logger.log("Already up to date");
     return Result<QJsonObject>(tr("Already up to date"));
   }
 
@@ -87,6 +123,7 @@ void UpdateChecker::handleNetworkError(QNetworkReply::NetworkError code) {
       return tr("Network error occurred");
     }
   }();
+  logger.log(message);
   emit updateError(message);
 }
 

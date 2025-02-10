@@ -8,13 +8,43 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <spdlog/sinks/basic_file_sink.h> // 需要包含文件 sink
+#include <spdlog/spdlog.h>
+
+
+namespace {
+// 创建一个只属于 MetadataDialog.cpp 的 logger
+std::shared_ptr<spdlog::logger> CreateMetadataDialogLogger() {
+  try {
+    auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+        "metadata_dialog.log", true);
+    auto logger =
+        std::make_shared<spdlog::logger>("metadata_dialog", file_sink);
+    logger->set_level(spdlog::level::debug);               // 设置日志级别
+    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v"); // 设置日志格式
+    return logger;
+  } catch (const spdlog::spdlog_ex &ex) {
+    std::cerr << "Log initialization failed: " << ex.what() << std::endl;
+    return nullptr;
+  }
+}
+
+auto metadata_dialog_logger = CreateMetadataDialogLogger();
+} // namespace
 
 MetadataDialog::MetadataDialog(const ImageMetadata &meta, QWidget *parent)
     : QDialog(parent), metadata(meta) {
   setupUI();
+  if (metadata_dialog_logger) {
+    metadata_dialog_logger->debug("MetadataDialog 创建, path: {}",
+                                  meta.path.string());
+  }
   try {
     populateTree(metadata);
   } catch (const std::exception &e) {
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->error("加载元信息失败: {}", e.what());
+    }
     QMessageBox::critical(this, "错误",
                           QString("加载元信息失败: %1").arg(e.what()));
     // 可选：清空 treeWidget 或其他处理
@@ -86,9 +116,15 @@ void MetadataDialog::editCustomData() {
     jsonEditor->loadJson(metadata.custom_data);
     editButton->setText("隐藏编辑器");
     saveButton->setEnabled(true);
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->debug("显示 JsonEditor");
+    }
   } else {
     jsonEditor->hide();
     editButton->setText("编辑自定义数据");
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->debug("隐藏 JsonEditor");
+    }
   }
 }
 
@@ -97,8 +133,14 @@ void MetadataDialog::saveMetadata() {
     metadata.custom_data = jsonEditor->getJson();
     updateCustomDataDisplay();
     QMessageBox::information(this, "成功", "元数据已更新");
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->info("元数据已更新");
+    }
   } catch (const std::exception &e) {
     QMessageBox::critical(this, "错误", QString("保存失败: %1").arg(e.what()));
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->error("保存元数据失败: {}", e.what());
+    }
   }
 }
 
@@ -141,9 +183,16 @@ void MetadataDialog::exportMetadata() {
     try {
       saveMetadataToFile(filePath);
       QMessageBox::information(this, "成功", "元数据已成功导出");
+      if (metadata_dialog_logger) {
+        metadata_dialog_logger->info("元数据已成功导出到: {}",
+                                     filePath.toStdString());
+      }
     } catch (const std::exception &e) {
       QMessageBox::critical(this, "错误",
                             QString("导出失败: %1").arg(e.what()));
+      if (metadata_dialog_logger) {
+        metadata_dialog_logger->error("导出元数据失败: {}", e.what());
+      }
     }
   }
 }
@@ -157,9 +206,16 @@ void MetadataDialog::importMetadata() {
       loadMetadataFromFile(filePath);
       populateTree(metadata);
       QMessageBox::information(this, "成功", "元数据已成功导入");
+      if (metadata_dialog_logger) {
+        metadata_dialog_logger->info("元数据已成功从 {} 导入",
+                                     filePath.toStdString());
+      }
     } catch (const std::exception &e) {
       QMessageBox::critical(this, "错误",
                             QString("导入失败: %1").arg(e.what()));
+      if (metadata_dialog_logger) {
+        metadata_dialog_logger->error("导入元数据失败: {}", e.what());
+      }
     }
   }
 }
@@ -169,12 +225,18 @@ void MetadataDialog::resetMetadata() {
       QMessageBox::Yes) {
     metadata = ImageMetadata(); // 重置为默认值
     populateTree(metadata);
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->warn("元数据已重置");
+    }
   }
 }
 
 void MetadataDialog::searchMetadata() {
   QString searchText = searchBox->text().toLower();
   filterTreeItems(searchText);
+  if (metadata_dialog_logger) {
+    metadata_dialog_logger->debug("搜索元数据: {}", searchText.toStdString());
+  }
 }
 
 void MetadataDialog::filterTreeItems(const QString &searchText) {
@@ -208,6 +270,10 @@ bool MetadataDialog::filterTreeItem(QTreeWidgetItem *item,
 void MetadataDialog::saveMetadataToFile(const QString &filePath) {
   QFile file(filePath);
   if (!file.open(QIODevice::WriteOnly)) {
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->error("无法打开文件进行写入: {}",
+                                    filePath.toStdString());
+    }
     throw std::runtime_error("无法打开文件进行写入");
   }
 
@@ -221,17 +287,28 @@ void MetadataDialog::saveMetadataToFile(const QString &filePath) {
 void MetadataDialog::loadMetadataFromFile(const QString &filePath) {
   QFile file(filePath);
   if (!file.open(QIODevice::ReadOnly)) {
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->error("无法打开文件进行读取: {}",
+                                    filePath.toStdString());
+    }
     throw std::runtime_error("无法打开文件进行读取");
   }
   QByteArray content = file.readAll();
   if (content.isEmpty()) {
     // 文件为空，避免崩溃，设置为空的元数据
     metadata = ImageMetadata();
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->warn("文件为空: {}", filePath.toStdString());
+    }
     return;
   }
   QJsonDocument doc = QJsonDocument::fromJson(content);
   if (doc.isNull() || doc.isEmpty()) {
     metadata = ImageMetadata();
+    if (metadata_dialog_logger) {
+      metadata_dialog_logger->warn("文件内容为空或格式不正确: {}",
+                                   filePath.toStdString());
+    }
     return;
   }
   nlohmann::json j = nlohmann::json::parse(doc.toJson().toStdString());

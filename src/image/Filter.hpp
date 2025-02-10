@@ -1,41 +1,43 @@
-#pragma once
+#ifndef FILTER_HPP
+#define FILTER_HPP
 
 #include <QImage>
-#include <concepts>
+#include <exception>
 #include <memory>
 #include <opencv2/opencv.hpp>
+#include <string>
 #include <vector>
 
-namespace ImageUtils {
-cv::Mat qtImageToMat(const QImage &img);
-QImage matToQtImage(const cv::Mat &mat);
-}
 
-// 使用C++20 concept定义滤镜策略约束
-template <typename T>
-concept FilterStrategy = requires(T t, cv::Mat &img) {
-  { t.apply(img) } -> std::same_as<void>;
-  { T::name() } -> std::same_as<const char *>;
-};
-
-// 异常安全基类
-class ImageFilterException : public std::runtime_error {
+// Common exception class used by filter implementations.
+class ImageFilterException : public std::exception {
 public:
-  using std::runtime_error::runtime_error;
+  explicit ImageFilterException(const std::string &msg) : msg_(msg) {}
+  const char *what() const noexcept override { return msg_.c_str(); }
+
+private:
+  std::string msg_;
 };
 
-// 滤镜策略接口
+// Base interface for all filter strategies.
 class IFilterStrategy {
 public:
   virtual ~IFilterStrategy() = default;
-  virtual void apply(cv::Mat &image) = 0;
+  virtual void apply(cv::UMat &image) = 0;
   virtual const char *name() const = 0;
 
 protected:
-  void validateImage(const cv::Mat &img) const;
+  void validateImage(const cv::UMat &img) const {
+    if (img.empty()) {
+      throw ImageFilterException("Empty input image");
+    }
+    if (img.depth() != CV_8U) {
+      throw ImageFilterException("Unsupported image depth");
+    }
+  }
 };
 
-// 图像处理器类
+// Basic image filter processor using a single strategy.
 class ImageFilterProcessor {
 public:
   explicit ImageFilterProcessor(std::unique_ptr<IFilterStrategy> &&strategy);
@@ -45,7 +47,7 @@ private:
   std::unique_ptr<IFilterStrategy> strategy_;
 };
 
-// 滤镜链式处理器
+// Chain processor to apply multiple filters in sequence.
 class ChainImageFilterProcessor {
 public:
   explicit ChainImageFilterProcessor(
@@ -56,11 +58,11 @@ private:
   std::vector<std::unique_ptr<IFilterStrategy>> strategies_;
 };
 
-// 具体滤镜类声明
+// Existing Filter Strategies:
 class GaussianBlurFilter : public IFilterStrategy {
 public:
-  explicit GaussianBlurFilter(int kernelSize = 5, double sigma = 1.5);
-  void apply(cv::Mat &image) override;
+  GaussianBlurFilter(int kernelSize, double sigma);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
@@ -70,8 +72,8 @@ private:
 
 class MedianBlurFilter : public IFilterStrategy {
 public:
-  explicit MedianBlurFilter(int kernelSize = 5);
-  void apply(cv::Mat &image) override;
+  explicit MedianBlurFilter(int kernelSize);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
@@ -80,9 +82,8 @@ private:
 
 class BilateralFilter : public IFilterStrategy {
 public:
-  BilateralFilter(int diameter = 9, double sigmaColor = 75.0,
-                  double sigmaSpace = 75.0);
-  void apply(cv::Mat &image) override;
+  BilateralFilter(int diameter, double sigmaColor, double sigmaSpace);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
@@ -91,11 +92,10 @@ private:
   double sigmaSpace_;
 };
 
-// 边缘检测滤镜
 class CannyEdgeFilter : public IFilterStrategy {
 public:
-  CannyEdgeFilter(double threshold1 = 100, double threshold2 = 200);
-  void apply(cv::Mat &image) override;
+  CannyEdgeFilter(double threshold1, double threshold2);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
@@ -103,22 +103,20 @@ private:
   double threshold2_;
 };
 
-// 图像锐化滤镜
 class SharpenFilter : public IFilterStrategy {
 public:
-  explicit SharpenFilter(double strength = 1.0);
-  void apply(cv::Mat &image) override;
+  explicit SharpenFilter(double strength);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
   double strength_;
 };
 
-// 色相饱和度滤镜
 class HSVAdjustFilter : public IFilterStrategy {
 public:
-  HSVAdjustFilter(double hue = 0, double saturation = 1.0, double value = 1.0);
-  void apply(cv::Mat &image) override;
+  HSVAdjustFilter(double hue, double saturation, double value);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
@@ -127,14 +125,78 @@ private:
   double value_;
 };
 
-// 对比度亮度滤镜
 class ContrastBrightnessFilter : public IFilterStrategy {
 public:
-  ContrastBrightnessFilter(double contrast = 1.0, double brightness = 0);
-  void apply(cv::Mat &image) override;
+  ContrastBrightnessFilter(double contrast, double brightness);
+  void apply(cv::UMat &image) override;
   const char *name() const override;
 
 private:
   double contrast_;
   double brightness_;
 };
+
+class EmbossFilter : public IFilterStrategy {
+public:
+  EmbossFilter() = default;
+  void apply(cv::UMat &image) override;
+  const char *name() const override;
+};
+
+class AdaptiveThresholdFilter : public IFilterStrategy {
+public:
+  AdaptiveThresholdFilter(int blockSize, int C);
+  void apply(cv::UMat &image) override;
+  const char *name() const override;
+
+private:
+  int blockSize_;
+  int C_;
+};
+
+// New Filter Strategies:
+
+// Sobel Edge Filter: Computes image gradients using Sobel operators.
+class SobelEdgeFilter : public IFilterStrategy {
+public:
+  SobelEdgeFilter(int ksize = 3);
+  void apply(cv::UMat &image) override;
+  const char *name() const override;
+
+private:
+  int ksize_; // kernel size for Sobel operator, must be odd.
+};
+
+// Laplacian Filter: Uses the Laplacian operator to detect edges.
+class LaplacianFilter : public IFilterStrategy {
+public:
+  LaplacianFilter(int ksize = 3);
+  void apply(cv::UMat &image) override;
+  const char *name() const override;
+
+private:
+  int ksize_;
+};
+
+// Unsharp Mask Filter: Enhances edges by subtracting a blurred version.
+class UnsharpMaskFilter : public IFilterStrategy {
+public:
+  UnsharpMaskFilter(double strength, int blurKernelSize = 5);
+  void apply(cv::UMat &image) override;
+  const char *name() const override;
+
+private:
+  double strength_;
+  int blurKernelSize_;
+};
+
+// Utility functions for converting between QImage and cv::Mat / cv::UMat.
+namespace ImageUtils {
+cv::Mat qtImageToMat(const QImage &img);
+QImage matToQtImage(const cv::Mat &mat);
+
+cv::UMat qtImageToUMat(const QImage &img);
+QImage umatToQtImage(const cv::UMat &umat);
+} // namespace ImageUtils
+
+#endif // FILTER_HPP

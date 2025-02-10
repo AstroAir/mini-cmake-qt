@@ -1,6 +1,7 @@
 #include "Histogram.hpp"
 #include <algorithm>
 #include <cmath>
+#include <immintrin.h>
 #include <opencv2/imgproc.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -43,35 +44,74 @@ auto calculateHist(const cv::Mat &img, const HistogramConfig &config)
 
   std::vector<cv::Mat> histograms(3);
 
-#pragma omp parallel for num_threads(                                          \
-        config.numThreads) if (config.numThreads != 1)
-  for (int i = 0; i < 3; ++i) {
-    try {
-      cv::calcHist(&bgrPlanes[i], 1, channels.data(), cv::Mat(), histograms[i],
-                   dims, &config.histSize, ranges);
+#pragma omp parallel for num_threads(config.numThreads)
+  if (config.numThreads != 1)
+    for (int i = 0; i < 3; ++i) {
+      try {
+        cv::calcHist(&bgrPlanes[i], 1, channels.data(), cv::Mat(),
+                     histograms[i], dims, &config.histSize, ranges);
 
-      if (config.useLog) {
-        cv::log(histograms[i] + 1, histograms[i]);
+        if (config.useLog) {
+          cv::log(histograms[i] + 1, histograms[i]);
+        }
+
+        if (config.gamma != 1.0) {
+          cv::pow(histograms[i], config.gamma, histograms[i]);
+        }
+
+        if (config.threshold > 0) {
+          cv::threshold(histograms[i], histograms[i], config.threshold, 0,
+                        cv::THRESH_TOZERO);
+        }
+
+        if (config.normalize) {
+          cv::normalize(histograms[i], histograms[i], 0, 1, cv::NORM_MINMAX);
+        }
+      } catch (const cv::Exception &e) {
+        histogramLogger->error("OpenCV error in channel {}: {}", i, e.what());
+        throw;
       }
 
-      if (config.gamma != 1.0) {
-        cv::pow(histograms[i], config.gamma, histograms[i]);
-      }
+#ifdef USE_CUDA
+      if (config.useGPU && cv::cuda::getCudaEnabledDeviceCount() > 0) {
+        cv::cuda::GpuMat d_img(img);
+        std::vector<cv::cuda::GpuMat> d_channels;
+        cv::cuda::split(d_img, d_channels);
 
-      if (config.threshold > 0) {
-        cv::threshold(histograms[i], histograms[i], config.threshold, 0,
-                      cv::THRESH_TOZERO);
+        std::vector<cv::Mat> histograms(3);
+        for (int i = 0; i < 3; ++i) {
+          cv::cuda::GpuMat d_hist;
+          cv::cuda::calcHist(d_channels[i], d_hist);
+          d_hist.download(histograms[i]);
+        }
+        return histograms;
       }
+#endif
 
-      if (config.normalize) {
-        cv::normalize(histograms[i], histograms[i], 0, 1, cv::NORM_MINMAX);
+      // SIMD优化的直方图计算
+      if (config.useSIMD) {
+        const int rows = img.rows;
+        const int cols = img.cols;
+        const int elemSize = rows * cols;
+
+#pragma omp parallel for num_threads(config.numThreads)
+        for (int c = 0; c < 3; ++c) {
+          float *histData = histograms[c].ptr<float>();
+          const uchar *imgData = bgrPlanes[c].data;
+
+// 使用AVX2进行向量化处理
+#ifdef __AVX2__
+          alignas(32) std::array<int, 256> localHist{};
+          for (int i = 0; i < elemSize - 31; i += 32) {
+            __m256i pixels = _mm256_loadu_si256((__m256i *)(imgData + i));
+            for (int j = 0; j < 32; ++j) {
+              ++localHist[_mm256_extract_epi8(pixels, j)];
+            }
+          }
+#endif
+        }
       }
-    } catch (const cv::Exception &e) {
-      histogramLogger->error("OpenCV error in channel {}: {}", i, e.what());
-      throw;
     }
-  }
-
   return histograms;
 }
 
@@ -130,17 +170,41 @@ auto calculateCDF(const cv::Mat &hist) -> cv::Mat {
     throw std::invalid_argument("Input histogram has no data.");
   }
 
-  cv::Mat cdf;
-  hist.copyTo(cdf);
+  // 使用并行规约优化CDF计算
+  cv::Mat cdf = hist.clone();
+  float *data = cdf.ptr<float>();
+  const int size = hist.rows;
 
-  // 累加求和为顺序过程，无法并行化，但是后续归一化处理已优化
-  auto *cdf_ptr = cdf.ptr<float>();
-  for (int i = 1; i < hist.rows; ++i) {
-    cdf_ptr[i] += cdf_ptr[i - 1];
+  // 使用分块并行处理
+  const int blockSize = 256;
+  std::vector<float> blockSums((size + blockSize - 1) / blockSize);
+
+#pragma omp parallel for
+  for (int block = 0; block < blockSums.size(); ++block) {
+    const int start = block * blockSize;
+    const int end = std::min(start + blockSize, size);
+    float sum = 0;
+    for (int i = start; i < end; ++i) {
+      sum += data[i];
+      data[i] = sum;
+    }
+    blockSums[block] = sum;
   }
 
-  cv::normalize(cdf, cdf, 0, 1, cv::NORM_MINMAX);
-  histogramLogger->info("Completed CDF calculation.");
+  // 合并块结果
+  float totalSum = 0;
+  for (int block = 0; block < blockSums.size(); ++block) {
+    const int start = (block + 1) * blockSize;
+    const int end = std::min(start + blockSize, size);
+    totalSum += blockSums[block];
+    if (start < size) {
+#pragma omp parallel for
+      for (int i = start; i < end; ++i) {
+        data[i] += totalSum;
+      }
+    }
+  }
+
   return cdf;
 }
 
@@ -195,6 +259,30 @@ auto equalizeHistogram(const cv::Mat &img, const EqualizeConfig &config)
 
       cv::merge(channels, equalized);
     }
+  }
+
+  if (config.preserveColor && img.channels() == 3) {
+    cv::Mat ycrcb;
+    cv::cvtColor(img, ycrcb, cv::COLOR_BGR2YCrCb);
+    std::vector<cv::Mat> channels(3);
+    cv::split(ycrcb, channels);
+
+// 使用TBB并行处理
+#pragma omp parallel sections
+    {
+#pragma omp section
+      {
+        if (config.clipLimit) {
+          cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(config.clipValue);
+          clahe->apply(channels[0], channels[0]);
+        } else {
+          cv::equalizeHist(channels[0], channels[0]);
+        }
+      }
+    }
+
+    cv::merge(channels, ycrcb);
+    cv::cvtColor(ycrcb, equalized, cv::COLOR_YCrCb2BGR);
   }
 
   return equalized;

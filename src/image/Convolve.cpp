@@ -80,58 +80,114 @@ cv::Mat Convolve::convolve(const cv::Mat &input, const ConvolutionConfig &cfg) {
 cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
                                         const ConvolutionConfig &cfg) {
   ScopedTimer timer("Optimized Convolution");
-  convolveLogger->info("Starting single channel convolution");
 
-  const int tile_size = cfg.tile_size;
-  convolveLogger->debug("Using tile size: {}", tile_size);
   cv::Mat kernel = prepareKernel(cfg);
   cv::Mat output =
       cfg.use_memory_pool
           ? MemoryPool::allocate(input.rows, input.cols, input.type())
           : cv::Mat(input.rows, input.cols, input.type());
 
-  // 预热缓存
-  if (cfg.use_memory_pool) {
-    cv::Mat warmup = input(
-        cv::Rect(0, 0, std::min(64, input.cols), std::min(64, input.rows)));
-    cv::filter2D(warmup, warmup, -1, kernel);
-    convolveLogger->debug("Memory pool warmup completed");
+  // 根据图像和核的大小选择最优算法
+  if (cfg.use_fft && kernel.rows > 15) {
+    // 大核使用FFT
+    fftConvolve(input, output, kernel);
+  } else if (cfg.use_avx) {
+    // 使用AVX优化的直接卷积
+    optimizedConvolveAVX(input, output, kernel, cfg);
+  } else {
+    // 分块处理
+    blockProcessing(
+        input, output,
+        [&](const cv::Mat &inBlock, cv::Mat &outBlock) {
+          cv::filter2D(inBlock, outBlock, -1, kernel);
+        },
+        cfg.block_size);
   }
 
-  // 使用线程池进行分块处理
-  static DynamicThreadPool threadPool;
-  std::vector<std::future<void>> futures;
+  return output;
+}
 
-  for (int y = 0; y < input.rows; y += tile_size) {
-    for (int x = 0; x < input.cols; x += tile_size) {
-      futures.push_back(threadPool.enqueue([&, x, y]() {
-        cv::Rect roi(x, y, std::min(tile_size, input.cols - x),
-                     std::min(tile_size, input.rows - y));
-        cv::Mat inputTile = input(roi);
-        cv::Mat outputTile = output(roi);
+void Convolve::optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output,
+                                    const cv::Mat &kernel,
+                                    const ConvolutionConfig &cfg) {
+  const int kCacheLineSize = 64;
+  const int kRows = input.rows;
+  const int kCols = input.cols;
+  const int kKernelSize = kernel.rows;
+  const int kRadius = kKernelSize / 2;
 
-        if (cfg.use_simd) {
-          SIMDHelper::processImageTile(inputTile, outputTile, kernel, roi);
-          convolveLogger->debug("Processed tile with SIMD: ROI x={}, y={}, "
-                                "width={}, height={}",
-                                roi.x, roi.y, roi.width, roi.height);
-        } else {
-          cv::filter2D(inputTile, outputTile, -1, kernel);
-          convolveLogger->debug("Processed tile with filter2D: ROI x={}, y={}, "
-                                "width={}, height={}",
-                                roi.x, roi.y, roi.width, roi.height);
+#pragma omp parallel for num_threads(cfg.thread_count) schedule(dynamic)
+  for (int i = kRadius; i < kRows - kRadius; i += 1) {
+    for (int j = kRadius; j < kCols - kRadius; j += 8) {
+      __m256 sum = _mm256_setzero_ps();
+
+      // 使用AVX指令集优化的卷积核心计算
+      for (int ki = -kRadius; ki <= kRadius; ki++) {
+        for (int kj = -kRadius; kj <= kRadius; kj++) {
+          __m256 k = _mm256_broadcast_ss(
+              &kernel.at<float>(ki + kRadius, kj + kRadius));
+          __m256 in = _mm256_loadu_ps(&input.at<float>(i + ki, j + kj));
+          sum = _mm256_add_ps(sum, _mm256_mul_ps(k, in));
         }
-      }));
+      }
+
+      _mm256_storeu_ps(&output.at<float>(i, j), sum);
     }
   }
+}
 
-  // 等待所有任务完成
-  for (auto &future : futures) {
-    future.wait();
+void Convolve::fftConvolve(const cv::Mat &input, cv::Mat &output,
+                           const cv::Mat &kernel) {
+  cv::Mat inputPadded, kernelPadded;
+
+  // 优化的FFT填充
+  int m = cv::getOptimalDFTSize(input.rows + kernel.rows - 1);
+  int n = cv::getOptimalDFTSize(input.cols + kernel.cols - 1);
+
+  cv::copyMakeBorder(input, inputPadded, 0, m - input.rows, 0, n - input.cols,
+                     cv::BORDER_CONSTANT, 0);
+  cv::copyMakeBorder(kernel, kernelPadded, 0, m - kernel.rows, 0,
+                     n - kernel.cols, cv::BORDER_CONSTANT, 0);
+
+  // 并行FFT变换
+  cv::Mat inputDFT, kernelDFT;
+  cv::dft(inputPadded, inputDFT, cv::DFT_COMPLEX_OUTPUT);
+  cv::dft(kernelPadded, kernelDFT, cv::DFT_COMPLEX_OUTPUT);
+
+  // 频域乘法
+  cv::Mat productDFT;
+  cv::mulSpectrums(inputDFT, kernelDFT, productDFT, 0);
+
+  // 反变换
+  cv::dft(productDFT, output,
+          cv::DFT_INVERSE | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+
+  // 裁剪到原始大小
+  output = output(cv::Rect(0, 0, input.cols, input.rows));
+}
+
+void Convolve::blockProcessing(
+    const cv::Mat &input, cv::Mat &output,
+    const std::function<void(const cv::Mat &, cv::Mat &)> &processor,
+    int blockSize) {
+  const int overlap = blockSize / 4; // 重叠区域大小
+
+#pragma omp parallel for collapse(2)
+  for (int y = 0; y < input.rows; y += blockSize - overlap) {
+    for (int x = 0; x < input.cols; x += blockSize - overlap) {
+      // 计算当前块的大小
+      int currentBlockWidth = std::min(blockSize, input.cols - x);
+      int currentBlockHeight = std::min(blockSize, input.rows - y);
+
+      // 提取和处理块
+      cv::Mat inBlock =
+          input(cv::Rect(x, y, currentBlockWidth, currentBlockHeight));
+      cv::Mat outBlock =
+          output(cv::Rect(x, y, currentBlockWidth, currentBlockHeight));
+
+      processor(inBlock, outBlock);
+    }
   }
-
-  convolveLogger->info("Single channel convolution completed");
-  return output;
 }
 
 // 反卷积实现

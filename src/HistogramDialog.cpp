@@ -1,6 +1,7 @@
 #include "HistogramDialog.hpp"
 #include "image/Histogram.hpp"
 #include <QMessageBox>
+#include <qboxlayout.h>
 
 HistogramDialog::HistogramDialog(QWidget *parent)
     : QDialog(parent), chart(new QChart), chartView(new QChartView(chart)) {
@@ -20,7 +21,7 @@ void HistogramDialog::showHistogram(const cv::Mat &image,
   }
 
   enableControls(false);
-  processWithProgress([=]() {
+  processWithProgress([this, image, cfg]() {
     try {
       currentImage = image.clone();
       config = cfg;
@@ -187,21 +188,22 @@ void HistogramDialog::changeBinCount(int bins) {
 }
 
 void HistogramDialog::setupUI() {
-    setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint | Qt::WindowMinimizeButtonHint);
-    
-    // 创建主布局
-    auto mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(10, 10, 10, 10);
-    mainLayout->setSpacing(10);
+  setWindowFlags(windowFlags() | Qt::WindowMaximizeButtonHint |
+                 Qt::WindowMinimizeButtonHint);
 
-    // 创建工具栏
-    auto toolBar = new QWidget(this);
-    auto toolBarLayout = new QHBoxLayout(toolBar);
-    toolBarLayout->setContentsMargins(0, 0, 0, 0);
-    toolBarLayout->setSpacing(8);
+  // 创建主布局
+  auto mainLayout = new QVBoxLayout(this);
+  mainLayout->setContentsMargins(10, 10, 10, 10);
+  mainLayout->setSpacing(10);
 
-    // 优化工具栏控件样式
-    const QString buttonStyle = R"(
+  // 创建工具栏
+  auto toolBar = new QWidget(this);
+  auto toolBarLayout = new QHBoxLayout(toolBar);
+  toolBarLayout->setContentsMargins(0, 0, 0, 0);
+  toolBarLayout->setSpacing(8);
+
+  // 优化工具栏控件样式
+  const QString buttonStyle = R"(
         QPushButton {
             background-color: #f0f0f0;
             border: none;
@@ -218,14 +220,14 @@ void HistogramDialog::setupUI() {
         }
     )";
 
-    logScaleCheckBox = new QCheckBox("对数刻度", this);
-    logScaleCheckBox->setStyleSheet("QCheckBox { padding: 4px; }");
+  logScaleCheckBox = new QCheckBox("对数刻度", this);
+  logScaleCheckBox->setStyleSheet("QCheckBox { padding: 4px; }");
 
-    binCountSpinner = new QSpinBox(this);
-    binCountSpinner->setRange(8, 512);
-    binCountSpinner->setValue(256);
-    binCountSpinner->setSingleStep(8);
-    binCountSpinner->setStyleSheet(R"(
+  binCountSpinner = new QSpinBox(this);
+  binCountSpinner->setRange(8, 512);
+  binCountSpinner->setValue(256);
+  binCountSpinner->setSingleStep(8);
+  binCountSpinner->setStyleSheet(R"(
         QSpinBox {
             padding: 4px;
             border: 1px solid #cccccc;
@@ -233,21 +235,21 @@ void HistogramDialog::setupUI() {
         }
     )");
 
-    exportButton = new QPushButton("导出数据", this);
-    saveImageButton = new QPushButton("保存图像", this);
-    exportButton->setStyleSheet(buttonStyle);
-    saveImageButton->setStyleSheet(buttonStyle);
+  exportButton = new QPushButton("导出数据", this);
+  saveImageButton = new QPushButton("保存图像", this);
+  exportButton->setStyleSheet(buttonStyle);
+  saveImageButton->setStyleSheet(buttonStyle);
 
-    toolBarLayout->addWidget(new QLabel("直方图区间:", this));
-    toolBarLayout->addWidget(binCountSpinner);
-    toolBarLayout->addWidget(logScaleCheckBox);
-    toolBarLayout->addStretch();
-    toolBarLayout->addWidget(exportButton);
-    toolBarLayout->addWidget(saveImageButton);
+  toolBarLayout->addWidget(new QLabel("直方图区间:", this));
+  toolBarLayout->addWidget(binCountSpinner);
+  toolBarLayout->addWidget(logScaleCheckBox);
+  toolBarLayout->addStretch();
+  toolBarLayout->addWidget(exportButton);
+  toolBarLayout->addWidget(saveImageButton);
 
-    // 优化图表视图
-    chartView->setRenderHint(QPainter::Antialiasing);
-    chartView->setStyleSheet(R"(
+  // 优化图表视图
+  chartView->setRenderHint(QPainter::Antialiasing);
+  chartView->setStyleSheet(R"(
         QChartView {
             background-color: white;
             border: 1px solid #cccccc;
@@ -255,46 +257,183 @@ void HistogramDialog::setupUI() {
         }
     )");
 
-    // 组装布局
-    mainLayout->addWidget(toolBar);
-    mainLayout->addWidget(chartView, 1);  // 添加拉伸因子
+  // 组装布局
+  mainLayout->addWidget(toolBar);
+  mainLayout->addWidget(chartView, 1); // 添加拉伸因子
 
-    // 连接信号
-    connect(logScaleCheckBox, &QCheckBox::toggled, this,
-            &HistogramDialog::toggleLogScale);
-    connect(binCountSpinner, QOverload<int>::of(&QSpinBox::valueChanged), this,
-            &HistogramDialog::changeBinCount);
-    connect(exportButton, &QPushButton::clicked, this,
-            &HistogramDialog::exportHistogramData);
-    connect(saveImageButton, &QPushButton::clicked, this,
-            &HistogramDialog::saveHistogramAsImage);
+  // 连接信号
+  connect(logScaleCheckBox, &QCheckBox::toggled, this,
+          &HistogramDialog::toggleLogScale);
+  connect(binCountSpinner, QOverload<int>::of(&QSpinBox::valueChanged), this,
+          &HistogramDialog::changeBinCount);
+  connect(exportButton, &QPushButton::clicked, this,
+          &HistogramDialog::exportHistogramData);
+  connect(saveImageButton, &QPushButton::clicked, this,
+          &HistogramDialog::saveHistogramAsImage);
 
-    // 添加状态栏
-    auto statusBar = new QWidget(this);
-    auto statusLayout = new QHBoxLayout(statusBar);
-    
-    progressBar = new QProgressBar(this);
-    progressBar->setMaximum(100);
-    progressBar->setMinimum(0);
-    progressBar->hide();
-    
-    statusLabel = new QLabel(this);
-    statusLabel->setStyleSheet("color: #666666;");
-    
-    statusLayout->addWidget(statusLabel);
-    statusLayout->addWidget(progressBar);
-    
-    mainLayout->addWidget(statusBar);
-    
-    // 添加更新定时器
-    updateTimer = new QTimer(this);
-    updateTimer->setInterval(100);
-    connect(updateTimer, &QTimer::timeout, this, [this]() {
-        if (!processingFlag) {
-            updateTimer->stop();
-            resetProgress();
+  // 添加状态栏
+  auto statusBar = new QWidget(this);
+  auto statusLayout = new QHBoxLayout(statusBar);
+
+  progressBar = new QProgressBar(this);
+  progressBar->setMaximum(100);
+  progressBar->setMinimum(0);
+  progressBar->hide();
+
+  statusLabel = new QLabel(this);
+  statusLabel->setStyleSheet("color: #666666;");
+
+  statusLayout->addWidget(statusLabel);
+  statusLayout->addWidget(progressBar);
+
+  mainLayout->addWidget(statusBar);
+
+  // 添加更新定时器
+  updateTimer = new QTimer(this);
+  updateTimer->setInterval(100);
+  connect(updateTimer, &QTimer::timeout, this, [this]() {
+    if (!processingFlag) {
+      updateTimer->stop();
+      resetProgress();
+    }
+  });
+
+  // 添加高级功能UI
+  setupAdvancedUI(mainLayout);
+}
+
+void HistogramDialog::setupAdvancedUI(QVBoxLayout *parent) {
+  auto advancedGroup = new QGroupBox("高级功能", this);
+  auto advancedLayout = new QVBoxLayout(advancedGroup);
+
+  // 直方图均衡化预览
+  equalizationCheckBox = new QCheckBox("预览直方图均衡化效果", this);
+
+  // 导出格式选择
+  exportFormatCombo = new QComboBox(this);
+  exportFormatCombo->addItems(
+      {"CSV", "Excel (XLSX)", "JSON", "XML", "PDF报告"});
+
+  // 系列列表
+  seriesList = new QListWidget(this);
+  seriesList->setSelectionMode(QAbstractItemView::SingleSelection);
+
+  // 分析按钮
+  analyzeButton = new QPushButton("详细分析", this);
+  removeSeriesButton = new QPushButton("移除所选系列", this);
+
+  advancedLayout->addWidget(equalizationCheckBox);
+  advancedLayout->addWidget(new QLabel("导出格式:", this));
+  advancedLayout->addWidget(exportFormatCombo);
+  advancedLayout->addWidget(new QLabel("已加载的直方图:", this));
+  advancedLayout->addWidget(seriesList);
+  advancedLayout->addWidget(removeSeriesButton);
+  advancedLayout->addWidget(analyzeButton);
+
+  // 添加到主布局
+  parent->addWidget(advancedGroup);
+
+  // 连接信号
+  connect(equalizationCheckBox, &QCheckBox::toggled, this,
+          &HistogramDialog::toggleEqualizationPreview);
+  connect(exportButton, &QPushButton::clicked, this,
+          &HistogramDialog::exportToFormat);
+  connect(removeSeriesButton, &QPushButton::clicked, this,
+          &HistogramDialog::removeSelectedSeries);
+  connect(analyzeButton, &QPushButton::clicked, this,
+          &HistogramDialog::showHistogramAnalysis);
+}
+
+void HistogramDialog::showHistogramWithEqualization(const cv::Mat &image) {
+  cv::Mat equalized = performEqualization(image);
+  addHistogramSeries(image, "原始图像");
+  addHistogramSeries(equalized, "均衡化后");
+}
+
+void HistogramDialog::performHistogramMatching(const cv::Mat &source,
+                                               const cv::Mat &reference) {
+  processWithProgress([this, source, reference]() {
+    try {
+      cv::Mat matched;
+      std::vector<cv::Mat> sourceChannels, refChannels, matchedChannels;
+
+      if (source.channels() == reference.channels()) {
+        cv::split(source, sourceChannels);
+        cv::split(reference, refChannels);
+        matchedChannels.resize(source.channels());
+
+        for (int i = 0; i < source.channels(); ++i) {
+          ::matchHistograms(sourceChannels[i], refChannels[i]);
         }
-    });
+
+        cv::merge(matchedChannels, matched);
+
+        addHistogramSeries(source, "源图像");
+        addHistogramSeries(reference, "参考图像");
+        addHistogramSeries(matched, "匹配结果");
+
+      } else {
+        showError("源图像和参考图像的通道数不匹配");
+      }
+    } catch (const std::exception &e) {
+      showError(QString("直方图匹配失败: %1").arg(e.what()));
+    }
+  });
+}
+
+void HistogramDialog::addHistogramSeries(const cv::Mat &image,
+                                         const QString &name) {
+  std::vector<cv::Mat> hists = calculateHist(image, config);
+
+  // 添加到图表
+  const QColor colors[] = {Qt::blue, Qt::green, Qt::red};
+
+  for (size_t i = 0; i < hists.size(); ++i) {
+    QLineSeries *series = new QLineSeries;
+    series->setName(QString("%1 - %2").arg(name).arg(i == 0   ? "Blue"
+                                                     : i == 1 ? "Green"
+                                                              : "Red"));
+    series->setColor(colors[i]);
+
+    for (int j = 0; j < config.histSize; ++j) {
+      series->append(j, hists[i].at<float>(j));
+    }
+
+    chart->addSeries(series);
+  }
+
+  // 添加到列表
+  seriesList->addItem(name);
+  updateChart(hists);
+}
+
+void HistogramDialog::exportToFormat() {
+  QString format = exportFormatCombo->currentText();
+  QString filter;
+
+  if (format == "CSV") {
+    filter = "CSV文件 (*.csv)";
+  } else if (format == "Excel (XLSX)") {
+    filter = "Excel文件 (*.xlsx)";
+  } else if (format == "JSON") {
+    filter = "JSON文件 (*.json)";
+  } else if (format == "XML") {
+    filter = "XML文件 (*.xml)";
+  } else if (format == "PDF报告") {
+    filter = "PDF文件 (*.pdf)";
+  }
+
+  QString fileName =
+      QFileDialog::getSaveFileName(this, "导出直方图", QString(), filter);
+
+  if (!fileName.isEmpty()) {
+    exportHistogramAs(format);
+  }
+}
+
+void HistogramDialog::showHistogramAnalysis() {
+  QString report = generateHistogramReport();
+  showAnalysisDialog();
 }
 
 void HistogramDialog::calculateStatistics() {
@@ -436,50 +575,50 @@ void HistogramDialog::updateStatisticsDisplay(const HistogramStats &stats) {
   chart->setTitle(statsText);
 }
 
-void HistogramDialog::showError(const QString& message) {
-    statusLabel->setText(message);
-    statusLabel->setStyleSheet("color: #ff0000;");
-    QMessageBox::warning(this, "错误", message);
+void HistogramDialog::showError(const QString &message) {
+  statusLabel->setText(message);
+  statusLabel->setStyleSheet("color: #ff0000;");
+  QMessageBox::warning(this, "错误", message);
 }
 
 void HistogramDialog::showProgress(int value) {
-    progressBar->setValue(value);
-    progressBar->setVisible(value < 100);
+  progressBar->setValue(value);
+  progressBar->setVisible(value < 100);
 }
 
 void HistogramDialog::resetProgress() {
-    progressBar->hide();
-    progressBar->setValue(0);
-    statusLabel->setStyleSheet("color: #666666;");
-    statusLabel->setText("就绪");
-    enableControls(true);
+  progressBar->hide();
+  progressBar->setValue(0);
+  statusLabel->setStyleSheet("color: #666666;");
+  statusLabel->setText("就绪");
+  enableControls(true);
 }
 
 void HistogramDialog::enableControls(bool enable) {
-    logScaleCheckBox->setEnabled(enable);
-    binCountSpinner->setEnabled(enable);
-    exportButton->setEnabled(enable);
-    saveImageButton->setEnabled(enable);
+  logScaleCheckBox->setEnabled(enable);
+  binCountSpinner->setEnabled(enable);
+  exportButton->setEnabled(enable);
+  saveImageButton->setEnabled(enable);
 }
 
-void HistogramDialog::processWithProgress(const std::function<void()>& task) {
-    processingFlag = true;
-    progressBar->show();
-    updateTimer->start();
-    
-    QThread* worker = new QThread;
-    QObject* context = new QObject;
-    context->moveToThread(worker);
-    
-    connect(worker, &QThread::started, context, [task, this]() {
-        task();
-        processingFlag = false;
-    });
-    
-    connect(worker, &QThread::finished, worker, &QThread::deleteLater);
-    connect(worker, &QThread::finished, context, &QObject::deleteLater);
-    
-    worker->start();
+void HistogramDialog::processWithProgress(const std::function<void()> &task) {
+  processingFlag = true;
+  progressBar->show();
+  updateTimer->start();
+
+  QThread *worker = new QThread;
+  QObject *context = new QObject;
+  context->moveToThread(worker);
+
+  connect(worker, &QThread::started, context, [task, this]() {
+    task();
+    processingFlag = false;
+  });
+
+  connect(worker, &QThread::finished, worker, &QThread::deleteLater);
+  connect(worker, &QThread::finished, context, &QObject::deleteLater);
+
+  worker->start();
 }
 
 void showImageHistogram(QWidget *parent, const cv::Mat &image) {
