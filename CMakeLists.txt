@@ -76,8 +76,6 @@ qt_standard_project_setup()
 
 add_executable(${PROJECT_NAME} WIN32 MACOSX_BUNDLE
     ${SOURCE_FILES} ${META_FILES_TO_INCLUDE} ${RESOURCE_FILES}
-    src/image/ImageManager.cpp
-    src/image/ImageManager.h
 )
 
 target_link_directories(${PROJECT_NAME} PRIVATE ${OpenCV_LIB_DIR})
@@ -93,8 +91,8 @@ target_precompile_headers(${PROJECT_NAME} INTERFACE QtWidgets.h)
 
 target_link_libraries(${PROJECT_NAME} 
     Qt6::Widgets fmt::fmt Qt6::Network Qt6::Charts Qt6::Concurrent Qt6::Positioning
-    Qt6::WebView
     ${OpenCV_LIBS} ZLIB::ZLIB OpenSSL::SSL OpenSSL::Crypto TBB::tbb
+    ElaWidgetTools
     ${CFITSIO_LIBRARIES})
 
 if (WIN32)

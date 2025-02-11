@@ -8,7 +8,6 @@
 #include <string>
 #include <vector>
 
-
 // Common exception class used by filter implementations.
 class ImageFilterException : public std::exception {
 public:
@@ -61,7 +60,7 @@ private:
 // Existing Filter Strategies:
 class GaussianBlurFilter : public IFilterStrategy {
 public:
-  GaussianBlurFilter(int kernelSize, double sigma);
+  GaussianBlurFilter(int kernelSize = 3, double sigma = 1.0);
   void apply(cv::UMat &image) override;
   const char *name() const override;
 
@@ -94,7 +93,8 @@ private:
 
 class CannyEdgeFilter : public IFilterStrategy {
 public:
-  CannyEdgeFilter(double threshold1, double threshold2);
+  // 添加默认参数值
+  CannyEdgeFilter(double threshold1 = 100.0, double threshold2 = 200.0);
   void apply(cv::UMat &image) override;
   const char *name() const override;
 
@@ -105,7 +105,7 @@ private:
 
 class SharpenFilter : public IFilterStrategy {
 public:
-  explicit SharpenFilter(double strength);
+  explicit SharpenFilter(double strength = 1.0);
   void apply(cv::UMat &image) override;
   const char *name() const override;
 
@@ -115,7 +115,7 @@ private:
 
 class HSVAdjustFilter : public IFilterStrategy {
 public:
-  HSVAdjustFilter(double hue, double saturation, double value);
+  HSVAdjustFilter(double hue = 0.0, double saturation = 1.0, double value = 1.0);
   void apply(cv::UMat &image) override;
   const char *name() const override;
 
@@ -127,7 +127,7 @@ private:
 
 class ContrastBrightnessFilter : public IFilterStrategy {
 public:
-  ContrastBrightnessFilter(double contrast, double brightness);
+  ContrastBrightnessFilter(double contrast = 1.0, double brightness = 0.0);
   void apply(cv::UMat &image) override;
   const char *name() const override;
 

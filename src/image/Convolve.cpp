@@ -110,6 +110,8 @@ cv::Mat Convolve::convolveSingleChannel(const cv::Mat &input,
 void Convolve::optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output,
                                     const cv::Mat &kernel,
                                     const ConvolutionConfig &cfg) {
+// 首先检查CPU是否支持AVX指令集
+#if defined(__AVX__)
   const int kCacheLineSize = 64;
   const int kRows = input.rows;
   const int kCols = input.cols;
@@ -134,6 +136,10 @@ void Convolve::optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output,
       _mm256_storeu_ps(&output.at<float>(i, j), sum);
     }
   }
+#else
+  // 如果不支持AVX,则回退到普通实现
+  cv::filter2D(input, output, -1, kernel);
+#endif
 }
 
 void Convolve::fftConvolve(const cv::Mat &input, cv::Mat &output,

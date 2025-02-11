@@ -1,7 +1,5 @@
-#include <immintrin.h> // for AVX2
-#include <iostream>
+#include <immintrin.h>
 #include <opencv2/opencv.hpp>
-
 
 // 针对 CV_16U 类型数据的解拜尔实现（使用 OpenCV 内置函数）
 // 参数 bayerCode 可设为 cv::COLOR_BayerBG2BGR、cv::COLOR_BayerRG2BGR
@@ -232,7 +230,83 @@ cv::Mat debayer_edge_aware(const cv::Mat &raw, BayerPattern pattern) {
             }
           }
           break;
-          // ... 其他 Bayer 模式类似
+        case BayerPattern::BGGR:
+          if ((y & 1) == 0) {    // B行
+            if ((x & 1) == 0) {  // B位置
+              out[x][0] = in[x]; // B
+              out[x][2] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;                                  // R
+            } else {                                      // G位置
+              out[x][0] = (in[x - 1] + in[x + 1]) * 0.5f; // B
+              out[x][2] = (in_m1[x] + in_p1[x]) * 0.5f;   // R
+            }
+          } else {                                        // G行
+            if ((x & 1) == 0) {                           // G位置
+              out[x][0] = (in_m1[x] + in_p1[x]) * 0.5f;   // B
+              out[x][2] = (in[x - 1] + in[x + 1]) * 0.5f; // R
+            } else {                                      // R位置
+              out[x][0] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;         // B
+              out[x][2] = in[x]; // R
+            }
+          }
+          break;
+        case BayerPattern::GRBG:
+          if ((y & 1) == 0) {                             // G行
+            if ((x & 1) == 0) {                           // G位置
+              out[x][1] = in[x];                          // G
+              out[x][0] = (in[x - 1] + in[x + 1]) * 0.5f; // B
+              out[x][2] = (in_m1[x] + in_p1[x]) * 0.5f;   // R
+            } else {                                      // R位置
+              out[x][2] = in[x];                          // R
+              out[x][0] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;                                  // B
+              out[x][1] = (in[x - 1] + in[x + 1]) * 0.5f; // G
+            }
+          } else {               // B行
+            if ((x & 1) == 0) {  // B位置
+              out[x][0] = in[x]; // B
+              out[x][2] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;                                  // R
+              out[x][1] = (in[x - 1] + in[x + 1]) * 0.5f; // G
+            } else {                                      // G位置
+              out[x][1] = in[x];                          // G
+              out[x][0] = (in[x - 1] + in[x + 1]) * 0.5f; // B
+              out[x][2] = (in_m1[x] + in_p1[x]) * 0.5f;   // R
+            }
+          }
+          break;
+        case BayerPattern::GBRG:
+          if ((y & 1) == 0) {                             // G行
+            if ((x & 1) == 0) {                           // G位置
+              out[x][1] = in[x];                          // G
+              out[x][2] = (in[x - 1] + in[x + 1]) * 0.5f; // R
+              out[x][0] = (in_m1[x] + in_p1[x]) * 0.5f;   // B
+            } else {                                      // B位置
+              out[x][0] = in[x];                          // B
+              out[x][2] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;                                  // R
+              out[x][1] = (in[x - 1] + in[x + 1]) * 0.5f; // G
+            }
+          } else {               // R行
+            if ((x & 1) == 0) {  // R位置
+              out[x][2] = in[x]; // R
+              out[x][0] =
+                  (in_m1[x - 1] + in_m1[x + 1] + in_p1[x - 1] + in_p1[x + 1]) *
+                  0.25f;                                  // B
+              out[x][1] = (in[x - 1] + in[x + 1]) * 0.5f; // G
+            } else {                                      // G位置
+              out[x][1] = in[x];                          // G
+              out[x][2] = (in[x - 1] + in[x + 1]) * 0.5f; // R
+              out[x][0] = (in_m1[x] + in_p1[x]) * 0.5f;   // B
+            }
+          }
+          break;
         }
       }
     }
@@ -283,63 +357,3 @@ cv::Mat debayer_avx2(const cv::Mat &raw, BayerPattern pattern) {
   return color;
 }
 #endif
-
-int main(int argc, char **argv) {
-  if (argc < 3) {
-    std::cout << "用法：debayer <image_path> <bayer_pattern>" << std::endl;
-    std::cout << "bayer_pattern: rggb, bggr, grbg, gbrg" << std::endl;
-    return -1;
-  }
-
-  // 以未改变数据格式读取图像（确保加载原始 Bayer 数据）
-  cv::Mat raw = cv::imread(argv[1], cv::IMREAD_UNCHANGED);
-  if (raw.empty()) {
-    std::cerr << "读取图像失败：" << argv[1] << std::endl;
-    return -1;
-  }
-
-  // 解析 Bayer 模式
-  std::string pattern_str = argv[2];
-  BayerPattern pattern;
-  if (pattern_str == "rggb")
-    pattern = BayerPattern::RGGB;
-  else if (pattern_str == "bggr")
-    pattern = BayerPattern::BGGR;
-  else if (pattern_str == "grbg")
-    pattern = BayerPattern::GRBG;
-  else if (pattern_str == "gbrg")
-    pattern = BayerPattern::GBRG;
-  else {
-    std::cerr << "不支持的 Bayer 模式" << std::endl;
-    return -1;
-  }
-
-  cv::Mat debayered;
-  // 判断数据类型并调用相应的解拜尔函数
-  if (raw.type() == CV_16U) {
-    // 假定 Bayer 格式为 BGGR，根据实际情况可以选择 cv::COLOR_BayerRG2BGR 等
-    debayered = debayer_ushort(raw, cv::COLOR_BayerBG2BGR);
-  } else if (raw.type() == CV_32F) {
-#ifdef __AVX2__
-    // 使用 AVX2 优化版本
-    debayered = debayer_avx2(raw, pattern);
-#else
-    // 使用边缘感知版本
-    debayered = debayer_edge_aware(raw, pattern);
-#endif
-  } else {
-    std::cerr << "不支持的数据类型，仅支持 CV_16U 和 CV_32F" << std::endl;
-    return -1;
-  }
-
-  // 显示结果
-  cv::namedWindow("Debayered Image", cv::WINDOW_AUTOSIZE);
-  cv::imshow("Debayered Image", debayered);
-  std::cout << "按任意键退出..." << std::endl;
-  cv::waitKey(0);
-
-  // 保存处理后图像
-  cv::imwrite("debayered_output.png", debayered);
-
-  return 0;
-}
