@@ -15,11 +15,11 @@ struct CalibrationParams {
 };
 
 struct OptimizationParams {
-    bool use_gpu{false};         // 是否使用GPU加速
-    bool use_parallel{false};    // 是否使用并行处理
-    int num_threads{4};          // 并行处理线程数
-    bool use_cache{false};       // 是否使用缓存
-    size_t cache_size{1024};     // 缓存大小（MB）
+  bool use_gpu{false};      // 是否使用GPU加速
+  bool use_parallel{false}; // 是否使用并行处理
+  int num_threads{4};       // 并行处理线程数
+  bool use_cache{false};    // 是否使用缓存
+  size_t cache_size{1024};  // 缓存大小（MB）
 };
 
 cv::Mat instrument_response_correction(cv::InputArray &image,
@@ -42,9 +42,10 @@ flux_calibration_ex(const cv::Mat &image, const CalibrationParams &params,
                     const cv::Mat *dark_frame = nullptr,
                     bool enable_optimization = false);
 
-cv::Mat instrument_response_correction_optimized(cv::InputArray &image,
-                                              cv::InputArray &response_function,
-                                              const OptimizationParams &params);
+cv::Mat
+instrument_response_correction_optimized(cv::InputArray &image,
+                                         cv::InputArray &response_function,
+                                         const OptimizationParams &params);
 
 cv::Mat background_noise_correction_optimized(cv::InputArray &image,
-                                           const OptimizationParams &params);
+                                              const OptimizationParams &params);

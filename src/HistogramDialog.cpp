@@ -634,3 +634,159 @@ void showImageHistogram(QWidget *parent, const cv::Mat &image) {
                           QString("Histogram Error: ") + e.what());
   }
 }
+
+void HistogramDialog::clearHistograms() {
+  chart->removeAllSeries();
+  seriesList->clear();
+  statusLabel->setText("已清除所有直方图");
+}
+
+void HistogramDialog::updateEqualizationPreview() {
+  if (!currentImage.empty() && equalizationCheckBox->isChecked()) {
+    cv::Mat equalized = performEqualization(currentImage);
+    addHistogramSeries(equalized, "均衡化预览");
+  }
+}
+
+cv::Mat HistogramDialog::performEqualization(const cv::Mat &input) {
+  cv::Mat result;
+  if (input.channels() == 1) {
+    cv::equalizeHist(input, result);
+  } else {
+    cv::Mat ycrcb;
+    cv::cvtColor(input, ycrcb, cv::COLOR_BGR2YCrCb);
+    std::vector<cv::Mat> channels;
+    cv::split(ycrcb, channels);
+    cv::equalizeHist(channels[0], channels[0]);
+    cv::merge(channels, ycrcb);
+    cv::cvtColor(ycrcb, result, cv::COLOR_YCrCb2BGR);
+  }
+  return result;
+}
+
+void HistogramDialog::exportHistogramAs(const QString &format) {
+  QString data;
+  QTextStream stream(&data);
+
+  if (format == "CSV") {
+    stream << "Value";
+    for (QAbstractSeries *series : chart->series()) {
+      stream << "," << series->name();
+    }
+    stream << "\n";
+
+    for (int i = 0; i < config.histSize; ++i) {
+      stream << i;
+      for (QAbstractSeries *series : chart->series()) {
+        if (QLineSeries *lineSeries = qobject_cast<QLineSeries *>(series)) {
+          stream << "," << lineSeries->at(i).y();
+        }
+      }
+      stream << "\n";
+    }
+  } else if (format == "JSON") {
+    stream << "{\n  \"histograms\": [\n";
+    for (QAbstractSeries *series : chart->series()) {
+      if (QLineSeries *lineSeries = qobject_cast<QLineSeries *>(series)) {
+        stream << "    {\n      \"name\": \"" << series->name() << "\",\n";
+        stream << "      \"data\": [";
+        for (int i = 0; i < config.histSize; ++i) {
+          stream << lineSeries->at(i).y();
+          if (i < config.histSize - 1)
+            stream << ", ";
+        }
+        stream << "]\n    },\n";
+      }
+    }
+    stream << "  ]\n}\n";
+  }
+
+  // 保存到文件
+  QString fileName = QFileDialog::getSaveFileName(
+      this, "保存数据", QString(),
+      format == "CSV" ? "CSV (*.csv)" : "JSON (*.json)");
+  if (!fileName.isEmpty()) {
+    QFile file(fileName);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+      file.write(data.toUtf8());
+      statusLabel->setText("数据导出成功");
+    } else {
+      showError("无法保存文件");
+    }
+  }
+}
+
+QString HistogramDialog::generateHistogramReport() {
+  QString report;
+  QTextStream stream(&report);
+
+  stream << "直方图分析报告\n";
+  stream << "==============\n\n";
+
+  // 基本信息
+  stream << "图像信息:\n";
+  stream << QString("- 图像类型: %1\n")
+                .arg(currentImage.channels() == 1 ? "灰度图" : "彩色图");
+  stream << QString("- 直方图区间数: %1\n").arg(config.histSize);
+  stream
+      << QString("- 是否使用对数刻度: %1\n\n").arg(config.useLog ? "是" : "否");
+
+  // 统计信息
+  std::vector<double> moments = calculateMoments();
+  stream << "统计分析:\n";
+  stream << QString("- 均值: %.2f\n").arg(moments[0]);
+  stream << QString("- 标准差: %.2f\n").arg(sqrt(moments[1]));
+  stream << QString("- 峰度: %.2f\n").arg(calculateKurtosis());
+  stream << QString("- 偏度: %.2f\n").arg(calculateSkewness());
+
+  return report;
+}
+
+void HistogramDialog::showAnalysisDialog() {
+  QDialog dialog(this);
+  dialog.setWindowTitle("直方图分析");
+  dialog.setMinimumSize(400, 300);
+
+  QVBoxLayout *layout = new QVBoxLayout(&dialog);
+  QTextEdit *textEdit = new QTextEdit(&dialog);
+  textEdit->setReadOnly(true);
+  textEdit->setPlainText(generateHistogramReport());
+
+  layout->addWidget(textEdit);
+
+  QPushButton *closeButton = new QPushButton("关闭", &dialog);
+  connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+  layout->addWidget(closeButton);
+
+  dialog.exec();
+}
+
+void HistogramDialog::toggleEqualizationPreview() {
+  if (equalizationCheckBox->isChecked()) {
+    if (!currentImage.empty()) {
+      updateEqualizationPreview();
+    }
+  } else {
+    // 移除预览序列
+    for (QAbstractSeries *series : chart->series()) {
+      if (series->name().contains("均衡化预览")) {
+        chart->removeSeries(series);
+        break;
+      }
+    }
+  }
+}
+
+void HistogramDialog::removeSelectedSeries() {
+  QListWidgetItem *item = seriesList->currentItem();
+  if (!item)
+    return;
+
+  QString serieName = item->text();
+  for (QAbstractSeries *series : chart->series()) {
+    if (series->name().contains(serieName)) {
+      chart->removeSeries(series);
+    }
+  }
+  delete item;
+}

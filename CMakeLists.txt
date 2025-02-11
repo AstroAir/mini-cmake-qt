@@ -16,6 +16,8 @@ project(example VERSION 1.0)
 # Set PROJECT_VERSION_PATCH and PROJECT_VERSION_TWEAK to 0 if not present, needed by add_project_meta
 fix_project_version()
 
+add_subdirectory(libs)
+
 # Set additional project information
 set(COMPANY "Example")
 set(COPYRIGHT "Copyright (c) 2014 Vincent Lee. All rights reserved.")
@@ -32,6 +34,7 @@ set(SOURCE_FILES
     src/MetaDataDialog.cpp
     src/UpdateCheck.cpp
 
+    src/image/Calibration.cpp
     src/image/Convolve.cpp
     src/image/Crop.cpp
     src/image/Denoise.cpp

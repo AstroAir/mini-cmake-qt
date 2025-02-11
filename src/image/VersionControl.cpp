@@ -448,3 +448,78 @@ ImageVersionControl::get_metadata(std::string_view commit_hash) const {
 
   return metadata;
 }
+
+void ImageVersionControl::save_branch_info(const Branch &branch) const {
+  const auto branch_path = branches_dir_ / (branch.name + ".branch");
+  std::ofstream file(branch_path);
+
+  file << "name: " << branch.name << '\n'
+       << "head: " << branch.head_commit << '\n'
+       << "created: " << std::chrono::system_clock::to_time_t(branch.created_at)
+       << '\n';
+}
+
+ImageVersionControl::Branch
+ImageVersionControl::load_branch_info(std::string_view branch_name) const {
+  const auto branch_path =
+      branches_dir_ / (std::string(branch_name) + ".branch");
+  if (!fs::exists(branch_path)) {
+    throw std::runtime_error("Branch not found");
+  }
+
+  Branch branch;
+  std::ifstream file(branch_path);
+  std::string line;
+
+  while (std::getline(file, line)) {
+    if (line.starts_with("name: ")) {
+      branch.name = line.substr(6);
+    } else if (line.starts_with("head: ")) {
+      branch.head_commit = line.substr(6);
+    } else if (line.starts_with("created: ")) {
+      std::time_t time = std::stoll(line.substr(9));
+      branch.created_at = std::chrono::system_clock::from_time_t(time);
+    }
+  }
+
+  return branch;
+}
+
+void ImageVersionControl::save_tag_info(const Tag &tag) const {
+  const auto tag_path = tags_dir_ / (tag.name + ".tag");
+  std::ofstream file(tag_path);
+
+  file << "name: " << tag.name << '\n'
+       << "commit: " << tag.commit_hash << '\n'
+       << "message: " << tag.message << '\n'
+       << "created: " << std::chrono::system_clock::to_time_t(tag.created_at)
+       << '\n';
+}
+
+cv::Mat ImageVersionControl::find_conflict_regions(const cv::Mat &base,
+                                                   const cv::Mat &img1,
+                                                   const cv::Mat &img2) const {
+  cv::Mat diff1, diff2;
+  cv::absdiff(base, img1, diff1);
+  cv::absdiff(base, img2, diff2);
+
+  // 转换为灰度图
+  cv::Mat gray1, gray2;
+  cv::cvtColor(diff1, gray1, cv::COLOR_BGR2GRAY);
+  cv::cvtColor(diff2, gray2, cv::COLOR_BGR2GRAY);
+
+  // 二值化
+  cv::Mat binary1, binary2;
+  cv::threshold(gray1, binary1, 30, 255, cv::THRESH_BINARY);
+  cv::threshold(gray2, binary2, 30, 255, cv::THRESH_BINARY);
+
+  // 寻找重叠的冲突区域
+  cv::Mat conflicts;
+  cv::bitwise_and(binary1, binary2, conflicts);
+
+  // 创建彩色冲突标记
+  cv::Mat colored_conflicts = cv::Mat::zeros(base.size(), base.type());
+  colored_conflicts.setTo(cv::Scalar(0, 0, 255), conflicts); // 红色标记冲突
+
+  return colored_conflicts;
+}

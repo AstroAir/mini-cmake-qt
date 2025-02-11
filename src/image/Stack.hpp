@@ -33,20 +33,20 @@ struct StackPreprocessConfig {
   cv::Mat response_function;
   cv::Mat flat_field;
   cv::Mat dark_frame;
-  
-  // 降噪参数 
+
+  // 降噪参数
   bool enable_denoise{false};
   DenoiseMethod denoise_method{DenoiseMethod::Auto};
   DenoiseParameters denoise_params;
 
   // 卷积参数
-  bool enable_convolution{false}; 
+  bool enable_convolution{false};
   ConvolutionConfig conv_config;
 
   // 滤波参数
   bool enable_filter{false};
   std::vector<std::unique_ptr<IFilterStrategy>> filters;
-  
+
   // 并行处理配置
   bool parallel_preprocess{true};
   int thread_count{4};
@@ -64,10 +64,11 @@ auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
 
 // 增加带前置处理的堆叠函数声明
 auto stackImagesWithPreprocess(const std::vector<cv::Mat> &images,
-                              StackMode mode,
-                              const StackPreprocessConfig &preprocess_config,
-                              float sigma = 2.0f,
-                              const std::vector<float> &weights = {}) -> cv::Mat;
+                               StackMode mode,
+                               const StackPreprocessConfig &preprocess_config,
+                               float sigma = 2.0f,
+                               const std::vector<float> &weights = {})
+    -> cv::Mat;
 
 // 辅助函数声明
 auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
@@ -82,3 +83,7 @@ auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat;
 auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat;
 auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
     -> cv::Mat;
+
+auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat;
+auto weightedMedianStack(const std::vector<cv::Mat> &images,
+  const std::vector<float> &weights) -> cv::Mat;
