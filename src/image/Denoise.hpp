@@ -21,6 +21,19 @@ enum class DenoiseMethod {
 enum class WaveletType { Haar, Daubechies4, Coiflet, Biorthogonal };
 
 /**
+ * @brief Enumeration of noise types.
+ */
+enum class NoiseType {
+    Unknown,            ///< 未知噪声类型
+    Gaussian,          ///< 高斯噪声
+    SaltAndPepper,     ///< 椒盐噪声
+    Speckle,           ///< 散斑噪声
+    Poisson,           ///< 泊松噪声
+    Periodic,          ///< 周期性噪声
+    Mixed             ///< 混合噪声
+};
+
+/**
  * @brief Structure to hold denoising parameters.
  */
 struct DenoiseParameters {
@@ -54,10 +67,21 @@ struct DenoiseParameters {
   int block_size = 32;                          ///< Block size for processing
 
   // Optimization parameters
-  bool use_simd = true;           ///< 使用SIMD优化
-  bool use_opencl = false;        ///< 使用OpenCL GPU加速
-  int tile_size = 256;            ///< 分块大小
-  bool use_stream = true;         ///< 使用流水线处理
+  bool use_simd = true;    ///< 使用SIMD优化
+  bool use_opencl = false; ///< 使用OpenCL GPU加速
+  int tile_size = 256;     ///< 分块大小
+  bool use_stream = true;  ///< 使用流水线处理
+};
+
+/**
+ * @brief Structure to hold noise analysis results.
+ */
+struct NoiseAnalysis {
+    NoiseType type = NoiseType::Unknown;  ///< 检测到的噪声类型
+    double intensity = 0.0;               ///< 噪声强度 [0,1]
+    double snr = 0.0;                     ///< 信噪比
+    cv::Mat noiseMask;                    ///< 噪声分布掩码
+    std::map<NoiseType, double> probabilities; ///< 各种噪声类型的概率
 };
 
 /**
@@ -88,11 +112,11 @@ private:
                                           double noise_estimate);
 
   // 新增优化方法
-  static void process_tile_simd(cv::Mat& tile);
-  static void parallel_wavelet_transform(cv::Mat& data);
-  static void optimize_memory_layout(cv::Mat& data);
-  static void stream_process(const cv::Mat& src, cv::Mat& dst, 
-                             const std::function<void(cv::Mat&)>& process_fn);
+  static void process_tile_simd(cv::Mat &tile);
+  static void parallel_wavelet_transform(cv::Mat &data);
+  static void optimize_memory_layout(cv::Mat &data);
+  static void stream_process(const cv::Mat &src, cv::Mat &dst,
+                             const std::function<void(cv::Mat &)> &process_fn);
 
 public:
   /**
@@ -124,6 +148,13 @@ public:
    */
   cv::Mat denoise(const cv::Mat &input, const DenoiseParameters &params);
 
+  /**
+   * @brief Analyze noise pattern in the image
+   * @param input Input image
+   * @return Noise analysis results
+   */
+  NoiseAnalysis analyzeNoise(const cv::Mat &input);
+
 private:
   DenoiseMethod analyze_noise(const cv::Mat &img);
   double detect_salt_pepper(const cv::Mat &gray);
@@ -136,4 +167,23 @@ private:
   void process_bilateral(const cv::Mat &src, cv::Mat &dst,
                          const DenoiseParameters &params);
   const char *method_to_string(DenoiseMethod method);
+
+  // 新增私有方法
+  double calculate_psnr(const cv::Mat& a, const cv::Mat& b);
+  double calculate_ssim(const cv::Mat& a, const cv::Mat& b);
+  double noise_reduction_ratio(const cv::Mat& orig, const cv::Mat& processed);
+  cv::Mat frequency_domain_filter(const cv::Mat& channel);
+  cv::Mat create_bandstop_filter(const cv::Size& size, double sigma);
+  void apply_filter(cv::Mat& complexImg, const cv::Mat& filter);
+  void generate_quality_report(const cv::Mat& orig, const cv::Mat& processed, 
+                             const std::string& output_path);
+
+  // 新增噪声分析相关方法
+  double estimateNoiseLevel(const cv::Mat &img);
+  double estimatePeriodicNoise(const cv::Mat &img);
+  cv::Mat detectNoiseDistribution(const cv::Mat &img);
+  void updateDenoiseParams(DenoiseParameters &params, const NoiseAnalysis &analysis);
+  std::vector<double> computeImageStatistics(const cv::Mat &img);
+  double calculateLocalVariance(const cv::Mat &img, int x, int y, int windowSize);
+  cv::Mat computeNoiseSpectrum(const cv::Mat &img);
 };

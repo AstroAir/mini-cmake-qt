@@ -1,12 +1,13 @@
 #pragma once
 
+#include <functional>
 #include <opencv2/opencv.hpp>
 #include <optional>
 #include <spdlog/spdlog.h>
+#include <unordered_map>
 #include <variant>
 #include <vector>
-#include <unordered_map>
-#include <functional>
+
 
 #ifdef HAVE_OPENCV_CUDA
 #include <opencv2/cudafilters.hpp>
@@ -44,15 +45,15 @@ struct AdaptiveParams {
 };
 
 struct CropperConfig {
-  bool useCuda = false;          // 是否使用CUDA加速
-  int threads = 4;               // 并行线程数
-  bool useCache = true;         // 是否使用缓存
-  size_t cacheSize = 100;      // 缓存大小(MB)
+  bool useCuda = false;   // 是否使用CUDA加速
+  int threads = 4;        // 并行线程数
+  bool useCache = true;   // 是否使用缓存
+  size_t cacheSize = 100; // 缓存大小(MB)
 };
 
 class ImageCropper {
 public:
-  explicit ImageCropper(const CropperConfig& config = CropperConfig{});
+  explicit ImageCropper(const CropperConfig &config = CropperConfig{});
   static bool hasCUDASupport();
 
   // 公共裁剪方法
@@ -65,6 +66,8 @@ public:
 
   std::optional<cv::Mat> crop(const cv::Mat &src, const CropStrategy &strategy,
                               const AdaptiveParams &adaptive_params = {});
+
+  std::optional<cv::Mat> cropAuto(const cv::Mat &src);
 
 private:
   CropperConfig config;
@@ -87,7 +90,6 @@ private:
                   const std::vector<cv::Point2f> &srcPoints);
 
   std::optional<cv::Mat> cropMasked(const cv::Mat &src, const cv::Mat &mask);
-  std::optional<cv::Mat> cropAuto(const cv::Mat &src);
 
   bool validateRect(const cv::Rect &rect, const cv::Size &imageSize);
   void adjustRectToImage(cv::Rect &rect, const cv::Size &imageSize);
@@ -97,15 +99,17 @@ private:
   // CUDA优化方法
 #ifdef HAVE_OPENCV_CUDA
   cv::Ptr<cv::cuda::Filter> createGaussianFilter();
-  cv::cuda::GpuMat preprocessGPU(const cv::cuda::GpuMat& src);
-  std::optional<cv::Mat> cropWithCUDA(const cv::Mat& src, const CropStrategy& strategy);
+  cv::cuda::GpuMat preprocessGPU(const cv::cuda::GpuMat &src);
+  std::optional<cv::Mat> cropWithCUDA(const cv::Mat &src,
+                                      const CropStrategy &strategy);
 #endif
 
   // 缓存相关
   std::unordered_map<size_t, cv::Mat> resultCache;
-  void updateCache(size_t hash, const cv::Mat& result);
+  void updateCache(size_t hash, const cv::Mat &result);
   std::optional<cv::Mat> getFromCache(size_t hash);
-  
+
   // 并行处理辅助方法
-  cv::Mat parallelProcess(const cv::Mat& src, const std::function<void(cv::Mat&)>& processor);
+  cv::Mat parallelProcess(const cv::Mat &src,
+                          const std::function<void(cv::Mat &)> &processor);
 };

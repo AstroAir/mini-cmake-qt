@@ -7,18 +7,13 @@
 #include <QFileDialog>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
-#include <QLabel>
 #include <QMessageBox>
 #include <QNetworkAccessManager>
 #include <QNetworkDiskCache>
 #include <QNetworkRequest>
-#include <QProgressBar>
-#include <QPushButton>
-#include <QScrollArea>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStyle>
-#include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
 #include <QtConcurrent>
@@ -28,6 +23,12 @@
 #elif defined(Q_OS_LINUX)
 #include <sys/utsname.h>
 #endif
+
+#include "ElaPlainTextEdit.h"
+#include "ElaProgressBar.h"
+#include "ElaPushButton.h"
+#include "ElaText.h"
+#include "ElaToolButton.h"
 
 QString CrashDialog::s_reportServerUrl =
     "https://crash-report.example.com/api/submit";
@@ -49,42 +50,42 @@ CrashDialog::CrashDialog(const QString &log, QWidget *parent)
 
 void CrashDialog::setupUI() {
   // 图标区域
-  m_iconLabel = new QLabel(this);
+  m_iconLabel = new ElaText(this);
   m_iconLabel->setPixmap(QApplication::style()
                              ->standardIcon(QStyle::SP_MessageBoxCritical)
                              .pixmap(64, 64));
 
   // 主提示文字
-  m_mainLabel = new QLabel(
+  m_mainLabel = new ElaText(
       tr("<h3>Oops! The application has crashed.</h3>"
          "<p>Please help us improve by sending the crash report.</p>"),
       this);
   m_mainLabel->setWordWrap(true);
 
   // 日志显示区域
-  m_logView = new QTextEdit(this);
+  m_logView = new ElaPlainTextEdit(this);
   m_logView->setReadOnly(true);
   m_logView->setPlainText(tr("Crash summary:\n") +
                           m_fullLog.section('\n', 0, 15)); // 显示前15行
 
   // 详细信息区域
-  m_detailInfo = new QTextEdit(this);
+  m_detailInfo = new ElaPlainTextEdit(this);
   m_detailInfo->setReadOnly(true);
   m_detailInfo->setVisible(false); // 默认隐藏
 
   // 操作按钮
-  m_detailsBtn = new QToolButton(this);
+  m_detailsBtn = new ElaToolButton(this);
   m_detailsBtn->setText(tr("Technical Details ▼"));
   m_detailsBtn->setCheckable(true);
   m_detailsBtn->setChecked(false);
   m_detailsBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
 
-  m_copyBtn = new QPushButton(tr("Copy"), this);
-  m_saveBtn = new QPushButton(tr("Save..."), this);
-  m_reportBtn = new QPushButton(tr("Send Report"), this);
-  m_closeBtn = new QPushButton(tr("Close"), this);
+  m_copyBtn = new ElaPushButton(tr("Copy"), this);
+  m_saveBtn = new ElaPushButton(tr("Save..."), this);
+  m_reportBtn = new ElaPushButton(tr("Send Report"), this);
+  m_closeBtn = new ElaPushButton(tr("Close"), this);
 
-  m_progressBar = new QProgressBar(this);
+  m_progressBar = new ElaProgressBar(this);
   m_progressBar->setVisible(false);
   m_progressBar->setRange(0, 100);
 
@@ -109,12 +110,15 @@ void CrashDialog::setupUI() {
   mainLayout->addLayout(btnLayout);
 
   // 信号连接
-  connect(m_detailsBtn, &QToolButton::toggled, this,
+  connect(m_detailsBtn, &ElaToolButton::toggled, this,
           &CrashDialog::onDetailsToggled);
-  connect(m_copyBtn, &QPushButton::clicked, this, &CrashDialog::onCopyClicked);
-  connect(m_saveBtn, &QPushButton::clicked, this, &CrashDialog::onSaveClicked);
-  connect(m_reportBtn, &QPushButton::clicked, this, &CrashDialog::onSendReport);
-  connect(m_closeBtn, &QPushButton::clicked, this, &QDialog::accept);
+  connect(m_copyBtn, &ElaPushButton::clicked, this,
+          &CrashDialog::onCopyClicked);
+  connect(m_saveBtn, &ElaPushButton::clicked, this,
+          &CrashDialog::onSaveClicked);
+  connect(m_reportBtn, &ElaPushButton::clicked, this,
+          &CrashDialog::onSendReport);
+  connect(m_closeBtn, &ElaPushButton::clicked, this, &QDialog::accept);
 }
 
 QString CrashDialog::collectSystemInfo() const {

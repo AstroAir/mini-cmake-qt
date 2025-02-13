@@ -1,6 +1,7 @@
 #include "Denoise.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <future>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
@@ -547,242 +548,314 @@ const char *ImageDenoiser::method_to_string(DenoiseMethod method) {
   }
 }
 
-namespace fs = std::filesystem;
-using namespace cv;
-using namespace std::chrono;
-
-enum class DenoiseMethod { MEDIAN, GAUSSIAN, NLM, FREQUENCY, AUTO };
-enum class NoiseType { GAUSSIAN, SPECKLE, IMPULSE, UNKNOWN };
-
-struct ProcessingConfig {
-    DenoiseMethod method = DenoiseMethod::AUTO;
-    NoiseType noise_type = NoiseType::UNKNOWN;
-    int kernel_size = 3;
-    double sigma = 1.0;
-    bool benchmark = false;
-    bool save_report = false;
-    bool use_gpu = false;
-    fs::path output_dir = "results";
-};
-
-NoiseType detect_noise_type(const Mat& channel) {
-    Mat hist;
-    const int histSize = 256;
-    float range[] = {0, 256};
-    const float* histRange = {range};
-    
-    calcHist(&channel, 1, 0, Mat(), hist, 1, &histSize, &histRange);
-    normalize(hist, hist, 0, 1, NORM_MINMAX);
-
-    double entropy = 0;
-    for(int i = 0; i < histSize; ++i) {
-        float prob = hist.at<float>(i);
-        if(prob > 0)
-            entropy -= prob * log2(prob);
-    }
-
-    if(entropy > 7.0) return NoiseType::GAUSSIAN;
-    
-    Mat diff;
-    Laplacian(channel, diff, CV_16S);
-    Scalar mean, stddev;
-    meanStdDev(diff, mean, stddev);
-    
-    return (stddev[0] > 25) ? NoiseType::IMPULSE : NoiseType::SPECKLE;
+double ImageDenoiser::calculate_psnr(const cv::Mat &a, const cv::Mat &b) {
+  cv::Mat diff;
+  cv::absdiff(a, b, diff);
+  diff.convertTo(diff, CV_32F);
+  diff = diff.mul(diff);
+  cv::Scalar s = sum(diff);
+  double mse = (s[0] + s[1] + s[2]) / (3 * a.total());
+  return 10.0 * log10(255 * 255 / mse);
 }
 
-class DenoiseProcessor {
-public:
-    explicit DenoiseProcessor(const ProcessingConfig& config) : config(config) {
-        if(config.use_gpu && cuda::getCudaEnabledDeviceCount() == 0) {
-            throw std::runtime_error("CUDA acceleration requested but no GPU available");
-        }
-    }
+double ImageDenoiser::calculate_ssim(const cv::Mat &a, const cv::Mat &b) {
+  const double C1 = 6.5025;  // (0.01 * 255)^2
+  const double C2 = 58.5225; // (0.03 * 255)^2
 
-    Mat process(const Mat& input) {
-        vector<Mat> channels;
-        split(input, channels);
+  cv::Mat i1, i2;
+  a.convertTo(i1, CV_32F);
+  b.convertTo(i2, CV_32F);
 
-        if(config.noise_type == NoiseType::UNKNOWN) {
-            config.noise_type = detect_noise_type(channels[1]);
-        }
+  cv::Mat I1_2 = i1.mul(i1);
+  cv::Mat I2_2 = i2.mul(i2);
+  cv::Mat I1_I2 = i1.mul(i2);
 
-        if(config.method == DenoiseMethod::AUTO) {
-            config.method = select_method_auto();
-        }
+  cv::Mat mu1, mu2;
+  cv::GaussianBlur(i1, mu1, cv::Size(11, 11), 1.5);
+  cv::GaussianBlur(i2, mu2, cv::Size(11, 11), 1.5);
 
-        process_green_channel(channels[1]);
+  cv::Mat mu1_2 = mu1.mul(mu1);
+  cv::Mat mu2_2 = mu2.mul(mu2);
+  cv::Mat mu1_mu2 = mu1.mul(mu2);
 
-        Mat result;
-        merge(channels, result);
-        return result;
-    }
+  cv::Mat sigma1_2, sigma2_2, sigma12;
+  cv::GaussianBlur(I1_2, sigma1_2, cv::Size(11, 11), 1.5);
+  sigma1_2 -= mu1_2;
 
-private:
-    ProcessingConfig config;
+  cv::GaussianBlur(I2_2, sigma2_2, cv::Size(11, 11), 1.5);
+  sigma2_2 -= mu2_2;
 
-    DenoiseMethod select_method_auto() {
-        switch(config.noise_type) {
-            case NoiseType::IMPULSE: return DenoiseMethod::MEDIAN;
-            case NoiseType::GAUSSIAN: return DenoiseMethod::GAUSSIAN;
-            case NoiseType::SPECKLE: return DenoiseMethod::NLM;
-            default: return DenoiseMethod::MEDIAN;
-        }
-    }
+  cv::GaussianBlur(I1_I2, sigma12, cv::Size(11, 11), 1.5);
+  sigma12 -= mu1_mu2;
 
-    void process_green_channel(Mat& green_channel) {
-        switch(config.method) {
-            case DenoiseMethod::MEDIAN:
-                medianBlur(green_channel, green_channel, config.kernel_size);
-                break;
-            case DenoiseMethod::GAUSSIAN: {
-                Size ksize(config.kernel_size, config.kernel_size);
-                GaussianBlur(green_channel, green_channel, ksize, config.sigma);
-                break;
-            }
-            case DenoiseMethod::NLM:
-                fastNlMeansDenoising(green_channel, green_channel, 
-                                   config.kernel_size, 7, 21);
-                break;
-            case DenoiseMethod::FREQUENCY:
-                green_channel = frequency_domain_filter(green_channel);
-                break;
-            default:
-                throw std::invalid_argument("Unsupported denoising method");
-        }
-    }
+  cv::Mat t1, t2, t3;
+  t1 = 2 * mu1_mu2 + C1;
+  t2 = 2 * sigma12 + C2;
+  t3 = t1.mul(t2);
 
-    Mat frequency_domain_filter(const Mat& channel) {
-        Mat padded;
-        int m = getOptimalDFTSize(channel.rows);
-        int n = getOptimalDFTSize(channel.cols);
-        copyMakeBorder(channel, padded, 0, m - channel.rows, 0, n - channel.cols, 
-                     BORDER_CONSTANT, Scalar::all(0));
+  t1 = mu1_2 + mu2_2 + C1;
+  t2 = sigma1_2 + sigma2_2 + C2;
+  t1 = t1.mul(t2);
 
-        Mat planes[] = {Mat_<float>(padded), Mat::zeros(padded.size(), CV_32F)};
-        Mat complexImg;
-        merge(planes, 2, complexImg);
-        dft(complexImg, complexImg);
-
-        Mat filter = create_bandstop_filter(padded.size());
-        apply_filter(complexImg, filter);
-
-        idft(complexImg, complexImg);
-        split(complexImg, planes);
-        normalize(planes[0], planes[0], 0, 255, NORM_MINMAX, CV_8U);
-        
-        return planes[0](Rect(0, 0, channel.cols, channel.rows));
-    }
-
-    Mat create_bandstop_filter(Size size) {
-        Mat filter = Mat::zeros(size, CV_32F);
-        Point center = Point(size.width/2, size.height/2);
-        double D0 = config.sigma * 10;
-        
-        parallel_for_(Range(0, size.height), [&](const Range& range) {
-            for(int i = range.start; i < range.end; ++i) {
-                float* p = filter.ptr<float>(i);
-                for(int j = 0; j < size.width; ++j) {
-                    double d = norm(Point(j, i) - center);
-                    p[j] = 1 - exp(-(d*d)/(2*D0*D0));
-                }
-            }
-        });
-        return filter;
-    }
-
-    void apply_filter(Mat& complexImg, const Mat& filter) {
-        Mat planes[2];
-        split(complexImg, planes);
-        multiply(planes[0], filter, planes[0]);
-        multiply(planes[1], filter, planes[1]);
-        merge(planes, 2, complexImg);
-    }
-};
-
-int main(int argc, char** argv) {
-    ProcessingConfig config;
-    CLI::App app{"Advanced Green Noise Removal"};
-
-    // 命令行参数配置
-    app.add_option("-i,--input", config.input_path, "Input image path")->required();
-    app.add_option("-o,--output", config.output_dir, "Output directory")
-       ->default_val("results");
-    app.add_option("-m,--method", config.method,
-                  "Denoising method: 0=Median,1=Gaussian,2=NLM,3=Frequency,4=Auto")
-       ->default_val(DenoiseMethod::AUTO)
-       ->transform(CLI::CheckedTransformer(std::map<std::string, DenoiseMethod>{
-           {"median", DenoiseMethod::MEDIAN},
-           {"gaussian", DenoiseMethod::GAUSSIAN},
-           {"nlm", DenoiseMethod::NLM},
-           {"frequency", DenoiseMethod::FREQUENCY},
-           {"auto", DenoiseMethod::AUTO}}));
-    app.add_option("-k,--kernel", config.kernel_size, "Filter kernel size")
-       ->check(CLI::Range(3, 15).description("Odd numbers only"));
-    app.add_option("-s,--sigma", config.sigma, "Filter sigma value")
-       ->check(CLI::Range(0.1, 10.0));
-    app.add_flag("-b,--benchmark", config.benchmark, "Enable performance benchmarking");
-    app.add_flag("-g,--gpu", config.use_gpu, "Enable GPU acceleration");
-    app.add_flag("-r,--report", config.save_report, "Generate quality report");
-
-    CLI11_PARSE(app, argc, argv);
-
-    try {
-        // 初始化处理
-        DenoiseProcessor processor(config);
-        Mat input = imread(config.input_path.string(), IMREAD_COLOR);
-        
-        if(config.use_gpu) {
-            cuda::GpuMat gpu_img;
-            gpu_img.upload(input);
-            processor.process(gpu_img);
-            gpu_img.download(input);
-        } else {
-            TickMeter tm;
-            if(config.benchmark) tm.start();
-            
-            Mat result = processor.process(input);
-            
-            if(config.benchmark) {
-                tm.stop();
-                cout << "Processing time: " << tm.getTimeMilli() << " ms\n";
-            }
-
-            // 保存结果和报告
-            fs::create_directories(config.output_dir);
-            fs::path output_path = config.output_dir / config.input_path.filename();
-            imwrite(output_path.string(), result);
-
-            if(config.save_report) {
-                generate_quality_report(input, result, output_path);
-            }
-        }
-    } catch (const exception& e) {
-        cerr << "Error: " << e.what() << endl;
-        return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
+  cv::Mat ssim;
+  divide(t3, t1, ssim);
+  return mean(ssim)[0];
 }
 
-// 质量报告生成函数示例
-void generate_quality_report(const Mat& orig, const Mat& processed, 
-                           const fs::path& output_path) {
-    ofstream report(output_path.replace_extension(".txt"));
-    
-    auto calculate_psnr = [](const Mat& a, const Mat& b) {
-        Mat diff;
-        absdiff(a, b, diff);
-        diff.convertTo(diff, CV_32F);
-        diff = diff.mul(diff);
-        Scalar s = sum(diff);
-        double mse = (s[0] + s[1] + s[2]) / (3 * a.total());
-        return 10.0 * log10(255*255 / mse);
-    };
+double ImageDenoiser::noise_reduction_ratio(const cv::Mat &orig,
+                                            const cv::Mat &processed) {
+  cv::Mat gray_orig, gray_proc;
+  if (orig.channels() > 1) {
+    cv::cvtColor(orig, gray_orig, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(processed, gray_proc, cv::COLOR_BGR2GRAY);
+  } else {
+    gray_orig = orig;
+    gray_proc = processed;
+  }
 
-    report << "=== Image Quality Report ===\n"
-           << "PSNR: " << calculate_psnr(orig, processed) << " dB\n"
-           << "SSIM: " << calculate_ssim(orig, processed) << "\n"
-           << "Noise Reduction: " << noise_reduction_ratio(orig, processed) << "%\n";
+  cv::Scalar mean_orig, stddev_orig, mean_proc, stddev_proc;
+  cv::meanStdDev(gray_orig, mean_orig, stddev_orig);
+  cv::meanStdDev(gray_proc, mean_proc, stddev_proc);
+
+  double noise_reduction = (1.0 - stddev_proc[0] / stddev_orig[0]) * 100.0;
+  return std::max(0.0, noise_reduction);
 }
 
-// 编译依赖：需要链接OpenCV和CLI11库
+cv::Mat ImageDenoiser::frequency_domain_filter(const cv::Mat &channel) {
+  cv::Mat padded;
+  int m = cv::getOptimalDFTSize(channel.rows);
+  int n = cv::getOptimalDFTSize(channel.cols);
+  cv::copyMakeBorder(channel, padded, 0, m - channel.rows, 0, n - channel.cols,
+                     cv::BORDER_CONSTANT, cv::Scalar::all(0));
+
+  cv::Mat planes[] = {cv::Mat_<float>(padded),
+                      cv::Mat::zeros(padded.size(), CV_32F)};
+  cv::Mat complexImg;
+  cv::merge(planes, 2, complexImg);
+  cv::dft(complexImg, complexImg);
+
+  cv::Mat filter = create_bandstop_filter(padded.size(), 30.0);
+  apply_filter(complexImg, filter);
+
+  cv::idft(complexImg, complexImg);
+  cv::split(complexImg, planes);
+  cv::normalize(planes[0], planes[0], 0, 255, cv::NORM_MINMAX, CV_8U);
+
+  return planes[0](cv::Rect(0, 0, channel.cols, channel.rows));
+}
+
+cv::Mat ImageDenoiser::create_bandstop_filter(const cv::Size &size,
+                                              double sigma) {
+  cv::Mat filter = cv::Mat::zeros(size, CV_32F);
+  cv::Point center(size.width / 2, size.height / 2);
+  double D0 = sigma * 10;
+
+  cv::parallel_for_(cv::Range(0, size.height), [&](const cv::Range &range) {
+    for (int i = range.start; i < range.end; ++i) {
+      float *p = filter.ptr<float>(i);
+      for (int j = 0; j < size.width; ++j) {
+        double d = cv::norm(cv::Point(j, i) - center);
+        p[j] = 1 - std::exp(-(d * d) / (2 * D0 * D0));
+      }
+    }
+  });
+  return filter;
+}
+
+void ImageDenoiser::apply_filter(cv::Mat &complexImg, const cv::Mat &filter) {
+  cv::Mat planes[2];
+  cv::split(complexImg, planes);
+  cv::multiply(planes[0], filter, planes[0]);
+  cv::multiply(planes[1], filter, planes[1]);
+  cv::merge(planes, 2, complexImg);
+}
+
+void ImageDenoiser::generate_quality_report(const cv::Mat &orig,
+                                            const cv::Mat &processed,
+                                            const std::string &output_path) {
+  std::ofstream report(output_path);
+  if (!report.is_open()) {
+    denoiseLogger->error("Failed to create quality report at: {}", output_path);
+    return;
+  }
+
+  double psnr = calculate_psnr(orig, processed);
+  double ssim = calculate_ssim(orig, processed);
+  double noise_red = noise_reduction_ratio(orig, processed);
+
+  report << "=== Image Quality Report ===\n"
+         << "PSNR: " << psnr << " dB\n"
+         << "SSIM: " << ssim << "\n"
+         << "Noise Reduction: " << noise_red << "%\n";
+
+  denoiseLogger->info(
+      "Quality report generated: PSNR={:.2f}dB, SSIM={:.4f}, NR={:.1f}%", psnr,
+      ssim, noise_red);
+}
+
+NoiseAnalysis ImageDenoiser::analyzeNoise(const cv::Mat &input) {
+  denoiseLogger->info("Starting comprehensive noise analysis");
+  NoiseAnalysis analysis;
+
+  cv::Mat gray;
+  if (input.channels() > 1) {
+    cv::cvtColor(input, gray, cv::COLOR_BGR2GRAY);
+  } else {
+    gray = input.clone();
+  }
+
+  // 计算图像统计特征
+  auto stats = computeImageStatistics(gray);
+  double variance = stats[1];
+  double skewness = stats[2];
+  double kurtosis = stats[3];
+
+  // 噪声水平估计
+  analysis.intensity = estimateNoiseLevel(gray);
+
+  // 计算信噪比
+  cv::Mat smoothed;
+  cv::GaussianBlur(gray, smoothed, cv::Size(5, 5), 1.5);
+  cv::Mat noise;
+  cv::absdiff(gray, smoothed, noise);
+  cv::Scalar mean, stddev;
+  cv::meanStdDev(gray, mean, stddev);
+  analysis.snr = mean[0] / stddev[0];
+
+  // 生成噪声分布掩码
+  analysis.noiseMask = detectNoiseDistribution(gray);
+
+  // 检测周期性噪声
+  double periodicNoiseStrength = estimatePeriodicNoise(gray);
+
+  // 基于特征进行噪声类型概率计算
+  std::map<NoiseType, double> &probs = analysis.probabilities;
+
+  // 高斯噪声特征：kurtosis接近3
+  probs[NoiseType::Gaussian] = std::exp(-std::abs(kurtosis - 3.0) / 2.0);
+
+  // 椒盐噪声特征：极值点比例
+  double saltPepperRatio = detect_salt_pepper(gray);
+  probs[NoiseType::SaltAndPepper] = saltPepperRatio;
+
+  // 散斑噪声特征：方差与均值的关系
+  double speckleProb = variance / (mean[0] * mean[0]);
+  probs[NoiseType::Speckle] = std::min(speckleProb, 1.0);
+
+  // 周期性噪声
+  probs[NoiseType::Periodic] = periodicNoiseStrength;
+
+  // 确定主要噪声类型
+  auto maxProb = std::max_element(
+      probs.begin(), probs.end(),
+      [](const auto &a, const auto &b) { return a.second < b.second; });
+
+  if (maxProb->second > 0.5) {
+    analysis.type = maxProb->first;
+  } else {
+    analysis.type = NoiseType::Mixed;
+  }
+
+  denoiseLogger->info(
+      "Noise analysis completed. Type: {}, Intensity: {:.2f}, SNR: {:.2f}",
+      static_cast<int>(analysis.type), analysis.intensity, analysis.snr);
+
+  return analysis;
+}
+
+std::vector<double> ImageDenoiser::computeImageStatistics(const cv::Mat &img) {
+  cv::Mat float_img;
+  img.convertTo(float_img, CV_32F);
+
+  cv::Scalar mean, stddev;
+  cv::meanStdDev(float_img, mean, stddev);
+
+  // 计算偏度和峰度
+  double sum = 0.0, sum3 = 0.0, sum4 = 0.0;
+  float *ptr = (float *)float_img.data;
+  int total = float_img.total();
+
+#pragma omp parallel for reduction(+ : sum, sum3, sum4)
+  for (int i = 0; i < total; ++i) {
+    double diff = ptr[i] - mean[0];
+    sum += diff;
+    sum3 += diff * diff * diff;
+    sum4 += diff * diff * diff * diff;
+  }
+
+  double variance = stddev[0] * stddev[0];
+  double skewness = sum3 / (total * std::pow(stddev[0], 3));
+  double kurtosis = sum4 / (total * variance * variance) - 3.0;
+
+  return {mean[0], variance, skewness, kurtosis};
+}
+
+cv::Mat ImageDenoiser::detectNoiseDistribution(const cv::Mat &img) {
+  cv::Mat mask = cv::Mat::zeros(img.size(), CV_8U);
+  int windowSize = 5;
+  int border = windowSize / 2;
+
+#pragma omp parallel for collapse(2)
+  for (int y = border; y < img.rows - border; ++y) {
+    for (int x = border; x < img.cols - border; ++x) {
+      double localVar = calculateLocalVariance(img, x, y, windowSize);
+      double pixelIntensity = img.at<uchar>(y, x);
+
+      // 检测局部异常
+      if (localVar > 3.0 * pixelIntensity) {
+        mask.at<uchar>(y, x) = 255;
+      }
+    }
+  }
+
+  return mask;
+}
+
+double ImageDenoiser::estimatePeriodicNoise(const cv::Mat &img) {
+  cv::Mat spectrum = computeNoiseSpectrum(img);
+
+  // 检测频谱中的峰值
+  cv::Mat peaks;
+  cv::dilate(spectrum, peaks, cv::Mat());
+  cv::Mat peak_mask = spectrum >= peaks;
+
+  // 计算周期性强度
+  return cv::sum(peak_mask)[0] / (spectrum.rows * spectrum.cols);
+}
+
+void ImageDenoiser::updateDenoiseParams(DenoiseParameters &params,
+                                        const NoiseAnalysis &analysis) {
+  switch (analysis.type) {
+  case NoiseType::Gaussian:
+    params.method = DenoiseMethod::Gaussian;
+    params.gaussian_kernel = cv::Size(5, 5);
+    params.sigma_x = analysis.intensity * 5.0;
+    params.sigma_y = analysis.intensity * 5.0;
+    break;
+
+  case NoiseType::SaltAndPepper:
+    params.method = DenoiseMethod::Median;
+    params.median_kernel =
+        std::max(3, static_cast<int>(analysis.intensity * 7));
+    break;
+
+  case NoiseType::Periodic:
+    params.method = DenoiseMethod::Wavelet;
+    params.wavelet_level = 4;
+    params.wavelet_threshold = analysis.intensity * 30.0f;
+    break;
+
+  case NoiseType::Mixed:
+    // 对于混合噪声，使用两步去噪
+    params.method = DenoiseMethod::Bilateral;
+    params.bilateral_d = 9;
+    params.sigma_color = 75.0 * analysis.intensity;
+    params.sigma_space = 75.0 * analysis.intensity;
+    break;
+
+  default:
+    params.method = DenoiseMethod::NLM;
+    params.nlm_h = analysis.intensity * 10;
+    break;
+  }
+}

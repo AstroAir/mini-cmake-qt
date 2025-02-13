@@ -2,21 +2,11 @@
 
 #include <vector>
 
-// Qt头文件
-#include <QApplication>
-#include <QComboBox>
-#include <QFileDialog>
-#include <QFutureWatcher>
-#include <QGridLayout>
+#include <QFuture>
 #include <QImage>
-#include <QLabel>
-#include <QMainWindow>
-#include <QMessageBox>
-#include <QPainter>
-#include <QProgressBar>
-#include <QPushButton>
-#include <QWidget>
-#include <QtConcurrent>
+#include <QPromise>
+#include <QRect>
+
 
 #include <spdlog/spdlog.h>
 
@@ -144,9 +134,33 @@ void processRows(const QImage &img, int height,
                  const std::function<void(int)> &fn);
 
 /**
+ * @brief 图像比较策略的基类
+ */
+class ComparisonStrategyBase {
+protected:
+  static constexpr int BLOCK_SIZE = 16;
+  static constexpr int SUBSAMPLE_FACTOR = 2;
+
+  QImage preprocessImage(const QImage &img) const;
+  void compareBlockSIMD(const uchar *block1, const uchar *block2, uchar *dest,
+                        size_t size) const;
+  std::vector<QRect> findDifferenceRegions(const QImage &diffImg) const;
+
+  class DisjointSet {
+    std::vector<int> parent;
+    std::vector<int> rank;
+
+  public:
+    DisjointSet(int size);
+    int find(int x);
+    void unite(int x, int y);
+  };
+};
+
+/**
  * @brief Class to perform pixel difference comparison.
  */
-class PixelDifferenceStrategy {
+class PixelDifferenceStrategy : public ComparisonStrategyBase {
 public:
   /**
    * @brief Compares two images and finds the pixel differences.
@@ -164,53 +178,54 @@ public:
    *
    * @return The name of the strategy.
    */
-  QString name() const;
+  QString name() const { return "像素差异比较"; }
+};
+
+/**
+ * @brief 使用结构相似性(SSIM)的比较策略
+ */
+class SSIMStrategy : public ComparisonStrategyBase {
+public:
+  ComparisonResult compare(const QImage &img1, const QImage &img2,
+                           QPromise<ComparisonResult> &promise) const;
+  QString name() const { return "结构相似性比较"; }
 
 private:
-  /**
-   * @brief Finds the regions of difference in the image.
-   *
-   * @param diffImg The difference image.
-   * @return A vector of rectangles representing the regions of difference.
-   */
-  std::vector<QRect> findDifferenceRegions(const QImage &diffImg) const;
+  static constexpr double K1 = 0.01;
+  static constexpr double K2 = 0.03;
+  static constexpr int WINDOW_SIZE = 8;
 
-  /**
-   * @brief Performs a flood fill to find a region of difference.
-   *
-   * @param img The image to process.
-   * @param visited The image to mark visited pixels.
-   * @param x The x-coordinate to start the flood fill.
-   * @param y The y-coordinate to start the flood fill.
-   * @param threshold The threshold for difference.
-   * @param region The region to update with the found difference.
-   */
-  void floodFill(const QImage &img, QImage &visited, int x, int y,
-                 int threshold, QRect &region) const;
+  double computeSSIM(const QImage &img1, const QImage &img2, int x,
+                     int y) const;
+};
 
-  static constexpr int BLOCK_SIZE = 16;  // 缓存优化的块大小
-  static constexpr int SUBSAMPLE_FACTOR = 2;  // 降采样因子
+/**
+ * @brief 使用感知哈希(pHash)的比较策略
+ */
+class PerceptualHashStrategy : public ComparisonStrategyBase {
+public:
+  ComparisonResult compare(const QImage &img1, const QImage &img2,
+                           QPromise<ComparisonResult> &promise) const;
+  QString name() const { return "感知哈希比较"; }
 
-  /**
-   * @brief 使用SIMD优化的像素比较
-   */
-  void compareBlockSIMD(const uchar* block1, const uchar* block2, 
-                        uchar* dest, size_t size) const;
+private:
+  static constexpr int HASH_SIZE = 64;
+  uint64_t computeHash(const QImage &img) const;
+  int hammingDistance(uint64_t hash1, uint64_t hash2) const;
+};
 
-  /**
-   * @brief 图像预处理
-   */
-  QImage preprocessImage(const QImage& img) const;
+/**
+ * @brief 基于颜色直方图的比较策略
+ */
+class HistogramStrategy : public ComparisonStrategyBase {
+public:
+  ComparisonResult compare(const QImage &img1, const QImage &img2,
+                           QPromise<ComparisonResult> &promise) const;
+  QString name() const { return "颜色直方图比较"; }
 
-  /**
-   * @brief 使用并查集的连通区域分析
-   */
-  class DisjointSet {
-    std::vector<int> parent;
-    std::vector<int> rank;
-  public:
-    DisjointSet(int size);
-    int find(int x);
-    void unite(int x, int y);
-  };
+private:
+  static constexpr int HIST_BINS = 256;
+  std::vector<int> computeHistogram(const QImage &img) const;
+  double compareHistograms(const std::vector<int> &hist1,
+                           const std::vector<int> &hist2) const;
 };

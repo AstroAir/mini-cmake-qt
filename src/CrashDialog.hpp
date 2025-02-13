@@ -1,24 +1,22 @@
 #pragma once
 
 #include <QDialog>
+#include <QFuture>
 #include <QNetworkReply>
 #include <QSysInfo>
-#include <QTextEdit>
-#include <QTimer>
-#include <QFuture>
-#include <QNetworkAccessManager>
 
-class QPushButton;
-class QLabel;
-class QProgressBar;
-class QToolButton;
+class ElaPushButton;
+class ElaText;
+class ElaProgressBar;
+class ElaToolButton;
+class ElaPlainTextEdit;
 
 class CrashDialog : public QDialog {
   Q_OBJECT
 public:
   explicit CrashDialog(const QString &log, QWidget *parent = nullptr);
-  static void setReportServer(const QString& url);
-  static void setCustomFields(const QMap<QString, QString>& fields);
+  static void setReportServer(const QString &url);
+  static void setCustomFields(const QMap<QString, QString> &fields);
 
 private slots:
   void onSendReport();
@@ -38,19 +36,19 @@ private:
   void setupAutoSave();
   void collectSystemInfoAsync();
 
-  QLabel *m_iconLabel;
-  QLabel *m_mainLabel;
-  QTextEdit *m_logView;
-  QTextEdit *m_detailInfo;
-  QPushButton *m_reportBtn;
-  QPushButton *m_closeBtn;
-  QPushButton *m_copyBtn;
-  QPushButton *m_saveBtn;
-  QToolButton *m_detailsBtn;
-  QProgressBar *m_progressBar;
+  ElaText *m_iconLabel;
+  ElaText *m_mainLabel;
+  ElaPlainTextEdit *m_logView;
+  ElaPlainTextEdit *m_detailInfo;
+  ElaPushButton *m_reportBtn;
+  ElaPushButton *m_closeBtn;
+  ElaPushButton *m_copyBtn;
+  ElaPushButton *m_saveBtn;
+  ElaToolButton *m_detailsBtn;
+  ElaProgressBar *m_progressBar;
   QString m_fullLog;
-  QTimer* m_autoSaveTimer;
-  QNetworkAccessManager* m_networkManager;
+  QTimer *m_autoSaveTimer;
+  QNetworkAccessManager *m_networkManager;
   QFuture<QString> m_systemInfoFuture;
   static QString s_reportServerUrl;
   static QMap<QString, QString> s_customFields;

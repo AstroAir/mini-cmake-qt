@@ -1,15 +1,20 @@
 #include "MetadataDialog.h"
+
 #include <QFileDialog>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QLineEdit>
 #include <QMessageBox>
-#include <QPushButton>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
-#include <spdlog/sinks/basic_file_sink.h> // 需要包含文件 sink
+#include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
+
+
+#include "ElaLineEdit.h"
+#include "ElaPushButton.h"
+#include "ElaTreeView.h"
 
 
 namespace {
@@ -48,7 +53,7 @@ MetadataDialog::MetadataDialog(const ImageMetadata &meta, QWidget *parent)
     QMessageBox::critical(this, "错误",
                           QString("加载元信息失败: %1").arg(e.what()));
     // 可选：清空 treeWidget 或其他处理
-    treeWidget->clear();
+    treeView->setModel(nullptr);
   }
   resize(800, 600);
   setWindowTitle("图像元信息");
@@ -58,20 +63,24 @@ void MetadataDialog::setupUI() {
   auto mainLayout = new QVBoxLayout(this);
 
   // 添加搜索框
-  searchBox = new QLineEdit(this);
+  searchBox = new ElaLineEdit(this);
   searchBox->setPlaceholderText("搜索元数据...");
   mainLayout->insertWidget(0, searchBox);
 
-  // 添加树形视图
-  treeWidget = new QTreeWidget;
-  treeWidget->setHeaderLabels({"属性", "值"});
-  treeWidget->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
-  mainLayout->addWidget(treeWidget);
+  // 创建树形视图和模型
+  treeView = new ElaTreeView(this);
+  model = new QStandardItemModel(this);
+  model->setHorizontalHeaderLabels({"属性", "值"});
+  treeView->setModel(model);
+  treeView->setAlternatingRowColors(true);
+  treeView->setEditTriggers(ElaTreeView::NoEditTriggers);
+  treeView->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+  mainLayout->addWidget(treeView);
 
   // 添加按钮布局
   auto buttonLayout = new QHBoxLayout;
-  editButton = new QPushButton("编辑自定义数据");
-  saveButton = new QPushButton("保存修改");
+  editButton = new ElaPushButton("编辑自定义数据");
+  saveButton = new ElaPushButton("保存修改");
   saveButton->setEnabled(false);
 
   buttonLayout->addWidget(editButton);
@@ -79,9 +88,9 @@ void MetadataDialog::setupUI() {
   buttonLayout->addStretch();
 
   // 添加新按钮
-  exportButton = new QPushButton("导出", this);
-  importButton = new QPushButton("导入", this);
-  resetButton = new QPushButton("重置", this);
+  exportButton = new ElaPushButton("导出", this);
+  importButton = new ElaPushButton("导入", this);
+  resetButton = new ElaPushButton("重置", this);
 
   buttonLayout->addWidget(exportButton);
   buttonLayout->addWidget(importButton);
@@ -95,17 +104,17 @@ void MetadataDialog::setupUI() {
   mainLayout->addWidget(jsonEditor);
 
   // 连接信号
-  connect(editButton, &QPushButton::clicked, this,
+  connect(editButton, &ElaPushButton::clicked, this,
           &MetadataDialog::editCustomData);
-  connect(saveButton, &QPushButton::clicked, this,
+  connect(saveButton, &ElaPushButton::clicked, this,
           &MetadataDialog::saveMetadata);
-  connect(searchBox, &QLineEdit::textChanged, this,
+  connect(searchBox, &ElaLineEdit::textChanged, this,
           &MetadataDialog::searchMetadata);
-  connect(exportButton, &QPushButton::clicked, this,
+  connect(exportButton, &ElaPushButton::clicked, this,
           &MetadataDialog::exportMetadata);
-  connect(importButton, &QPushButton::clicked, this,
+  connect(importButton, &ElaPushButton::clicked, this,
           &MetadataDialog::importMetadata);
-  connect(resetButton, &QPushButton::clicked, this,
+  connect(resetButton, &ElaPushButton::clicked, this,
           &MetadataDialog::resetMetadata);
 }
 
@@ -150,29 +159,45 @@ void MetadataDialog::updateCustomDataDisplay() {
 }
 
 void MetadataDialog::populateTree(const ImageMetadata &metadata) {
+  model->clear();
+  model->setHorizontalHeaderLabels({"属性", "值"});
+
   // 基本信息
-  auto basicInfo = new QTreeWidgetItem(treeWidget, {"基本信息"});
-  new QTreeWidgetItem(
-      basicInfo, {"文件路径", QString::fromStdString(metadata.path.string())});
-  new QTreeWidgetItem(
-      basicInfo,
-      {"尺寸",
-       QString("%1 x %2").arg(metadata.size.width).arg(metadata.size.height)});
-  new QTreeWidgetItem(basicInfo,
-                      {"通道数", QString::number(metadata.channels)});
-  new QTreeWidgetItem(
-      basicInfo, {"色彩空间", QString::fromStdString(metadata.color_space)});
+  auto basicInfo = new QStandardItem("基本信息");
+  model->appendRow(basicInfo);
+
+  auto pathItem = new QStandardItem("文件路径");
+  auto pathValue =
+      new QStandardItem(QString::fromStdString(metadata.path.string()));
+  basicInfo->appendRow({pathItem, pathValue});
+
+  auto sizeItem = new QStandardItem("尺寸");
+  auto sizeValue = new QStandardItem(
+      QString("%1 x %2").arg(metadata.size.width).arg(metadata.size.height));
+  basicInfo->appendRow({sizeItem, sizeValue});
+
+  auto channelsItem = new QStandardItem("通道数");
+  auto channelsValue = new QStandardItem(QString::number(metadata.channels));
+  basicInfo->appendRow({channelsItem, channelsValue});
+
+  auto colorSpaceItem = new QStandardItem("色彩空间");
+  auto colorSpaceValue =
+      new QStandardItem(QString::fromStdString(metadata.color_space));
+  basicInfo->appendRow({colorSpaceItem, colorSpaceValue});
 
   // 自定义标签
   if (!metadata.custom_data.empty()) {
-    auto customTags = new QTreeWidgetItem(treeWidget, {"自定义标签"});
+    auto customTags = new QStandardItem("自定义标签");
+    model->appendRow(customTags);
+
     for (const auto &[key, value] : metadata.custom_data.items()) {
-      new QTreeWidgetItem(customTags, {QString::fromStdString(key),
-                                       QString::fromStdString(value.dump())});
+      auto keyItem = new QStandardItem(QString::fromStdString(key));
+      auto valueItem = new QStandardItem(QString::fromStdString(value.dump()));
+      customTags->appendRow({keyItem, valueItem});
     }
   }
 
-  treeWidget->expandAll();
+  treeView->expandAll();
 }
 
 void MetadataDialog::exportMetadata() {
@@ -240,30 +265,46 @@ void MetadataDialog::searchMetadata() {
 }
 
 void MetadataDialog::filterTreeItems(const QString &searchText) {
-  for (int i = 0; i < treeWidget->topLevelItemCount(); ++i) {
-    QTreeWidgetItem *item = treeWidget->topLevelItem(i);
+  if (!model->invisibleRootItem())
+    return;
+
+  for (int i = 0; i < model->rowCount(); ++i) {
+    QStandardItem *item = model->item(i);
     filterTreeItem(item, searchText);
   }
 }
 
-bool MetadataDialog::filterTreeItem(QTreeWidgetItem *item,
+bool MetadataDialog::filterTreeItem(QStandardItem *item,
                                     const QString &searchText) {
+  if (!item)
+    return false;
   bool matched = false;
 
   // 检查当前项
-  if (searchText.isEmpty() || item->text(0).toLower().contains(searchText) ||
-      item->text(1).toLower().contains(searchText)) {
+  if (searchText.isEmpty()) {
     matched = true;
+  } else {
+    QStandardItem *valueItem = item->parent()
+                                   ? item->parent()->child(item->row(), 1)
+                                   : model->item(item->row(), 1);
+
+    matched = item->text().toLower().contains(searchText) ||
+              (valueItem && valueItem->text().toLower().contains(searchText));
   }
 
   // 递归检查子项
-  for (int i = 0; i < item->childCount(); ++i) {
+  for (int i = 0; i < item->rowCount(); ++i) {
     if (filterTreeItem(item->child(i), searchText)) {
       matched = true;
     }
   }
 
-  item->setHidden(!matched);
+  if (item->parent()) {
+    treeView->setRowHidden(item->row(), item->parent()->index(), !matched);
+  } else {
+    treeView->setRowHidden(item->row(), QModelIndex(), !matched);
+  }
+
   return matched;
 }
 

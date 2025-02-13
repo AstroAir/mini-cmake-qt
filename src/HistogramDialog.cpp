@@ -1,7 +1,17 @@
 #include "HistogramDialog.hpp"
 #include "image/Histogram.hpp"
+#include <QStringListModel>  // 添加头文件
+
 #include <QMessageBox>
-#include <qboxlayout.h>
+#include <QVBoxLayout>
+
+#include "ElaCheckBox.h"
+#include "ElaComboBox.h"
+#include "ElaProgressBar.h"
+#include "ElaPushButton.h"
+#include "ElaSpinBox.h"
+#include "ElaListView.h"
+
 
 HistogramDialog::HistogramDialog(QWidget *parent)
     : QDialog(parent), chart(new QChart), chartView(new QChartView(chart)) {
@@ -202,43 +212,15 @@ void HistogramDialog::setupUI() {
   toolBarLayout->setContentsMargins(0, 0, 0, 0);
   toolBarLayout->setSpacing(8);
 
-  // 优化工具栏控件样式
-  const QString buttonStyle = R"(
-        QPushButton {
-            background-color: #f0f0f0;
-            border: none;
-            border-radius: 4px;
-            padding: 6px 12px;
-            min-width: 80px;
-            color: #333333;
-        }
-        QPushButton:hover {
-            background-color: #e0e0e0;
-        }
-        QPushButton:pressed {
-            background-color: #d0d0d0;
-        }
-    )";
+  logScaleCheckBox = new ElaCheckBox("对数刻度", this);
 
-  logScaleCheckBox = new QCheckBox("对数刻度", this);
-  logScaleCheckBox->setStyleSheet("QCheckBox { padding: 4px; }");
-
-  binCountSpinner = new QSpinBox(this);
+  binCountSpinner = new ElaSpinBox(this);
   binCountSpinner->setRange(8, 512);
   binCountSpinner->setValue(256);
   binCountSpinner->setSingleStep(8);
-  binCountSpinner->setStyleSheet(R"(
-        QSpinBox {
-            padding: 4px;
-            border: 1px solid #cccccc;
-            border-radius: 4px;
-        }
-    )");
 
-  exportButton = new QPushButton("导出数据", this);
-  saveImageButton = new QPushButton("保存图像", this);
-  exportButton->setStyleSheet(buttonStyle);
-  saveImageButton->setStyleSheet(buttonStyle);
+  exportButton = new ElaPushButton("导出数据", this);
+  saveImageButton = new ElaPushButton("保存图像", this);
 
   toolBarLayout->addWidget(new QLabel("直方图区间:", this));
   toolBarLayout->addWidget(binCountSpinner);
@@ -262,20 +244,20 @@ void HistogramDialog::setupUI() {
   mainLayout->addWidget(chartView, 1); // 添加拉伸因子
 
   // 连接信号
-  connect(logScaleCheckBox, &QCheckBox::toggled, this,
+  connect(logScaleCheckBox, &ElaCheckBox::toggled, this,
           &HistogramDialog::toggleLogScale);
   connect(binCountSpinner, QOverload<int>::of(&QSpinBox::valueChanged), this,
           &HistogramDialog::changeBinCount);
-  connect(exportButton, &QPushButton::clicked, this,
+  connect(exportButton, &ElaPushButton::clicked, this,
           &HistogramDialog::exportHistogramData);
-  connect(saveImageButton, &QPushButton::clicked, this,
+  connect(saveImageButton, &ElaPushButton::clicked, this,
           &HistogramDialog::saveHistogramAsImage);
 
   // 添加状态栏
   auto statusBar = new QWidget(this);
   auto statusLayout = new QHBoxLayout(statusBar);
 
-  progressBar = new QProgressBar(this);
+  progressBar = new ElaProgressBar(this);
   progressBar->setMaximum(100);
   progressBar->setMinimum(0);
   progressBar->hide();
@@ -307,20 +289,23 @@ void HistogramDialog::setupAdvancedUI(QVBoxLayout *parent) {
   auto advancedLayout = new QVBoxLayout(advancedGroup);
 
   // 直方图均衡化预览
-  equalizationCheckBox = new QCheckBox("预览直方图均衡化效果", this);
+  equalizationCheckBox = new ElaCheckBox("预览直方图均衡化效果", this);
 
   // 导出格式选择
-  exportFormatCombo = new QComboBox(this);
+  exportFormatCombo = new ElaComboBox(this);
   exportFormatCombo->addItems(
       {"CSV", "Excel (XLSX)", "JSON", "XML", "PDF报告"});
 
   // 系列列表
-  seriesList = new QListWidget(this);
+  seriesList = new ElaListView(this);
+  seriesModel = new QStringListModel(this);
+  seriesList->setModel(seriesModel);
+  seriesList->setEditTriggers(QAbstractItemView::NoEditTriggers);
   seriesList->setSelectionMode(QAbstractItemView::SingleSelection);
 
   // 分析按钮
-  analyzeButton = new QPushButton("详细分析", this);
-  removeSeriesButton = new QPushButton("移除所选系列", this);
+  analyzeButton = new ElaPushButton("详细分析", this);
+  removeSeriesButton = new ElaPushButton("移除所选系列", this);
 
   advancedLayout->addWidget(equalizationCheckBox);
   advancedLayout->addWidget(new QLabel("导出格式:", this));
@@ -334,13 +319,13 @@ void HistogramDialog::setupAdvancedUI(QVBoxLayout *parent) {
   parent->addWidget(advancedGroup);
 
   // 连接信号
-  connect(equalizationCheckBox, &QCheckBox::toggled, this,
+  connect(equalizationCheckBox, &ElaCheckBox::toggled, this,
           &HistogramDialog::toggleEqualizationPreview);
-  connect(exportButton, &QPushButton::clicked, this,
+  connect(exportButton, &ElaPushButton::clicked, this,
           &HistogramDialog::exportToFormat);
-  connect(removeSeriesButton, &QPushButton::clicked, this,
+  connect(removeSeriesButton, &ElaPushButton::clicked, this,
           &HistogramDialog::removeSelectedSeries);
-  connect(analyzeButton, &QPushButton::clicked, this,
+  connect(analyzeButton, &ElaPushButton::clicked, this,
           &HistogramDialog::showHistogramAnalysis);
 }
 
@@ -403,7 +388,9 @@ void HistogramDialog::addHistogramSeries(const cv::Mat &image,
   }
 
   // 添加到列表
-  seriesList->addItem(name);
+  QStringList items = seriesModel->stringList();
+  items.append(name);
+  seriesModel->setStringList(items);
   updateChart(hists);
 }
 
@@ -637,7 +624,7 @@ void showImageHistogram(QWidget *parent, const cv::Mat &image) {
 
 void HistogramDialog::clearHistograms() {
   chart->removeAllSeries();
-  seriesList->clear();
+  seriesModel->setStringList(QStringList()); // 清空model
   statusLabel->setText("已清除所有直方图");
 }
 
@@ -754,8 +741,8 @@ void HistogramDialog::showAnalysisDialog() {
 
   layout->addWidget(textEdit);
 
-  QPushButton *closeButton = new QPushButton("关闭", &dialog);
-  connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+  ElaPushButton *closeButton = new ElaPushButton("关闭", &dialog);
+  connect(closeButton, &ElaPushButton::clicked, &dialog, &QDialog::accept);
   layout->addWidget(closeButton);
 
   dialog.exec();
@@ -778,15 +765,18 @@ void HistogramDialog::toggleEqualizationPreview() {
 }
 
 void HistogramDialog::removeSelectedSeries() {
-  QListWidgetItem *item = seriesList->currentItem();
-  if (!item)
+  QModelIndex currentIndex = seriesList->currentIndex();
+  if (!currentIndex.isValid())
     return;
 
-  QString serieName = item->text();
+  QString serieName = currentIndex.data().toString();
   for (QAbstractSeries *series : chart->series()) {
     if (series->name().contains(serieName)) {
       chart->removeSeries(series);
     }
   }
-  delete item;
+  
+  QStringList items = seriesModel->stringList();
+  items.removeAt(currentIndex.row());
+  seriesModel->setStringList(items);
 }

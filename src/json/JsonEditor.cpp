@@ -7,17 +7,19 @@
 #include <QFileDialog>
 #include <QHeaderView>
 #include <QLabel>
-#include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
-#include <QProgressBar>
-#include <QPushButton>
-#include <QStatusBar>
 #include <QStringListModel>
-#include <QToolBar>
-#include <QToolButton>
-#include <QTreeView>
 #include <QVBoxLayout>
+
+#include "ElaLineEdit.h"
+#include "ElaMenu.h"
+#include "ElaProgressBar.h"
+#include "ElaPushButton.h"
+#include "ElaStatusBar.h"
+#include "ElaToolBar.h"
+#include "ElaToolButton.h"
+#include "ElaTreeView.h"
 
 
 #include <fstream>
@@ -44,10 +46,10 @@ void JsonEditor::setupUI() {
   layout->setContentsMargins(2, 2, 2, 2);
   layout->setSpacing(2);
 
-  treeView = new QTreeView(this);
-  searchBar = new QLineEdit(this);
-  statusBar = new QStatusBar(this);
-  toolbar = new QToolBar(this);
+  treeView = new ElaTreeView(this);
+  searchBar = new ElaLineEdit(this);
+  statusBar = new ElaStatusBar(this);
+  toolbar = new ElaToolBar(this);
 
   layout->addWidget(toolbar);
   layout->addWidget(searchBar);
@@ -61,7 +63,7 @@ void JsonEditor::setupUI() {
   searchBar->setPlaceholderText(tr("搜索 (Ctrl+F)"));
 
   // 添加进度条
-  progressBar = new QProgressBar(this);
+  progressBar = new ElaProgressBar(this);
   progressBar->setVisible(false);
   statusBar->addWidget(progressBar);
 
@@ -90,23 +92,23 @@ void JsonEditor::setupToolbar() {
       toolbar->addAction(QIcon::fromTheme("document-save"), tr("保存"));
   toolbar->addSeparator();
 
-  themeBtn = new QPushButton(isDarkTheme ? "🌞" : "🌛", this);
+  themeBtn = new ElaPushButton(isDarkTheme ? "🌞" : "🌛", this);
   themeBtn->setFixedSize(24, 24);
   toolbar->addWidget(themeBtn);
 
-  auto *exportMenu = new QMenu(this);
+  auto *exportMenu = new ElaMenu(this);
   exportMenu->addAction("导出为 CSV", this, [this] { exportTo("csv"); });
   exportMenu->addAction("导出为 HTML", this, [this] { exportTo("html"); });
 
-  auto *exportBtn = new QToolButton(this);
+  auto *exportBtn = new ElaToolButton(this);
   exportBtn->setIcon(QIcon::fromTheme("document-export"));
   exportBtn->setMenu(exportMenu);
-  exportBtn->setPopupMode(QToolButton::InstantPopup);
+  exportBtn->setPopupMode(ElaToolButton::InstantPopup);
   toolbar->addWidget(exportBtn);
 
   connect(openAct, &QAction::triggered, this, &JsonEditor::openFile);
   connect(saveAct, &QAction::triggered, this, &JsonEditor::saveFile);
-  connect(themeBtn, &QPushButton::clicked, this, &JsonEditor::toggleTheme);
+  connect(themeBtn, &ElaPushButton::clicked, this, &JsonEditor::toggleTheme);
 }
 
 void JsonEditor::setupStatusBar() {
@@ -116,7 +118,8 @@ void JsonEditor::setupStatusBar() {
 }
 
 void JsonEditor::setupConnections() {
-  connect(searchBar, &QLineEdit::textChanged, this, &JsonEditor::filterContent);
+  connect(searchBar, &ElaLineEdit::textChanged, this,
+          &JsonEditor::filterContent);
   connect(&model, &JsonModel::dataChanged, this, &JsonEditor::updateStats);
 
   // 添加快捷键
@@ -166,7 +169,7 @@ void JsonEditor::applyStyle() {
         border: 1px solid #ccc;
         border-radius: 4px;
       }
-      QLineEdit {
+      ElaLineEdit {
         padding: 4px;
         border: 1px solid #ccc;
         border-radius: 4px;
@@ -175,7 +178,7 @@ void JsonEditor::applyStyle() {
         border: none;
         spacing: 4px;
       }
-      QPushButton {
+      ElaPushButton {
         border: 1px solid #ccc;
         border-radius: 4px;
         padding: 4px 8px;
@@ -331,8 +334,8 @@ void JsonEditor::setupCompleter() {
   completer->setModel(new QStringListModel(wordList, completer));
 
   // 将自动补全器设置给编辑器
-  QLineEdit *editor =
-      qobject_cast<QLineEdit *>(treeView->itemDelegate()->createEditor(
+  ElaLineEdit *editor =
+      qobject_cast<ElaLineEdit *>(treeView->itemDelegate()->createEditor(
           treeView, QStyleOptionViewItem(), QModelIndex()));
   if (editor) {
     editor->setCompleter(completer);
@@ -365,10 +368,10 @@ void JsonEditor::setupFindReplace() {
   findReplaceDialog = new QDialog(this);
   auto *layout = new QVBoxLayout(findReplaceDialog);
 
-  findEdit = new QLineEdit(findReplaceDialog);
-  replaceEdit = new QLineEdit(findReplaceDialog);
-  replaceBtn = new QPushButton(tr("替换"), findReplaceDialog);
-  replaceAllBtn = new QPushButton(tr("全部替换"), findReplaceDialog);
+  findEdit = new ElaLineEdit(findReplaceDialog);
+  replaceEdit = new ElaLineEdit(findReplaceDialog);
+  replaceBtn = new ElaPushButton(tr("替换"), findReplaceDialog);
+  replaceAllBtn = new ElaPushButton(tr("全部替换"), findReplaceDialog);
 
   // ...设置查找替换对话框UI...
 }

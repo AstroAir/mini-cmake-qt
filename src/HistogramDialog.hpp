@@ -1,11 +1,18 @@
 #ifndef HISTOGRAMDIALOG_H
 #define HISTOGRAMDIALOG_H
 
+#include "image/Histogram.hpp"
 #include <QDialog>
 #include <QtCharts/QtCharts>
 #include <opencv2/opencv.hpp>
 #include <vector>
-#include "image/Histogram.hpp"  // 添加头文件引用
+
+class ElaComboBox;
+class ElaPushButton;
+class ElaSpinBox;
+class ElaCheckBox;
+class ElaProgressBar;
+class ElaListView;
 
 class HistogramDialog : public QDialog {
   Q_OBJECT
@@ -14,9 +21,10 @@ public:
   void showHistogram(const cv::Mat &image, const HistogramConfig &config = {});
   void showChannelHistograms();
   void exportHistogramData();
-  void compareHistograms(const cv::Mat& image1, const cv::Mat& image2);
+  void compareHistograms(const cv::Mat &image1, const cv::Mat &image2);
   void showHistogramWithEqualization(const cv::Mat &image);
-  void performHistogramMatching(const cv::Mat &source, const cv::Mat &reference);
+  void performHistogramMatching(const cv::Mat &source,
+                                const cv::Mat &reference);
   void addHistogramSeries(const cv::Mat &image, const QString &name);
   void clearHistograms();
 
@@ -34,12 +42,12 @@ private:
   QVBoxLayout layout;
   QChart *chart;
   QChartView *chartView;
-  QCheckBox* logScaleCheckBox;
-  QSpinBox* binCountSpinner;
-  QPushButton* exportButton;
-  QPushButton* saveImageButton;
+  ElaCheckBox *logScaleCheckBox;
+  ElaSpinBox *binCountSpinner;
+  ElaPushButton *exportButton;
+  ElaPushButton *saveImageButton;
   cv::Mat currentImage;
-  HistogramConfig config;  // 添加配置成员
+  HistogramConfig config; // 添加配置成员
   std::vector<double> calculateMoments();
   void updateStatistics();
 
@@ -52,22 +60,23 @@ private:
   void updateStatisticsDisplay(const HistogramStats &stats);
 
   // 添加新的成员
-  QProgressBar* progressBar;
-  QLabel* statusLabel;
-  QTimer* updateTimer;
+  ElaProgressBar *progressBar;
+  QLabel *statusLabel;
+  QTimer *updateTimer;
   std::atomic<bool> processingFlag;
-  QComboBox* exportFormatCombo;
-  QCheckBox* equalizationCheckBox;
-  QListWidget* seriesList;
-  QPushButton* analyzeButton;
-  QPushButton* removeSeriesButton;
-    
+  ElaComboBox *exportFormatCombo;
+  ElaCheckBox *equalizationCheckBox;
+  ElaListView *seriesList;       // 改为
+  QStringListModel *seriesModel; // 添加model
+  ElaPushButton *analyzeButton;
+  ElaPushButton *removeSeriesButton;
+
   // 添加新的方法
-  void showError(const QString& message);
+  void showError(const QString &message);
   void showProgress(int value);
   void resetProgress();
   void enableControls(bool enable);
-  void processWithProgress(const std::function<void()>& task);
+  void processWithProgress(const std::function<void()> &task);
   void setupAdvancedUI(QVBoxLayout *parent);
   void updateEqualizationPreview();
   cv::Mat performEqualization(const cv::Mat &input);

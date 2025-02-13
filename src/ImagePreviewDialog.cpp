@@ -21,7 +21,13 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QtConcurrent>
-#include <qthreadpool.h>
+
+#include "ElaProgressBar.h"
+#include "ElaPushButton.h"
+#include "ElaScrollArea.h"
+#include "ElaSlider.h"
+#include "ElaStatusBar.h"
+#include "ElaToolBar.h"
 
 ImagePreviewDialog::ImagePreviewDialog(QWidget *parent)
     : QDialog(parent), currentZoom(1.0), currentRotation(0),
@@ -51,12 +57,12 @@ void ImagePreviewDialog::setupUI() {
   auto *infoLayout = new QHBoxLayout(infoBar);
   infoLayout->setContentsMargins(5, 5, 5, 5);
 
-  prevButton = new QPushButton("上一张");
-  nextButton = new QPushButton("下一张");
+  prevButton = new ElaPushButton("上一张");
+  nextButton = new ElaPushButton("下一张");
   countLabel = new QLabel;
   infoLabel = new QLabel;
   zoomLabel = new QLabel;
-  statusBar = new QStatusBar;
+  statusBar = new ElaStatusBar;
 
   infoLayout->addWidget(prevButton);
   infoLayout->addWidget(countLabel);
@@ -74,7 +80,7 @@ void ImagePreviewDialog::setupUI() {
   mainLayout->addWidget(infoBar);
 
   // 创建图片显示区域
-  scrollArea = new QScrollArea;
+  scrollArea = new ElaScrollArea;
   imageLabel = new QLabel;
   imageLabel->setAlignment(Qt::AlignCenter);
   scrollArea->setWidget(imageLabel);
@@ -82,9 +88,9 @@ void ImagePreviewDialog::setupUI() {
   mainLayout->addWidget(scrollArea);
 
   // 连接信号
-  connect(prevButton, &QPushButton::clicked, this,
+  connect(prevButton, &ElaPushButton::clicked, this,
           &ImagePreviewDialog::showPrevious);
-  connect(nextButton, &QPushButton::clicked, this,
+  connect(nextButton, &ElaPushButton::clicked, this,
           &ImagePreviewDialog::showNext);
 
   // 添加快捷键
@@ -111,7 +117,7 @@ void ImagePreviewDialog::setupUI() {
 }
 
 void ImagePreviewDialog::createToolBar() {
-  toolBar = new QToolBar;
+  toolBar = new ElaToolBar;
   toolBar->setIconSize(QSize(24, 24));
 
   auto addToolButton = [this](const QString &text, const QIcon &icon,
@@ -145,7 +151,7 @@ void ImagePreviewDialog::createToolBar() {
                 &ImagePreviewDialog::detectStars);
 
   // 添加缩放滑块
-  zoomSlider = new QSlider(Qt::Horizontal);
+  zoomSlider = new ElaSlider(Qt::Horizontal);
   zoomSlider->setRange(10, 400);
   zoomSlider->setValue(100);
   zoomSlider->setFixedWidth(100);
@@ -610,11 +616,11 @@ void ImagePreviewDialog::showStarDetectionResult() {
 }
 
 void ImagePreviewDialog::setupStarDetectionUI() {
-  showMetadataButton = new QPushButton("显示元信息");
-  detectStarsButton = new QPushButton("检测星点");
-  toggleAnnotationButton = new QPushButton("显示/隐藏标注");
+  showMetadataButton = new ElaPushButton("显示元信息");
+  detectStarsButton = new ElaPushButton("检测星点");
+  toggleAnnotationButton = new ElaPushButton("显示/隐藏标注");
   toggleAnnotationButton->setEnabled(false);
-  progressBar = new QProgressBar;
+  progressBar = new ElaProgressBar;
   progressBar->setVisible(false);
 
   toolBar->addSeparator();
@@ -623,11 +629,11 @@ void ImagePreviewDialog::setupStarDetectionUI() {
   toolBar->addWidget(toggleAnnotationButton);
   toolBar->addWidget(progressBar);
 
-  connect(showMetadataButton, &QPushButton::clicked, this,
+  connect(showMetadataButton, &ElaPushButton::clicked, this,
           &ImagePreviewDialog::showMetadataDialog);
-  connect(detectStarsButton, &QPushButton::clicked, this,
+  connect(detectStarsButton, &ElaPushButton::clicked, this,
           &ImagePreviewDialog::startStarDetection);
-  connect(toggleAnnotationButton, &QPushButton::clicked, this,
+  connect(toggleAnnotationButton, &ElaPushButton::clicked, this,
           &ImagePreviewDialog::toggleStarAnnotation);
 }
 
@@ -730,7 +736,7 @@ void ImagePreviewDialog::updateMetadata(const ImageMetadata &metadata) {
 }
 
 void ImagePreviewDialog::setupImageProcessingUI() {
-  imageProcessingToolBar = new QToolBar("图像处理", this);
+  imageProcessingToolBar = new ElaToolBar("图像处理", this);
 
   // 降噪相关按钮
   auto denoiseButton = imageProcessingToolBar->addAction("降噪");
@@ -886,7 +892,7 @@ void ImagePreviewDialog::applyChainFilters() {
 }
 
 void ImagePreviewDialog::setupImageProcessingToolBar() {
-  imageProcessingToolBar = new QToolBar("图像处理", this);
+  imageProcessingToolBar = new ElaToolBar("图像处理", this);
 
   autoStretchAction = imageProcessingToolBar->addAction(
       "自动拉伸", this, &ImagePreviewDialog::applyAutoStretch);
@@ -908,8 +914,8 @@ void ImagePreviewDialog::setupImageProcessingToolBar() {
       "显示直方图", this, &ImagePreviewDialog::showHistogram);
 }
 
-QToolBar *ImagePreviewDialog::createImageProcessingToolBar() {
-  auto toolbar = new QToolBar("图像处理", this);
+ElaToolBar *ImagePreviewDialog::createImageProcessingToolBar() {
+  auto toolbar = new ElaToolBar("图像处理", this);
 
   applyConvolutionAction = toolbar->addAction(
       "应用卷积", this, &ImagePreviewDialog::applyConvolution);
@@ -919,8 +925,8 @@ QToolBar *ImagePreviewDialog::createImageProcessingToolBar() {
   return toolbar;
 }
 
-QToolBar *ImagePreviewDialog::createExifToolBar() {
-  auto toolbar = new QToolBar("EXIF信息", this);
+ElaToolBar *ImagePreviewDialog::createExifToolBar() {
+  auto toolbar = new ElaToolBar("EXIF信息", this);
 
   showExifAction =
       toolbar->addAction("查看EXIF", this, &ImagePreviewDialog::showExifInfo);
@@ -1419,8 +1425,9 @@ void ImagePreviewDialog::showStatistics() {
     layout->addWidget(statsLabel);
 
     // 添加关闭按钮
-    auto closeButton = new QPushButton("关闭", &statsDialog);
-    connect(closeButton, &QPushButton::clicked, &statsDialog, &QDialog::accept);
+    auto closeButton = new ElaPushButton("关闭", &statsDialog);
+    connect(closeButton, &ElaPushButton::clicked, &statsDialog,
+            &QDialog::accept);
     layout->addWidget(closeButton);
 
     statsDialog.exec();
