@@ -1,23 +1,28 @@
 #include "CropWidget.h"
+#include "../HistogramDialog.hpp"
 #include "CropPreviewWidget.h"
 
-#include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
 #include <QMessageBox>
-#include <QPushButton>
+#include <QScrollArea>
 #include <QShortcut>
-#include <QSlider>
-#include <QSpinBox>
+#include <QSplitter>
 #include <QStackedWidget>
-#include <QStatusBar>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
+
+#include "ElaCheckBox.h"
+#include "ElaComboBox.h"
+#include "ElaDoubleSpinBox.h"
+#include "ElaPushButton.h"
+#include "ElaSlider.h"
+#include "ElaSpinBox.h"
+#include "ElaStatusBar.h"
+#include "ElaToolButton.h"
 
 CropWidget::CropWidget(QWidget *parent)
     : QWidget(parent), cropper(std::make_unique<ImageCropper>()) {
@@ -44,35 +49,50 @@ void CropWidget::setupLayout() {
   setupToolbar();
   mainLayout->addWidget(toolbarArea);
 
-  // 主操作区域
-  stackedWidget = new QStackedWidget;
-  auto mainArea = new QWidget;
-  auto mainAreaLayout = new QHBoxLayout(mainArea);
+  // 创建新的主布局
+  auto mainSplitter = new QSplitter(Qt::Horizontal);
 
-  // 左侧工具面板
-  auto toolPanel = new QWidget;
-  auto toolPanelLayout = new QVBoxLayout(toolPanel);
-  toolPanelLayout->addWidget(createStrategyGroup());
-  toolPanelLayout->addWidget(createAdjustmentGroup());
-  toolPanelLayout->addWidget(createPresetsGroup());
-  toolPanelLayout->addStretch();
-
-  // 设置左侧面板固定宽度
-  toolPanel->setFixedWidth(250);
-  mainAreaLayout->addWidget(toolPanel);
+  // 左侧工具面板使用滚动区域
+  auto toolScroll = new QScrollArea;
+  toolScroll->setWidget(createToolPanel());
+  toolScroll->setWidgetResizable(true);
+  toolScroll->setFixedWidth(280);
 
   // 中间预览区域
-  auto previewArea = new QWidget;
-  auto previewLayout = new QVBoxLayout(previewArea);
+  auto previewContainer = new QWidget;
+  auto previewLayout = new QVBoxLayout(previewContainer);
   previewWidget = new CropPreviewWidget(this);
   previewLayout->addWidget(previewWidget);
-  mainAreaLayout->addWidget(previewArea, 1);
 
-  stackedWidget->addWidget(mainArea);
-  mainLayout->addWidget(stackedWidget, 1);
+  // 添加显示直方图的按钮
+  auto histogramBtn = new ElaPushButton(tr("显示直方图"), this);
+  previewLayout->addWidget(histogramBtn);
+  connect(histogramBtn, &ElaPushButton::clicked, this,
+          &CropWidget::showHistogram);
+
+  // 右侧高级面板
+  advancedPanel = createAdvancedPanel();
+  advancedPanel->setVisible(false);
+
+  mainSplitter->addWidget(toolScroll);
+  mainSplitter->addWidget(previewContainer);
+  mainSplitter->addWidget(advancedPanel);
+
+  mainLayout->addWidget(mainSplitter);
+
+  // 添加网格显示
+  gridCheckBox = new ElaCheckBox(tr("显示网格"));
+  aspectLockCheckBox = new ElaCheckBox(tr("锁定比例"));
+
+  auto viewOptionsLayout = new QHBoxLayout;
+  viewOptionsLayout->addWidget(gridCheckBox);
+  viewOptionsLayout->addWidget(aspectLockCheckBox);
+  viewOptionsLayout->addStretch();
+
+  mainLayout->addLayout(viewOptionsLayout);
 
   // 底部状态栏和按钮区域
-  statusBar = new QStatusBar;
+  statusBar = new ElaStatusBar;
   statusBar->setSizeGripEnabled(false);
   mainLayout->addWidget(statusBar);
 
@@ -189,13 +209,13 @@ bool CropWidget::confirmOperation() {
 }
 
 void CropWidget::setupToolbar() {
-  rotateLeftBtn = new QToolButton(this);
-  rotateRightBtn = new QToolButton(this);
-  zoomInBtn = new QToolButton(this);
-  zoomOutBtn = new QToolButton(this);
-  fitViewBtn = new QToolButton(this);
-  resetBtn = new QToolButton(this);
-  autoDetectBtn = new QToolButton(this);
+  rotateLeftBtn = new ElaToolButton(this);
+  rotateRightBtn = new ElaToolButton(this);
+  zoomInBtn = new ElaToolButton(this);
+  zoomOutBtn = new ElaToolButton(this);
+  fitViewBtn = new ElaToolButton(this);
+  resetBtn = new ElaToolButton(this);
+  autoDetectBtn = new ElaToolButton(this);
 
   rotateLeftBtn->setIcon(QIcon::fromTheme("object-rotate-left"));
   rotateRightBtn->setIcon(QIcon::fromTheme("object-rotate-right"));
@@ -241,18 +261,18 @@ void CropWidget::connectSignals() {
   connect(previewWidget, &CropPreviewWidget::strategyChanged, this,
           &CropWidget::updatePreview);
 
-  connect(rotateLeftBtn, &QToolButton::clicked, this,
+  connect(rotateLeftBtn, &ElaToolButton::clicked, this,
           &CropWidget::onRotateLeft);
-  connect(rotateRightBtn, &QToolButton::clicked, this,
+  connect(rotateRightBtn, &ElaToolButton::clicked, this,
           &CropWidget::onRotateRight);
-  connect(zoomInBtn, &QToolButton::clicked, this, &CropWidget::onZoomIn);
-  connect(zoomOutBtn, &QToolButton::clicked, this, &CropWidget::onZoomOut);
-  connect(fitViewBtn, &QToolButton::clicked, this, &CropWidget::onFitToView);
-  connect(resetBtn, &QToolButton::clicked, this, &CropWidget::onResetCrop);
-  connect(autoDetectBtn, &QToolButton::clicked, this,
+  connect(zoomInBtn, &ElaToolButton::clicked, this, &CropWidget::onZoomIn);
+  connect(zoomOutBtn, &ElaToolButton::clicked, this, &CropWidget::onZoomOut);
+  connect(fitViewBtn, &ElaToolButton::clicked, this, &CropWidget::onFitToView);
+  connect(resetBtn, &ElaToolButton::clicked, this, &CropWidget::onResetCrop);
+  connect(autoDetectBtn, &ElaToolButton::clicked, this,
           &CropWidget::onAutoDetect);
 
-  connect(brightnessSlider, &QSlider::valueChanged, this, [this](int value) {
+  connect(brightnessSlider, &ElaSlider::valueChanged, this, [this](int value) {
     if (!sourceImage.empty()) {
       cv::Mat adjusted;
       sourceImage.convertTo(adjusted, -1, 1, value);
@@ -260,7 +280,7 @@ void CropWidget::connectSignals() {
     }
   });
 
-  connect(contrastSlider, &QSlider::valueChanged, this, [this](int value) {
+  connect(contrastSlider, &ElaSlider::valueChanged, this, [this](int value) {
     if (!sourceImage.empty()) {
       double factor = (100.0 + value) / 100.0;
       cv::Mat adjusted;
@@ -336,7 +356,8 @@ void CropWidget::onStrategyChanged(int index) {
                     cv::Size(sourceImage.cols / 2, sourceImage.rows / 2), 0.0};
     break;
   case 4: // 比例
-    strategy = RatioCrop{ratioSpin->value()};
+          // TODO: 添加自定义比例
+    // strategy.emplace<RatioCrop>(ratioSpin->value());
     break;
   }
   previewWidget->setStrategy(strategy);
@@ -470,7 +491,7 @@ QWidget *CropWidget::createStrategyGroup() {
   auto group = new QGroupBox(tr("裁切方式"));
   auto layout = new QVBoxLayout(group);
 
-  strategyCombo = new QComboBox;
+  strategyCombo = new ElaComboBox;
   strategyCombo->addItem(tr("矩形"));
   strategyCombo->addItem(tr("多边形"));
   strategyCombo->addItem(tr("圆形"));
@@ -478,7 +499,7 @@ QWidget *CropWidget::createStrategyGroup() {
   strategyCombo->addItem(tr("比例"));
 
   auto ratioLayout = new QHBoxLayout;
-  ratioSpin = new QDoubleSpinBox;
+  ratioSpin = new ElaDoubleSpinBox;
   ratioSpin->setRange(0.1, 10.0);
   ratioSpin->setValue(1.0);
   ratioSpin->setSingleStep(0.1);
@@ -486,7 +507,7 @@ QWidget *CropWidget::createStrategyGroup() {
   ratioLayout->addWidget(ratioSpin);
 
   auto marginLayout = new QHBoxLayout;
-  marginSpin = new QSpinBox;
+  marginSpin = new ElaSpinBox;
   marginSpin->setRange(0, 100);
   marginSpin->setValue(0);
   marginLayout->addWidget(new QLabel(tr("边距:")));
@@ -503,11 +524,11 @@ QWidget *CropWidget::createAdjustmentGroup() {
   auto group = new QGroupBox(tr("图像调整"));
   auto layout = new QVBoxLayout(group);
 
-  brightnessSlider = new QSlider(Qt::Horizontal);
+  brightnessSlider = new ElaSlider(Qt::Horizontal);
   brightnessSlider->setRange(-100, 100);
   brightnessSlider->setValue(0);
 
-  contrastSlider = new QSlider(Qt::Horizontal);
+  contrastSlider = new ElaSlider(Qt::Horizontal);
   contrastSlider->setRange(-100, 100);
   contrastSlider->setValue(0);
 
@@ -523,7 +544,7 @@ QWidget *CropWidget::createPresetsGroup() {
   auto group = new QGroupBox(tr("预设"));
   auto layout = new QVBoxLayout(group);
 
-  presetCombo = new QComboBox;
+  presetCombo = new ElaComboBox;
   auto btnLayout = new QHBoxLayout;
 
   auto loadBtn = new QPushButton(tr("加载"));
@@ -539,6 +560,73 @@ QWidget *CropWidget::createPresetsGroup() {
   connect(saveBtn, &QPushButton::clicked, this, &CropWidget::onSavePreset);
 
   return group;
+}
+
+QWidget *CropWidget::createToolPanel() {
+  auto toolPanel = new QWidget;
+  auto toolPanelLayout = new QVBoxLayout(toolPanel);
+  toolPanelLayout->addWidget(createStrategyGroup());
+  toolPanelLayout->addWidget(createAdjustmentGroup());
+  toolPanelLayout->addWidget(createPresetsGroup());
+  toolPanelLayout->addStretch();
+  return toolPanel;
+}
+
+QWidget *CropWidget::createAdvancedPanel() {
+  auto panel = new QWidget;
+  auto layout = new QVBoxLayout(panel);
+
+  // 添加自定义比例控制
+  auto ratioGroup = new QGroupBox(tr("自定义比例"));
+  auto ratioLayout = new QHBoxLayout;
+
+  customRatioWidth = new ElaDoubleSpinBox;
+  customRatioHeight = new ElaDoubleSpinBox;
+
+  customRatioWidth->setRange(0.1, 100);
+  customRatioHeight->setRange(0.1, 100);
+
+  ratioLayout->addWidget(new QLabel("宽:"));
+  ratioLayout->addWidget(customRatioWidth);
+  ratioLayout->addWidget(new QLabel("高:"));
+  ratioLayout->addWidget(customRatioHeight);
+
+  ratioGroup->setLayout(ratioLayout);
+  layout->addWidget(ratioGroup);
+
+  // 添加更多高级控件...
+  layout->addStretch();
+
+  return panel;
+}
+
+void CropWidget::setupTheme() {
+  createThemeMenu();
+
+  // 设置默认主题
+  setTheme("system");
+}
+
+void CropWidget::setTheme(const QString &themeName) {
+  currentTheme = themeName;
+
+  // 应用主题样式
+  if (themeName == "dark") {
+    setStyleSheet(R"(
+      QWidget { background-color: #2d2d2d; color: #ffffff; }
+      QPushButton { background-color: #404040; border-radius: 4px; padding: 6px; }
+      QPushButton:hover { background-color: #505050; }
+      QComboBox { background-color: #404040; border-radius: 4px; padding: 4px; }
+    )");
+  } else if (themeName == "light") {
+    setStyleSheet(R"(
+      QWidget { background-color: #f0f0f0; color: #000000; }
+      QPushButton { background-color: #e0e0e0; border-radius: 4px; padding: 6px; }
+      QPushButton:hover { background-color: #d0d0d0; }
+      QComboBox { background-color: #ffffff; border-radius: 4px; padding: 4px; }
+    )");
+  }
+  // ...其他主题样式
 }
 
 void CropWidget::onSavePreset() {
@@ -561,6 +649,21 @@ void CropWidget::onLoadPreset() {
 void CropWidget::updateUndoRedoState() {
   actions.undo->setEnabled(!undoStack.empty());
   actions.redo->setEnabled(!redoStack.empty());
+}
+
+void CropWidget::showHistogram() {
+  if (sourceImage.empty()) {
+    QMessageBox::warning(this, tr("警告"), tr("没有可用的图像"));
+    return;
+  }
+
+  // 延迟创建直方图对话框
+  if (!histogramDialog) {
+    histogramDialog = std::make_unique<HistogramDialog>(this);
+  }
+
+  // 显示当前图像的直方图
+  histogramDialog->showHistogram(sourceImage);
 }
 
 CropWidget::~CropWidget() = default;

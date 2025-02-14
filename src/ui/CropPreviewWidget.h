@@ -10,6 +10,8 @@ class CropPreviewWidget : public QWidget {
 public:
   explicit CropPreviewWidget(QWidget *parent = nullptr);
   void setImage(const cv::Mat &image);
+  void setImage(const QImage &image); // 新增QImage重载
+  void resetView();  // 新增resetView方法
   void setStrategy(const CropStrategy &strategy);
   CropStrategy getCurrentStrategy() const;
   void zoomIn();

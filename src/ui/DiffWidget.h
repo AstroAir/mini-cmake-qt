@@ -5,17 +5,21 @@
 #include <memory>
 
 class QLabel;
-class QPushButton;
-class QComboBox;
-class QSpinBox;
-class QDoubleSpinBox;
+class ElaPushButton;
+class ElaComboBox;
+class ElaSpinBox;
+class ElaDoubleSpinBox;
 class CropPreviewWidget;
-class QToolButton;
-class QSlider;
+class ElaToolButton;
+class ElaSlider;
 class QGroupBox;
-class QStatusBar;
-class QStackedWidget;
-class QProgressBar;
+class ElaStatusBar;
+class ElaStackedWidget;
+class ElaProgressBar;
+class QSplitter;
+class ElaDockWidget;
+class ElaMenu;
+class QAction;
 
 class DiffWidget : public QWidget {
   Q_OBJECT
@@ -28,11 +32,11 @@ public:
   void setTargetImage(const QImage &image);
   ComparisonResult getResult() const;
 
-  enum class DiffState {
-    Ready,
-    Processing,
-    Error
-  };
+  void loadSettings();
+  void saveSettings();
+  void exportReport(const QString &filePath);
+
+  enum class DiffState { Ready, Processing, Error };
 
 signals:
   void diffFinished(const ComparisonResult &result);
@@ -48,42 +52,59 @@ private slots:
   void onFitToView();
   void onReset();
   void onSaveResult();
-  void showError(const QString& message);
-  void updateStatus(const QString& message);
+  void showError(const QString &message);
+  void updateStatus(const QString &message);
   void setState(DiffState state);
   void updateProgress(int value);
+  void onSplitHorizontally();
+  void onSplitVertically();
+  void onToggleToolPanel();
+  void onToggleStatusBar();
+  void onCustomizeToolbar();
+  void onResetLayout();
+  void contextMenuEvent(QContextMenuEvent *event) override;
 
 private:
   void setupUi();
   void connectSignals();
   void setupToolbar();
   void setupShortcuts();
-  QWidget* createStrategyGroup();
-  QWidget* createParametersGroup();
-  QWidget* createPreviewGroup();
-  void handleException(const std::exception& e);
+  QWidget *createStrategyGroup();
+  QWidget *createParametersGroup();
+  QWidget *createPreviewGroup();
+  QWidget *createToolPanel();
+  void handleException(const std::exception &e);
   void setupLayout();
+  void createActions();
+  void createMenus();
+  void updateLayout(Qt::Orientation orientation);
+  void writeReportHeader(QTextStream &out);
+  void writeReportBody(QTextStream &out);
 
   CropPreviewWidget *sourcePreview;
   CropPreviewWidget *targetPreview;
   CropPreviewWidget *diffPreview;
-  
-  QComboBox *strategyCombo;
-  QPushButton *compareButton;
-  QPushButton *cancelButton;
-  QSpinBox *thresholdSpin;
-  QDoubleSpinBox *sensitivitySpin;
 
-  QToolButton *zoomInBtn;
-  QToolButton *zoomOutBtn;
-  QToolButton *fitViewBtn;
-  QToolButton *resetBtn;
-  QToolButton *saveBtn;
+  ElaComboBox *strategyCombo;
+  ElaPushButton *compareButton;
+  ElaPushButton *cancelButton;
+  ElaSpinBox *thresholdSpin;
+  ElaDoubleSpinBox *sensitivitySpin;
 
-  QProgressBar *progressBar;
-  QStatusBar *statusBar;
-  QStackedWidget *stackedWidget;
-  
+  ElaToolButton *zoomInBtn;
+  ElaToolButton *zoomOutBtn;
+  ElaToolButton *fitViewBtn;
+  ElaToolButton *resetBtn;
+  ElaToolButton *saveBtn;
+
+  ElaProgressBar *progressBar;
+  ElaStatusBar *statusBar;
+  ElaStackedWidget *stackedWidget;
+  QSplitter *mainSplitter;
+  ElaDockWidget *toolPanelDock;
+  QMenu *viewMenu;
+  QMenu *toolsMenu;
+
   DiffState currentState;
   QString lastError;
   QTimer *statusTimer;
@@ -101,4 +122,19 @@ private:
   } strategies;
 
   QFuture<ComparisonResult> currentOperation;
+
+  struct {
+    QAction *splitHorizontal;
+    QAction *splitVertical;
+    QAction *toggleToolPanel;
+    QAction *toggleStatusBar;
+    QAction *customizeToolbar;
+    QAction *resetLayout;
+    QAction *exportReport;
+  } actions;
+
+  // 保存布局状态
+  Qt::Orientation splitOrientation;
+  bool toolPanelVisible;
+  bool statusBarVisible;
 };

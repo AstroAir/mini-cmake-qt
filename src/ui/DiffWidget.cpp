@@ -1,8 +1,7 @@
 #include "DiffWidget.h"
 #include "CropPreviewWidget.h"
 
-#include <QComboBox>
-#include <QDoubleSpinBox>
+#include <QDateTime>
 #include <QFileDialog>
 #include <QFuture>
 #include <QGridLayout>
@@ -10,88 +9,109 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
-#include <QProgressBar>
-#include <QPushButton>
+#include <QSettings>
 #include <QShortcut>
-#include <QSpinBox>
-#include <QStackedWidget>
-#include <QStatusBar>
+#include <QSplitter>
+#include <QTextStream>
 #include <QTimer>
-#include <QToolButton>
 #include <QVBoxLayout>
 #include <QtConcurrent>
 
+#include "ElaComboBox.h"
+#include "ElaDockWidget.h"
+#include "ElaDoubleSpinBox.h"
+#include "ElaMenu.h"
+#include "ElaProgressBar.h"
+#include "ElaPushButton.h"
+#include "ElaSpinBox.h"
+#include "ElaStatusBar.h"
+#include "ElaToolButton.h"
+
 
 DiffWidget::DiffWidget(QWidget *parent)
-    : QWidget(parent), differ(std::make_unique<ImageDiff>()) {
+    : QWidget(parent), differ(std::make_unique<ImageDiff>()),
+      splitOrientation(Qt::Horizontal), toolPanelVisible(true),
+      statusBarVisible(true) {
+  createActions();
   setupUi();
   connectSignals();
   setupShortcuts();
+  createMenus();
+  loadSettings();
+}
+
+void DiffWidget::createActions() {
+  actions.splitHorizontal = new QAction(tr("水平分割"), this);
+  actions.splitVertical = new QAction(tr("垂直分割"), this);
+  actions.toggleToolPanel = new QAction(tr("显示工具面板"), this);
+  actions.toggleStatusBar = new QAction(tr("显示状态栏"), this);
+  actions.customizeToolbar = new QAction(tr("自定义工具栏"), this);
+  actions.resetLayout = new QAction(tr("重置布局"), this);
+  actions.exportReport = new QAction(tr("导出报告"), this);
+
+  actions.toggleToolPanel->setCheckable(true);
+  actions.toggleStatusBar->setCheckable(true);
+
+  // 设置快捷键
+  actions.splitHorizontal->setShortcut(QKeySequence("Ctrl+H"));
+  actions.splitVertical->setShortcut(QKeySequence("Ctrl+V"));
+  actions.toggleToolPanel->setShortcut(QKeySequence("Ctrl+T"));
+  actions.toggleStatusBar->setShortcut(QKeySequence("Ctrl+B"));
 }
 
 void DiffWidget::setupUi() { setupLayout(); }
 
 void DiffWidget::setupLayout() {
   auto mainLayout = new QVBoxLayout(this);
-  mainLayout->setSpacing(5);
-  mainLayout->setContentsMargins(5, 5, 5, 5);
+  mainLayout->setSpacing(0);
+  mainLayout->setContentsMargins(0, 0, 0, 0);
 
   // 工具栏
   auto toolbarArea = new QWidget;
   auto toolbarLayout = new QHBoxLayout(toolbarArea);
   toolbarLayout->setSpacing(2);
-  toolbarLayout->setContentsMargins(0, 0, 0, 0);
+  toolbarLayout->setContentsMargins(5, 2, 5, 2);
   setupToolbar();
   mainLayout->addWidget(toolbarArea);
 
-  // 主区域
-  stackedWidget = new QStackedWidget;
-  auto mainArea = new QWidget;
-  auto mainAreaLayout = new QHBoxLayout(mainArea);
+  // 主分割器
+  mainSplitter = new QSplitter(this);
+  mainSplitter->setHandleWidth(1);
 
-  // 左侧工具面板
-  auto toolPanel = new QWidget;
-  auto toolPanelLayout = new QVBoxLayout(toolPanel);
-  toolPanelLayout->addWidget(createStrategyGroup());
-  toolPanelLayout->addWidget(createParametersGroup());
-  toolPanelLayout->addStretch();
-
-  toolPanel->setFixedWidth(250);
-  mainAreaLayout->addWidget(toolPanel);
+  // 工具面板
+  toolPanelDock = new ElaDockWidget(tr("工具面板"), this);
+  toolPanelDock->setFeatures(ElaDockWidget::DockWidgetMovable |
+                             ElaDockWidget::DockWidgetFloatable);
+  toolPanelDock->setWidget(createToolPanel());
 
   // 预览区域
   auto previewArea = new QWidget;
-  auto previewLayout = new QGridLayout(previewArea);
+  auto previewLayout = new QHBoxLayout(previewArea);
+  previewLayout->setContentsMargins(0, 0, 0, 0);
 
   sourcePreview = new CropPreviewWidget(this);
   targetPreview = new CropPreviewWidget(this);
   diffPreview = new CropPreviewWidget(this);
 
-  previewLayout->addWidget(new QLabel(tr("源图像")), 0, 0);
-  previewLayout->addWidget(new QLabel(tr("目标图像")), 0, 1);
-  previewLayout->addWidget(new QLabel(tr("差异结果")), 0, 2);
-  previewLayout->addWidget(sourcePreview, 1, 0);
-  previewLayout->addWidget(targetPreview, 1, 1);
-  previewLayout->addWidget(diffPreview, 1, 2);
+  mainSplitter->addWidget(sourcePreview);
+  mainSplitter->addWidget(targetPreview);
+  mainSplitter->addWidget(diffPreview);
 
-  mainAreaLayout->addWidget(previewArea, 1);
-
-  stackedWidget->addWidget(mainArea);
-  mainLayout->addWidget(stackedWidget, 1);
+  mainLayout->addWidget(mainSplitter, 1);
 
   // 进度条
-  progressBar = new QProgressBar;
+  progressBar = new ElaProgressBar;
   progressBar->setVisible(false);
   mainLayout->addWidget(progressBar);
 
   // 状态栏和按钮
-  statusBar = new QStatusBar;
+  statusBar = new ElaStatusBar;
   statusBar->setSizeGripEnabled(false);
   mainLayout->addWidget(statusBar);
 
   auto buttonBox = new QHBoxLayout;
-  compareButton = new QPushButton(tr("比较"));
-  cancelButton = new QPushButton(tr("取消"));
+  compareButton = new ElaPushButton(tr("比较"));
+  cancelButton = new ElaPushButton(tr("取消"));
   buttonBox->addStretch();
   buttonBox->addWidget(compareButton);
   buttonBox->addWidget(cancelButton);
@@ -104,11 +124,11 @@ void DiffWidget::setupLayout() {
 }
 
 void DiffWidget::setupToolbar() {
-  zoomInBtn = new QToolButton(this);
-  zoomOutBtn = new QToolButton(this);
-  fitViewBtn = new QToolButton(this);
-  resetBtn = new QToolButton(this);
-  saveBtn = new QToolButton(this);
+  zoomInBtn = new ElaToolButton(this);
+  zoomOutBtn = new ElaToolButton(this);
+  fitViewBtn = new ElaToolButton(this);
+  resetBtn = new ElaToolButton(this);
+  saveBtn = new ElaToolButton(this);
 
   zoomInBtn->setIcon(QIcon::fromTheme("zoom-in"));
   zoomOutBtn->setIcon(QIcon::fromTheme("zoom-out"));
@@ -129,7 +149,7 @@ QWidget *DiffWidget::createStrategyGroup() {
   auto group = new QGroupBox(tr("比较策略"));
   auto layout = new QVBoxLayout(group);
 
-  strategyCombo = new QComboBox;
+  strategyCombo = new ElaComboBox;
   strategyCombo->addItem(tr("像素差异"));
   strategyCombo->addItem(tr("结构相似性"));
   strategyCombo->addItem(tr("感知哈希"));
@@ -144,11 +164,11 @@ QWidget *DiffWidget::createParametersGroup() {
   auto group = new QGroupBox(tr("参数设置"));
   auto layout = new QGridLayout(group);
 
-  thresholdSpin = new QSpinBox;
+  thresholdSpin = new ElaSpinBox;
   thresholdSpin->setRange(0, 255);
   thresholdSpin->setValue(32);
 
-  sensitivitySpin = new QDoubleSpinBox;
+  sensitivitySpin = new ElaDoubleSpinBox;
   sensitivitySpin->setRange(0.1, 10.0);
   sensitivitySpin->setValue(1.0);
   sensitivitySpin->setSingleStep(0.1);
@@ -181,38 +201,48 @@ void DiffWidget::connectSignals() {
   connect(cancelButton, &QPushButton::clicked, this,
           &DiffWidget::onCancelClicked);
 
-  connect(zoomInBtn, &QToolButton::clicked, this, &DiffWidget::onZoomIn);
-  connect(zoomOutBtn, &QToolButton::clicked, this, &DiffWidget::onZoomOut);
-  connect(fitViewBtn, &QToolButton::clicked, this, &DiffWidget::onFitToView);
-  connect(resetBtn, &QToolButton::clicked, this, &DiffWidget::onReset);
-  connect(saveBtn, &QToolButton::clicked, this, &DiffWidget::onSaveResult);
+  connect(zoomInBtn, &ElaToolButton::clicked, this, &DiffWidget::onZoomIn);
+  connect(zoomOutBtn, &ElaToolButton::clicked, this, &DiffWidget::onZoomOut);
+  connect(fitViewBtn, &ElaToolButton::clicked, this, &DiffWidget::onFitToView);
+  connect(resetBtn, &ElaToolButton::clicked, this, &DiffWidget::onReset);
+  connect(saveBtn, &ElaToolButton::clicked, this, &DiffWidget::onSaveResult);
 }
 
 void DiffWidget::setSourceImage(const QImage &image) {
   sourceImage = image;
-  sourcePreview->setQImage(image); // 假设我们重命名了方法来明确接受 QImage
+  sourcePreview->setImage(image); // 假设我们重命名了方法来明确接受 QImage
 }
 
 void DiffWidget::setTargetImage(const QImage &image) {
   targetImage = image;
-  targetPreview->setQImage(image);
+  targetPreview->setImage(image);
 }
 
 void DiffWidget::onStrategyChanged(int index) {
+  if (sourceImage.isNull() || targetImage.isNull()) {
+    return;
+  }
+
+  auto promise = std::make_shared<QPromise<ComparisonResult>>();
+
   try {
     ComparisonResult result;
     switch (index) {
     case 0:
-      result = strategies.pixel.compare(sourceImage, targetImage);
+      result =
+          differ->compare(sourceImage, targetImage, strategies.pixel, *promise);
       break;
     case 1:
-      result = strategies.ssim.compare(sourceImage, targetImage);
+      result =
+          differ->compare(sourceImage, targetImage, strategies.ssim, *promise);
       break;
     case 2:
-      result = strategies.perceptual.compare(sourceImage, targetImage);
+      result = differ->compare(sourceImage, targetImage, strategies.perceptual,
+                               *promise);
       break;
     case 3:
-      result = strategies.histogram.compare(sourceImage, targetImage);
+      result = differ->compare(sourceImage, targetImage, strategies.histogram,
+                               *promise);
       break;
     }
     currentResult = result;
@@ -231,32 +261,49 @@ void DiffWidget::onCompareClicked() {
   setState(DiffState::Processing);
   progressBar->setVisible(true);
 
-  currentOperation = QtConcurrent::run([this]() {
+  auto promise = std::make_shared<QPromise<ComparisonResult>>();
+  auto future = promise->future();
+
+  // 设置进度回调
+  auto watcher = new QFutureWatcher<ComparisonResult>(this);
+  watcher->setFuture(future);
+  connect(watcher, &QFutureWatcher<ComparisonResult>::progressValueChanged,
+          this, &DiffWidget::updateProgress);
+
+  currentOperation = QtConcurrent::run([this, promise]() {
     try {
-      ComparisonResult result;
       int strategy = strategyCombo->currentIndex();
+      ComparisonResult result;
+
       switch (strategy) {
       case 0:
-        result = strategies.pixel.compare(sourceImage, targetImage);
+        result = differ->compare(sourceImage, targetImage, strategies.pixel,
+                                 *promise);
         break;
       case 1:
-        result = strategies.ssim.compare(sourceImage, targetImage);
+        result = differ->compare(sourceImage, targetImage, strategies.ssim,
+                                 *promise);
         break;
       case 2:
-        result = strategies.perceptual.compare(sourceImage, targetImage);
+        result = differ->compare(sourceImage, targetImage,
+                                 strategies.perceptual, *promise);
         break;
       case 3:
-        result = strategies.histogram.compare(sourceImage, targetImage);
+        result = differ->compare(sourceImage, targetImage, strategies.histogram,
+                                 *promise);
         break;
       }
+      promise->addResult(result);
+      promise->finish();
       return result;
     } catch (const std::exception &e) {
+      promise->setException(std::current_exception());
       handleException(e);
       return ComparisonResult{};
     }
   });
 
-  currentOperation.then(this, [this](const ComparisonResult &result) {
+  future.then(this, [this](const ComparisonResult &result) {
     currentResult = result;
     updatePreview();
     setState(DiffState::Ready);
@@ -274,7 +321,7 @@ void DiffWidget::onCancelClicked() {
 
 void DiffWidget::updatePreview() {
   if (!currentResult.differenceImage.isNull()) {
-    diffPreview->setQImage(currentResult.differenceImage);
+    diffPreview->setImage(currentResult.differenceImage);
     updateStatus(
         tr("相似度: %1%").arg(currentResult.similarityPercent, 0, 'f', 2));
   }
@@ -362,5 +409,106 @@ void DiffWidget::onSaveResult() {
 }
 
 ComparisonResult DiffWidget::getResult() const { return currentResult; }
+
+void DiffWidget::createMenus() {
+  viewMenu = new ElaMenu(tr("视图"));
+  viewMenu->addAction(actions.splitHorizontal);
+  viewMenu->addAction(actions.splitVertical);
+  viewMenu->addSeparator();
+  viewMenu->addAction(actions.toggleToolPanel);
+  viewMenu->addAction(actions.toggleStatusBar);
+  viewMenu->addSeparator();
+  viewMenu->addAction(actions.resetLayout);
+
+  toolsMenu = new QMenu(tr("工具"));
+  toolsMenu->addAction(actions.customizeToolbar);
+  toolsMenu->addAction(actions.exportReport);
+}
+
+void DiffWidget::updateLayout(Qt::Orientation orientation) {
+  splitOrientation = orientation;
+  mainSplitter->setOrientation(orientation);
+}
+
+void DiffWidget::loadSettings() {
+  QSettings settings;
+  settings.beginGroup("DiffWidget");
+
+  splitOrientation = static_cast<Qt::Orientation>(
+      settings.value("SplitOrientation", Qt::Horizontal).toInt());
+  toolPanelVisible = settings.value("ToolPanelVisible", true).toBool();
+  statusBarVisible = settings.value("StatusBarVisible", true).toBool();
+
+  updateLayout(splitOrientation);
+  toolPanelDock->setVisible(toolPanelVisible);
+  statusBar->setVisible(statusBarVisible);
+
+  settings.endGroup();
+}
+
+void DiffWidget::saveSettings() {
+  QSettings settings;
+  settings.beginGroup("DiffWidget");
+
+  settings.setValue("SplitOrientation", static_cast<int>(splitOrientation));
+  settings.setValue("ToolPanelVisible", toolPanelVisible);
+  settings.setValue("StatusBarVisible", statusBarVisible);
+
+  settings.endGroup();
+}
+
+void DiffWidget::exportReport(const QString &filePath) {
+  QFile file(filePath);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    showError(tr("无法创建报告文件"));
+    return;
+  }
+
+  QTextStream out(&file);
+  writeReportHeader(out);
+  writeReportBody(out);
+}
+
+void DiffWidget::writeReportHeader(QTextStream &out) {
+  out << "# 图像比较报告\n\n";
+  out << "生成时间: " << QDateTime::currentDateTime().toString() << "\n\n";
+  out << "## 比较参数\n\n";
+  out << "- 比较策略: " << strategyCombo->currentText() << "\n";
+  out << "- 阈值: " << thresholdSpin->value() << "\n";
+  out << "- 灵敏度: " << sensitivitySpin->value() << "\n\n";
+}
+
+void DiffWidget::writeReportBody(QTextStream &out) {
+  out << "## 比较结果\n\n";
+  out << "- 相似度: "
+      << QString::number(currentResult.similarityPercent, 'f', 2) << "%\n";
+  out << "- 处理时间: " << currentResult.duration.count() << "ms\n";
+  out << "- 差异区域数量: " << currentResult.differenceRegions.size() << "\n\n";
+
+  out << "### 差异区域详情\n\n";
+  for (const auto &region : currentResult.differenceRegions) {
+    out << "- 位置: (" << region.x() << ", " << region.y() << "), ";
+    out << "大小: " << region.width() << "x" << region.height() << "\n";
+  }
+}
+
+QWidget *DiffWidget::createToolPanel() {
+  auto panel = new QWidget;
+  auto layout = new QVBoxLayout(panel);
+  layout->setContentsMargins(2, 2, 2, 2);
+  layout->setSpacing(4);
+
+  // 添加策略组和参数组
+  layout->addWidget(createStrategyGroup());
+  layout->addWidget(createParametersGroup());
+
+  // 添加伸缩项以便工具面板能够合理布局
+  layout->addStretch();
+
+  panel->setMinimumWidth(250);
+  panel->setMaximumWidth(400);
+
+  return panel;
+}
 
 DiffWidget::~DiffWidget() = default;

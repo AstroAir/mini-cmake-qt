@@ -8,7 +8,6 @@
 #include <variant>
 #include <vector>
 
-
 #ifdef HAVE_OPENCV_CUDA
 #include <opencv2/cudafilters.hpp>
 #include <opencv2/cudaimgproc.hpp>
@@ -25,14 +24,19 @@ struct EllipseCrop {
   double angle;
 };
 
+// 按比例裁剪的参数结构体
 struct RatioCrop {
-  double ratio;
-  bool keepLargest = true;
+  double ratio; // 期望的宽高比 (width/height)
+
+  RatioCrop(double r) : ratio(r) {
+    if (ratio <= 0) {
+      throw std::invalid_argument("比例必须大于0");
+    }
+  }
 };
 
-using CropStrategy = std::variant<cv::Rect, std::vector<cv::Point>,
-                                  std::tuple<cv::Point2f, float, float>,
-                                  CircleCrop, EllipseCrop, RatioCrop>;
+using CropStrategy =
+    std::variant<cv::Rect, CircleCrop, EllipseCrop, std::vector<cv::Point>>;
 
 struct AdaptiveParams {
   double cannyThreshold1 = 50;

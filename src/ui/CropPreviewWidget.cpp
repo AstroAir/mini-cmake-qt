@@ -50,6 +50,30 @@ void CropPreviewWidget::setImage(const cv::Mat &img) {
   update();
 }
 
+void CropPreviewWidget::setImage(const QImage &image) {
+    qtImage = image;
+    // 将QImage转换为cv::Mat
+    if (image.format() == QImage::Format_RGB32 || 
+        image.format() == QImage::Format_ARGB32 ||
+        image.format() == QImage::Format_ARGB32_Premultiplied) {
+        cv::Mat temp(image.height(), image.width(), CV_8UC4, (void*)image.constBits(), image.bytesPerLine());
+        cv::cvtColor(temp, this->image, cv::COLOR_BGRA2BGR);
+    } else {
+        QImage converted = image.convertToFormat(QImage::Format_RGB888);
+        cv::Mat temp(converted.height(), converted.width(), CV_8UC3, (void*)converted.constBits(), converted.bytesPerLine());
+        cv::cvtColor(temp, this->image, cv::COLOR_RGB2BGR);
+    }
+    update();
+}
+
+void CropPreviewWidget::resetView() {
+    scale = 1.0f;
+    zoomLevel = 1.0f;
+    viewCenter = QPointF(0, 0);
+    update();
+    emit zoomChanged(zoomLevel);
+}
+
 void CropPreviewWidget::setStrategy(const CropStrategy &strategy) {
   currentStrategy = strategy;
   update();
@@ -425,4 +449,100 @@ CropPreviewWidget::hitTest(const QPoint &pos) const {
 
 QRect CropPreviewWidget::getControlRect(const QPoint &pt, int size) const {
   return QRect(pt.x() - size / 2, pt.y() - size / 2, size, size);
+}
+
+void CropPreviewWidget::enterEvent(QEnterEvent *event) {
+  isHovered = true;
+  updateCursor();
+  QWidget::enterEvent(event);
+}
+
+void CropPreviewWidget::leaveEvent(QEvent *event) {
+  isHovered = false;
+  updateCursor();
+  QWidget::leaveEvent(event);
+}
+
+void CropPreviewWidget::updateEllipseDrag(EllipseCrop &ellipse, const cv::Point &pos) {
+  QPoint delta = QPoint(pos.x * scale, pos.y * scale) - lastPos.toPoint();
+
+  if (isRotating) {
+    // 处理旋转
+    QPointF currentPos(pos.x * scale, pos.y * scale);
+    QLineF line(rotationCenter, currentPos);
+    double currentAngle = line.angle();
+    double angleDelta = currentAngle - startAngle;
+    ellipse.angle = std::fmod(ellipse.angle + angleDelta + 360.0, 360.0);
+    startAngle = currentAngle;
+  } else if (activeControl != ControlPoint::None) {
+    // 调整大小
+    float dx = delta.x() / scale;
+    float dy = delta.y() / scale;
+    
+    switch (activeControl) {
+      case ControlPoint::Right:
+        ellipse.axes.width += dx;
+        break;
+      case ControlPoint::Bottom:
+        ellipse.axes.height += dy;
+        break;
+      default:
+        break;
+    }
+    
+    // 确保最小尺寸
+    ellipse.axes.width = std::max(ellipse.axes.width, 10);
+    ellipse.axes.height = std::max(ellipse.axes.height, 10);
+  } else {
+    // 移动中心点
+    ellipse.center.x += delta.x() / scale;
+    ellipse.center.y += delta.y() / scale;
+
+    // 限制在图像范围内
+    ellipse.center.x = std::clamp(ellipse.center.x, 
+      int(ellipse.axes.width), image.cols - int(ellipse.axes.width));
+    ellipse.center.y = std::clamp(ellipse.center.y, 
+      int(ellipse.axes.height), image.rows - int(ellipse.axes.height));
+  }
+}
+
+void CropPreviewWidget::updatePolygonDrag(std::vector<cv::Point> &points, const cv::Point &pos) {
+  QPoint delta = QPoint(pos.x * scale, pos.y * scale) - lastPos.toPoint();
+  
+  if (activePoint >= 0 && activePoint < points.size()) {
+    // 移动选中的点
+    points[activePoint].x += delta.x() / scale;
+    points[activePoint].y += delta.y() / scale;
+    
+    // 限制在图像范围内
+    points[activePoint].x = std::clamp(points[activePoint].x, 0, image.cols);
+    points[activePoint].y = std::clamp(points[activePoint].y, 0, image.rows);
+  } else {
+    // 移动整个多边形
+    for (auto& point : points) {
+      point.x += delta.x() / scale;
+      point.y += delta.y() / scale;
+    }
+    
+    // 检查边界
+    int minX = std::numeric_limits<int>::max();
+    int minY = std::numeric_limits<int>::max();
+    int maxX = std::numeric_limits<int>::min();
+    int maxY = std::numeric_limits<int>::min();
+    
+    for (const auto& point : points) {
+      minX = std::min(minX, point.x);
+      minY = std::min(minY, point.y);
+      maxX = std::max(maxX, point.x);
+      maxY = std::max(maxY, point.y);
+    }
+    
+    if (minX < 0 || minY < 0 || maxX >= image.cols || maxY >= image.rows) {
+      // 如果超出边界，恢复移动
+      for (auto& point : points) {
+        point.x -= delta.x() / scale;
+        point.y -= delta.y() / scale;
+      }
+    }
+  }
 }

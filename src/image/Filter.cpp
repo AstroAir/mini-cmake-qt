@@ -1,55 +1,15 @@
 #include "Filter.hpp"
+#include "ImageUtils.hpp"
+#include <opencv2/core/ocl.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
-#include <opencv2/core/ocl.hpp>
+
 
 // Setup a logger for filter operations.
 namespace {
 std::shared_ptr<spdlog::logger> filterLogger =
     spdlog::basic_logger_mt("FilterLogger", "logs/filter.log");
 } // namespace
-
-// Image conversion utility implementations.
-namespace ImageUtils {
-
-cv::Mat qtImageToMat(const QImage &img) {
-  try {
-    return cv::Mat(img.height(), img.width(),
-                   img.format() == QImage::Format_RGB32 ? CV_8UC4 : CV_8UC3,
-                   const_cast<uchar *>(img.bits()),
-                   static_cast<size_t>(img.bytesPerLine()));
-  } catch (...) {
-    filterLogger->error("Image conversion failed");
-    throw ImageFilterException("Image conversion failed");
-  }
-}
-
-QImage matToQtImage(const cv::Mat &mat) {
-  try {
-    return QImage(mat.data, mat.cols, mat.rows, mat.step,
-                  mat.channels() == 4 ? QImage::Format_RGB32
-                                      : QImage::Format_RGB888)
-        .copy();
-  } catch (...) {
-    filterLogger->error("Mat to QImage conversion failed");
-    throw ImageFilterException("Mat to QImage conversion failed");
-  }
-}
-
-cv::UMat qtImageToUMat(const QImage &img) {
-  cv::Mat mat = qtImageToMat(img);
-  cv::UMat umat;
-  mat.copyTo(umat);
-  return umat;
-}
-
-QImage umatToQtImage(const cv::UMat &umat) {
-  cv::Mat mat;
-  umat.copyTo(mat);
-  return matToQtImage(mat);
-}
-
-} // namespace ImageUtils
 
 // ImageFilterProcessor implementation using UMat.
 ImageFilterProcessor::ImageFilterProcessor(
@@ -145,21 +105,20 @@ BilateralFilter::BilateralFilter(int diameter, double sigmaColor,
 
 void BilateralFilter::apply(cv::UMat &image) {
   validateImage(image);
-  
+
   // 使用OpenCV的GPU加速
-  if(cv::ocl::useOpenCL()) {
+  if (cv::ocl::useOpenCL()) {
     cv::UMat result;
     cv::bilateralFilter(image, result, diameter_, sigmaColor_, sigmaSpace_);
     result.copyTo(image);
   } else {
     // 分块处理以提高缓存利用率
     const int blockSize = 32;
-    cv::parallel_for_(cv::Range(0, image.rows), [&](const cv::Range& range) {
-      for(int y = range.start; y < range.end; y += blockSize) {
-        for(int x = 0; x < image.cols; x += blockSize) {
-          cv::Rect block(x, y, 
-                        std::min(blockSize, image.cols - x),
-                        std::min(blockSize, image.rows - y));
+    cv::parallel_for_(cv::Range(0, image.rows), [&](const cv::Range &range) {
+      for (int y = range.start; y < range.end; y += blockSize) {
+        for (int x = 0; x < image.cols; x += blockSize) {
+          cv::Rect block(x, y, std::min(blockSize, image.cols - x),
+                         std::min(blockSize, image.rows - y));
           cv::UMat roi = image(block);
           cv::bilateralFilter(roi, roi, diameter_, sigmaColor_, sigmaSpace_);
         }
@@ -189,27 +148,27 @@ SharpenFilter::SharpenFilter(double strength) : strength_(strength) {}
 
 void SharpenFilter::apply(cv::UMat &image) {
   validateImage(image);
-  
+
   // 使用OpenCV内置的SIMD优化
   cv::UMat blurred;
   {
     cv::UMat tmp;
     // 分离高斯核以加快计算
-    cv::GaussianBlur(image, tmp, cv::Size(3,1), 3);
-    cv::GaussianBlur(tmp, blurred, cv::Size(1,3), 3);
+    cv::GaussianBlur(image, tmp, cv::Size(3, 1), 3);
+    cv::GaussianBlur(tmp, blurred, cv::Size(1, 3), 3);
   }
-  
+
   // 使用查找表优化权重计算
   static const cv::UMat weights = [this] {
     cv::Mat w(256, 1, CV_32F);
-    for(int i = 0; i < 256; i++) {
-      w.at<float>(i) = std::pow(i/255.0f, strength_);
+    for (int i = 0; i < 256; i++) {
+      w.at<float>(i) = std::pow(i / 255.0f, strength_);
     }
     cv::UMat umat;
     w.copyTo(umat);
     return umat;
   }();
-  
+
   cv::UMat enhanced;
   cv::LUT(image, weights, enhanced);
   cv::addWeighted(image, 1.0 + strength_, blurred, -strength_, 0, image);

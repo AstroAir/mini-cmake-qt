@@ -190,13 +190,4 @@ private:
   int blurKernelSize_;
 };
 
-// Utility functions for converting between QImage and cv::Mat / cv::UMat.
-namespace ImageUtils {
-cv::Mat qtImageToMat(const QImage &img);
-QImage matToQtImage(const cv::Mat &mat);
-
-cv::UMat qtImageToUMat(const QImage &img);
-QImage umatToQtImage(const cv::UMat &umat);
-} // namespace ImageUtils
-
 #endif // FILTER_HPP
