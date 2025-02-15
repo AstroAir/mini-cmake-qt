@@ -1,3 +1,5 @@
+#include "Channels.hpp"
+
 #include <bitset>
 #include <numeric>
 #include <omp.h>
@@ -6,51 +8,46 @@
 #include <stdexcept>
 #include <vector>
 
-
 using namespace cv;
 using namespace std;
 
-// 优化的二进制流转换器
-class BinaryConverter {
-public:
-  static vector<bool> stringToBits(const string &message,
-                                   bool addTerminator = true) {
-    vector<bool> bits;
-    bits.reserve(message.length() * 8 + (addTerminator ? 8 : 0));
+vector<bool> BinaryConverter::stringToBits(const string &message,
+                                           bool addTerminator) {
+  vector<bool> bits;
+  bits.reserve(message.length() * 8 + (addTerminator ? 8 : 0));
 
-    for (char c : message) {
-      bitset<8> bs(c);
-      for (int i = 7; i >= 0; --i) {
-        bits.push_back(bs[i]);
-      }
+  for (char c : message) {
+    bitset<8> bs(c);
+    for (int i = 7; i >= 0; --i) {
+      bits.push_back(bs[i]);
     }
-
-    if (addTerminator) {
-      bits.insert(bits.end(), 8, false); // 添加终止符
-    }
-    return bits;
   }
 
-  static string bitsToString(const vector<bool> &bits) {
-    string result;
-    result.reserve(bits.size() / 8);
-
-    for (size_t i = 0; i < bits.size(); i += 8) {
-      if (i + 8 > bits.size())
-        break;
-
-      char c = 0;
-      for (int j = 0; j < 8; ++j) {
-        c |= bits[i + j] << (7 - j);
-      }
-
-      if (c == '\0')
-        break;
-      result += c;
-    }
-    return result;
+  if (addTerminator) {
+    bits.insert(bits.end(), 8, false); // 添加终止符
   }
-};
+  return bits;
+}
+
+string BinaryConverter::bitsToString(const vector<bool> &bits) {
+  string result;
+  result.reserve(bits.size() / 8);
+
+  for (size_t i = 0; i < bits.size(); i += 8) {
+    if (i + 8 > bits.size())
+      break;
+
+    char c = 0;
+    for (int j = 0; j < 8; ++j) {
+      c |= bits[i + j] << (7 - j);
+    }
+
+    if (c == '\0')
+      break;
+    result += c;
+  }
+  return result;
+}
 
 // 优化后的Alpha通道隐写嵌入函数
 void alpha_channel_hide(Mat &image, const string &message) {
@@ -142,16 +139,6 @@ void analyze_channels(const Mat &image) {
   });
   waitKey(0);
 }
-
-// 通道隐写配置结构
-struct ChannelConfig {
-  bool useBlue = true;    // 使用蓝色通道
-  bool useGreen = true;   // 使用绿色通道
-  bool useRed = true;     // 使用红色通道
-  bool useAlpha = true;   // 使用Alpha通道
-  int bitsPerChannel = 1; // 每个通道使用的位数
-  double scrambleKey = 0; // 通道混淆密钥
-};
 
 // 计算图像可隐写容量
 size_t calculate_capacity(const Mat &image, const ChannelConfig &config) {
@@ -262,14 +249,6 @@ string multi_channel_extract(const Mat &image, size_t messageLength,
 
   return BinaryConverter::bitsToString(bits);
 }
-
-// 通道质量分析
-struct ChannelQuality {
-  double entropy;     // 信息熵
-  double snr;         // 信噪比
-  double variance;    // 方差
-  double correlation; // 相邻像素相关性
-};
 
 ChannelQuality analyze_channel_quality(const Mat &channel) {
   ChannelQuality quality;

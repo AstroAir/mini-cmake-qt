@@ -1,7 +1,7 @@
-#include <chrono>
+#include "MSB.hpp"
+
 #include <opencv2/opencv.hpp>
 #include <vector>
-
 
 using namespace cv;
 using namespace std;
@@ -45,7 +45,7 @@ Mat extractMSBPlane(const Mat &image) {
       uchar *dst = msbPlane.ptr<uchar>(r);
       int c = 0;
 
-// SIMD向量化处理
+      // SIMD向量化处理
 #if CV_SIMD128
       v_uint8x16 vmask = v_setall_u8(msbMask);
       for (; c <= width - SIMD_VECTOR_LENGTH; c += SIMD_VECTOR_LENGTH) {
@@ -84,91 +84,57 @@ void modifyMSB(Mat &image, bool setToOne) {
     }
   });
 }
+Mat MSBCompressor::compress(const Mat &image, int keepBits) {
+  CV_Assert(keepBits >= 1 && keepBits <= 8);
 
-// 优化后的MSB压缩函数
-class MSBCompressor {
-public:
-  static Mat compress(const Mat &image, int keepBits = 4) {
-    CV_Assert(keepBits >= 1 && keepBits <= 8);
+  Mat compressed;
+  image.copyTo(compressed);
 
-    Mat compressed;
-    image.copyTo(compressed);
+  const uchar mask = 0xFF << (8 - keepBits);
+  const int total =
+      static_cast<int>(compressed.total() * compressed.channels());
+  const int chunk_size = 4096;
 
-    const uchar mask = 0xFF << (8 - keepBits);
-    const int total =
-        static_cast<int>(compressed.total() * compressed.channels());
-    const int chunk_size = 4096;
+  parallel_for_(Range(0, (total + chunk_size - 1) / chunk_size),
+                [&](const Range &range) {
+                  for (int chunk = range.start; chunk < range.end; chunk++) {
+                    const int start = chunk * chunk_size;
+                    const int end = min(start + chunk_size, total);
 
-    parallel_for_(Range(0, (total + chunk_size - 1) / chunk_size),
-                  [&](const Range &range) {
-                    for (int chunk = range.start; chunk < range.end; chunk++) {
-                      const int start = chunk * chunk_size;
-                      const int end = min(start + chunk_size, total);
-
-                      uchar *data = compressed.ptr<uchar>() + start;
+                    uchar *data = compressed.ptr<uchar>() + start;
 #if CV_SIMD128
-                      v_uint8x16 vmask = v_setall_u8(mask);
+                    v_uint8x16 vmask = v_setall_u8(mask);
 
-                      for (int i = 0; i < (end - start - SIMD_VECTOR_LENGTH);
-                           i += SIMD_VECTOR_LENGTH) {
-                        v_uint8x16 v = v_load(data + i);
-                        v_store(data + i, v_and(v, vmask));
-                      }
+                    for (int i = 0; i < (end - start - SIMD_VECTOR_LENGTH);
+                         i += SIMD_VECTOR_LENGTH) {
+                      v_uint8x16 v = v_load(data + i);
+                      v_store(data + i, v_and(v, vmask));
+                    }
 #endif
 
-                      // 处理剩余像素
-                      for (int i = ((end - start) / SIMD_VECTOR_LENGTH) *
-                                   SIMD_VECTOR_LENGTH;
-                           i < end - start; i++) {
-                        data[i] &= mask;
-                      }
+                    // 处理剩余像素
+                    for (int i = ((end - start) / SIMD_VECTOR_LENGTH) *
+                                 SIMD_VECTOR_LENGTH;
+                         i < end - start; i++) {
+                      data[i] &= mask;
                     }
-                  });
+                  }
+                });
 
-    return compressed;
-  }
+  return compressed;
+}
 
-  // 批处理接口
-  static vector<Mat> compressBatch(const vector<Mat> &images,
-                                   int keepBits = 4) {
-    vector<Mat> results(images.size());
+// 批处理接口
+vector<Mat> MSBCompressor::compressBatch(const vector<Mat> &images,
+                                         int keepBits) {
+  vector<Mat> results(images.size());
 
-    parallel_for_(Range(0, static_cast<int>(images.size())),
-                  [&](const Range &range) {
-                    for (int i = range.start; i < range.end; i++) {
-                      results[i] = compress(images[i], keepBits);
-                    }
-                  });
+  parallel_for_(Range(0, static_cast<int>(images.size())),
+                [&](const Range &range) {
+                  for (int i = range.start; i < range.end; i++) {
+                    results[i] = compress(images[i], keepBits);
+                  }
+                });
 
-    return results;
-  }
-};
-
-// 示例使用
-int main() {
-  Mat image = imread("input.png");
-  if (image.empty()) {
-    cerr << "Error loading image" << endl;
-    return -1;
-  }
-
-  auto start = chrono::high_resolution_clock::now();
-
-  Mat msbPlane = extractMSBPlane(image);
-  Mat modifiedImage = image.clone();
-  modifyMSB(modifiedImage, true);
-  Mat compressed = MSBCompressor::compress(image, 4);
-
-  auto end = chrono::high_resolution_clock::now();
-  auto duration = chrono::duration_cast<chrono::milliseconds>(end - start);
-
-  cout << "Processing time: " << duration.count() << "ms" << endl;
-
-  imshow("MSB Plane", msbPlane);
-  imshow("Modified", modifiedImage);
-  imshow("Compressed", compressed);
-  imshow("Original", image);
-  waitKey(0);
-
-  return 0;
+  return results;
 }

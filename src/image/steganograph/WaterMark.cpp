@@ -1,21 +1,28 @@
+#include "WaterMark.hpp"
+
 #include <cmath>
-#include <omp.h>
 #include <opencv2/opencv.hpp>
 #include <vector>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#include <opencv2/cudaarithm.hpp>
+#endif
 
 using namespace cv;
 using namespace std;
 
-// 水印嵌入函数（优化：采用 OpenMP 并行化处理块）
-Mat embedWatermark(const Mat &host, const Mat &watermark, double alpha = 0.1) {
+Mat embedWatermark(const Mat &host, const Mat &watermark, double alpha) {
   Mat hostYUV;
   cvtColor(host, hostYUV, COLOR_BGR2YUV);
   vector<Mat> channels;
   split(hostYUV, channels);
   Mat Y = channels[0];
 
-  // 调整水印大小并二值化
   Mat wm;
   resize(watermark, wm, Y.size());
   cvtColor(wm, wm, COLOR_BGR2GRAY);
@@ -26,8 +33,9 @@ Mat embedWatermark(const Mat &host, const Mat &watermark, double alpha = 0.1) {
   int rows = Y.rows;
   int cols = Y.cols;
 
-// 外层并行处理，从每个块起始位置分别处理
+#ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(dynamic)
+#endif
   for (int i = 0; i < rows; i += blockSize) {
     for (int j = 0; j < cols; j += blockSize) {
       if (i + blockSize > rows || j + blockSize > cols)
@@ -60,10 +68,9 @@ Mat embedWatermark(const Mat &host, const Mat &watermark, double alpha = 0.1) {
   return result;
 }
 
-// 多通道水印嵌入函数（优化：使用 OpenMP 并行处理每个通道中的块）
 Mat embedWatermarkMultiChannel(const Mat &host, const Mat &watermark,
                                const vector<int> &channelsToEmbed,
-                               double alpha = 0.1) {
+                               double alpha) {
   Mat hostYUV;
   cvtColor(host, hostYUV, COLOR_BGR2YUV);
   vector<Mat> yuvChannels;
@@ -84,7 +91,9 @@ Mat embedWatermarkMultiChannel(const Mat &host, const Mat &watermark,
       continue;
 
     Mat channelEmbed = yuvChannels[ch].clone();
+#ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(dynamic)
+#endif
     for (int i = 0; i < rows; i += blockSize) {
       for (int j = 0; j < cols; j += blockSize) {
         if (i + blockSize > rows || j + blockSize > cols)
@@ -110,9 +119,7 @@ Mat embedWatermarkMultiChannel(const Mat &host, const Mat &watermark,
   return result;
 }
 
-// 水印提取函数（优化：并行化块处理）
-Mat extractWatermark(const Mat &watermarked, double alpha = 0.1,
-                     int wmSize = 64) {
+Mat extractWatermark(const Mat &watermarked, double alpha, int wmSize) {
   Mat yuv;
   cvtColor(watermarked, yuv, COLOR_BGR2YUV);
   vector<Mat> channels;
@@ -124,7 +131,9 @@ Mat extractWatermark(const Mat &watermarked, double alpha = 0.1,
   int rows = Y.rows;
   int cols = Y.cols;
 
+#ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(dynamic)
+#endif
   for (int i = 0; i < rows; i += blockSize) {
     for (int j = 0; j < cols; j += blockSize) {
       if (i + blockSize > rows || j + blockSize > cols)
@@ -148,13 +157,11 @@ Mat extractWatermark(const Mat &watermarked, double alpha = 0.1,
   return resized;
 }
 
-// 水印容量评估函数（无特殊计算改动）
-size_t estimateWatermarkCapacity(const Mat &host, int blockSize = 8) {
+size_t estimateWatermarkCapacity(const Mat &host, int blockSize) {
   size_t blocks = (host.rows / blockSize) * (host.cols / blockSize);
   return blocks;
 }
 
-// 水印比较函数（无特殊计算改动）
 double compareWatermarks(const Mat &wm1, const Mat &wm2) {
   if (wm1.size() != wm2.size() || wm1.type() != wm2.type()) {
     throw std::runtime_error("Watermark images must have same size and type");

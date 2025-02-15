@@ -1,5 +1,7 @@
+#include "LSB.hpp"
+
 #include <bitset>
-#include <execution>
+#include <numeric>
 #include <opencv2/opencv.hpp>
 #include <span>
 #include <vector>
@@ -8,27 +10,21 @@ using namespace cv;
 using namespace std;
 
 // 将字符串预处理为位流缓存
-class BitStreamBuffer {
-public:
-  explicit BitStreamBuffer(const string &message, bool add_terminator = true) {
-    bits.reserve(message.length() * 8 + (add_terminator ? 8 : 0));
-    for (char c : message) {
-      bitset<8> charBits(c);
-      for (int i = 7; i >= 0; --i) {
-        bits.push_back(charBits[i]);
-      }
-    }
-    if (add_terminator) {
-      bits.push_back(false); // 终止符
+BitStreamBuffer::BitStreamBuffer(const string &message, bool add_terminator) {
+  bits.reserve(message.length() * 8 + (add_terminator ? 8 : 0));
+  for (char c : message) {
+    bitset<8> charBits(c);
+    for (int i = 7; i >= 0; --i) {
+      bits.push_back(charBits[i]);
     }
   }
+  if (add_terminator) {
+    bits.push_back(false); // 终止符
+  }
+}
 
-  const vector<bool> &getBits() const { return bits; }
-  size_t size() const { return bits.size(); }
-
-private:
-  vector<bool> bits;
-};
+const vector<bool> &BitStreamBuffer::getBits() const { return bits; }
+size_t BitStreamBuffer::size() const { return bits.size(); }
 
 // 优化后的LSB嵌入函数
 void embedLSB(Mat &image, const string &message) {
@@ -47,7 +43,9 @@ void embedLSB(Mat &image, const string &message) {
   const int num_chunks =
       (image.total() * image.channels() + chunk_size - 1) / chunk_size;
 
+#ifdef USE_PARALLEL
 #pragma omp parallel for
+#endif
   for (int chunk = 0; chunk < num_chunks; ++chunk) {
     const int start = chunk * chunk_size;
     const int end = min(start + chunk_size,
@@ -76,7 +74,11 @@ string extractLSB(const Mat &image) {
   vector<int> indices(total_pixels);
   iota(indices.begin(), indices.end(), 0);
 
+#ifdef USE_PARALLEL
   for_each(execution::par_unseq, indices.begin(), indices.end(), [&](int i) {
+#else
+  for_each(indices.begin(), indices.end(), [&](int i) {
+#endif
     const Vec3b &pixel = image.at<Vec3b>(i / image.cols, i % image.cols);
     for (int c = 0; c < 3; ++c) {
       extracted_bits[i * 3 + c] = pixel[c] & 1;
@@ -113,42 +115,44 @@ Mat getBitPlane(const Mat &image, int bitPosition) {
   const uchar mask = 1 << bitPosition;
   const int total_pixels = image.total();
 
+#ifdef USE_CUDA
+  // 使用CUDA加速
+  cuda::GpuMat d_image(image);
+  cuda::GpuMat d_plane(plane);
+  cuda::bitwise_and(d_image, Scalar(mask), d_plane);
+  cuda::divide(d_plane, Scalar(mask), d_plane);
+  d_plane.convertTo(plane, CV_8UC1, 255);
+#else
   // 使用SIMD优化的并行处理
   parallel_for_(Range(0, total_pixels), [&](const Range &range) {
     for (int i = range.start; i < range.end; ++i) {
       plane.data[i] = ((image.data[i] & mask) >> bitPosition) * 255;
     }
   });
+#endif
 
   return plane;
 }
 
 // 流处理版本的LSB嵌入函数（适用于大文件）
-class StreamingLSBEncoder {
-public:
-  explicit StreamingLSBEncoder(Mat &image) : image_(image), current_pos_(0) {}
+StreamingLSBEncoder::StreamingLSBEncoder(Mat &image)
+    : image_(image), current_pos_(0) {}
 
-  bool embedChunk(span<const char> data) {
-    BitStreamBuffer bit_buffer(string(data.begin(), data.end()), false);
-    const auto &bits = bit_buffer.getBits();
+bool StreamingLSBEncoder::embedChunk(span<const char> data) {
+  BitStreamBuffer bit_buffer(string(data.begin(), data.end()), false);
+  const auto &bits = bit_buffer.getBits();
 
-    const size_t available_bits =
-        (image_.total() * image_.channels()) - current_pos_;
-    if (bits.size() > available_bits)
-      return false;
+  const size_t available_bits =
+      (image_.total() * image_.channels()) - current_pos_;
+  if (bits.size() > available_bits)
+    return false;
 
-    const int chunk_size = min(static_cast<int>(bits.size()), 1024);
-    auto *img_data = image_.ptr<uchar>();
+  const int chunk_size = min(static_cast<int>(bits.size()), 1024);
+  auto *img_data = image_.ptr<uchar>();
 
-    for (size_t i = 0; i < bits.size(); ++i) {
-      img_data[current_pos_ + i] =
-          (img_data[current_pos_ + i] & 0xFE) | bits[i];
-    }
-    current_pos_ += bits.size();
-    return true;
+  for (size_t i = 0; i < bits.size(); ++i) {
+    img_data[current_pos_ + i] = (img_data[current_pos_ + i] & 0xFE) | bits[i];
   }
-
-private:
-  Mat &image_;
-  size_t current_pos_;
-};
+  current_pos_ += bits.size();
+  return true;
+}

@@ -1,3 +1,5 @@
+#include "CRC.hpp"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -15,87 +17,51 @@ inline uint32_t byteswap_uint32_simd(uint32_t value) {
 #endif
 }
 
-// 优化的IHDR块结构（16字节对齐）
-struct alignas(16) IHDRData {
-  uint32_t width;
-  uint32_t height;
-  uint8_t bit_depth;
-  uint8_t color_type;
-  uint8_t compression;
-  uint8_t filter;
-  uint8_t interlace;
-  uint8_t padding[3]; // 填充以优化内存访问
-};
-
-// 使用查找表优化的CRC计算
-class CRCCalculator {
-public:
-  static constexpr auto generate_crc_table() {
-    std::array<std::array<uint32_t, 256>, 16> table{};
-    for (uint32_t i = 0; i < 256; i++) {
-      uint32_t crc = i;
-      for (int j = 0; j < 8; j++) {
-        crc = (crc >> 1) ^ ((crc & 1) * 0xEDB88320);
-      }
-      table[0][i] = crc;
-    }
-
-    // 生成优化表
-    for (uint32_t i = 0; i < 256; i++) {
-      for (uint32_t j = 1; j < 16; j++) {
-        table[j][i] = (table[j - 1][i] >> 8) ^ table[0][table[j - 1][i] & 0xFF];
-      }
-    }
-    return table;
-  }
-
-  static inline uint32_t fast_crc32(const uint8_t *data, size_t length,
-                                    uint32_t crc = 0) {
-    static constexpr auto crc_tables = generate_crc_table();
-    crc = ~crc;
+uint32_t CRCCalculator::fast_crc32(const uint8_t *data, size_t length,
+                                   uint32_t crc) {
+  static constexpr auto crc_tables = generate_crc_table();
+  crc = ~crc;
 
 // SIMD优化：每次处理16字节
 #if defined(__AVX2__)
-    while (length >= 16) {
-      __m128i data_v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(data));
-      crc = process_block_simd(data_v, crc);
-      data += 16;
-      length -= 16;
-    }
+  while (length >= 16) {
+    __m128i data_v = _mm_loadu_si128(reinterpret_cast<const __m128i *>(data));
+    crc = process_block_simd(data_v, crc);
+    data += 16;
+    length -= 16;
+  }
 #endif
 
-    // 处理剩余字节
-    while (length >= 4) {
-      crc ^= *reinterpret_cast<const uint32_t *>(data);
-      crc = crc_tables[3][crc & 0xFF] ^ crc_tables[2][(crc >> 8) & 0xFF] ^
-            crc_tables[1][(crc >> 16) & 0xFF] ^ crc_tables[0][crc >> 24];
-      data += 4;
-      length -= 4;
-    }
-
-    while (length--) {
-      crc = (crc >> 8) ^ crc_tables[0][(crc & 0xFF) ^ *data++];
-    }
-
-    return ~crc;
+  // 处理剩余字节
+  while (length >= 4) {
+    crc ^= *reinterpret_cast<const uint32_t *>(data);
+    crc = crc_tables[3][crc & 0xFF] ^ crc_tables[2][(crc >> 8) & 0xFF] ^
+          crc_tables[1][(crc >> 16) & 0xFF] ^ crc_tables[0][crc >> 24];
+    data += 4;
+    length -= 4;
   }
 
-private:
+  while (length--) {
+    crc = (crc >> 8) ^ crc_tables[0][(crc & 0xFF) ^ *data++];
+  }
+
+  return ~crc;
+}
+
 #if defined(__AVX2__)
-  static inline uint32_t process_block_simd(__m128i data, uint32_t crc) {
-    static constexpr auto crc_tables = generate_crc_table();
-    uint32_t tmp[4];
-    _mm_storeu_si128(reinterpret_cast<__m128i *>(tmp), data);
+uint32_t CRCCalculator::process_block_simd(__m128i data, uint32_t crc) {
+  static constexpr auto crc_tables = generate_crc_table();
+  uint32_t tmp[4];
+  _mm_storeu_si128(reinterpret_cast<__m128i *>(tmp), data);
 
-    for (int i = 0; i < 4; ++i) {
-      crc ^= tmp[i];
-      crc = crc_tables[3][crc & 0xFF] ^ crc_tables[2][(crc >> 8) & 0xFF] ^
-            crc_tables[1][(crc >> 16) & 0xFF] ^ crc_tables[0][crc >> 24];
-    }
-    return crc;
+  for (int i = 0; i < 4; ++i) {
+    crc ^= tmp[i];
+    crc = crc_tables[3][crc & 0xFF] ^ crc_tables[2][(crc >> 8) & 0xFF] ^
+          crc_tables[1][(crc >> 16) & 0xFF] ^ crc_tables[0][crc >> 24];
   }
+  return crc;
+}
 #endif
-};
 
 // 优化的并行爆破实现
 std::pair<int, int>

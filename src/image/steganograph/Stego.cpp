@@ -1,8 +1,16 @@
+#include "Stego.hpp"
+
 #include <bitset>
 #include <mutex>
 #include <opencv2/opencv.hpp>
 #include <ranges>
 
+#ifdef USE_CUDA
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#endif
 
 using namespace cv;
 using namespace std;
@@ -33,7 +41,7 @@ string bits_to_str(const vector<bool> &bits) {
 }
 
 // 傅里叶隐写嵌入函数
-Mat embed_message(Mat carrier, const string &message, double alpha = 0.1) {
+Mat embed_message(Mat carrier, const string &message, double alpha) {
   // 转换为灰度图
   Mat gray;
   cvtColor(carrier, gray, COLOR_BGR2GRAY);
@@ -120,7 +128,7 @@ Mat embed_message(Mat carrier, const string &message, double alpha = 0.1) {
 }
 
 // 傅里叶隐写提取函数
-string extract_message(Mat stego, int msg_length, double alpha = 0.1) {
+string extract_message(Mat stego, int msg_length, double alpha) {
   Mat gray;
   cvtColor(stego, gray, COLOR_BGR2GRAY);
   gray.convertTo(gray, CV_32F);
@@ -142,6 +150,7 @@ string extract_message(Mat stego, int msg_length, double alpha = 0.1) {
   Mat q2(complex, Rect(0, cy, cx, cy));  // 左下
   Mat q3(complex, Rect(cx, cy, cx, cy)); // 右下
 
+#ifdef USE_PARALLEL
   parallel_for_(Range(0, 4), [&](const Range &range) {
     for (int k = range.start; k < range.end; k++) {
       Mat *q[4] = {&q0, &q1, &q2, &q3};
@@ -151,6 +160,15 @@ string extract_message(Mat stego, int msg_length, double alpha = 0.1) {
       tmp.copyTo(*q[3 - k]);
     }
   });
+#else
+  Mat tmp;
+  q0.copyTo(tmp);
+  q3.copyTo(q0);
+  tmp.copyTo(q3);
+  q1.copyTo(tmp);
+  q2.copyTo(q1);
+  tmp.copyTo(q2);
+#endif
 
   // 优化坐标生成和过滤
   const int min_radius = complex.rows / 8;
@@ -165,6 +183,7 @@ string extract_message(Mat stego, int msg_length, double alpha = 0.1) {
   const int total_pixels = complex.rows * complex.cols;
   mutex mtx;
 
+#ifdef USE_PARALLEL
   parallel_for_(Range(0, total_pixels), [&](const Range &range) {
     vector<bool> local_bits;
     local_bits.reserve((range.end - range.start) / 64); // 预估大小
@@ -197,6 +216,28 @@ string extract_message(Mat stego, int msg_length, double alpha = 0.1) {
                             local_bits.end());
     }
   });
+#else
+  for (int idx = 0; idx < total_pixels; idx++) {
+    if (extracted_bits.size() >= msg_length * 8)
+      break;
+
+    const int y = idx / complex.cols;
+    const int x = idx % complex.cols;
+    const int dx = x - cx;
+    const int dy = y - cy;
+    const int r_sq = dx * dx + dy * dy; // 避免开方计算
+
+    if (r_sq > min_radius_sq && r_sq < max_radius_sq) {
+      Vec2f pixel = complex.at<Vec2f>(y, x);
+      const float magnitude = norm(pixel);
+      // 改进的阈值判断，使用浮点比较
+      const bool bit =
+          std::abs(magnitude - alpha) > std::numeric_limits<float>::epsilon() &&
+          magnitude > alpha / 2;
+      extracted_bits.push_back(bit);
+    }
+  }
+#endif
 
   // 截取所需长度
   if (extracted_bits.size() > msg_length * 8) {
