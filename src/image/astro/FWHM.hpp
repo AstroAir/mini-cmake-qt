@@ -4,6 +4,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <vector>
 
 namespace cv {
 class Mat;
@@ -105,6 +106,28 @@ private:
    */
   static bool validate_parameters(const cv::Mat &params);
 };
+
+/**
+ * @brief 批量处理多个数据集的高斯拟合
+ */
+std::vector<std::optional<GaussianParams>> batch_fit(
+    const std::vector<std::span<const DataPoint>>& data_sets,
+    bool use_parallel = true,
+    double epsilon = 1e-6,
+    int max_iterations = 100);
+
+/**
+ * @brief 评估拟合质量
+ */
+struct FitQuality {
+    double r_squared;          // R方值
+    double residual_std;       // 残差标准差
+    double peak_to_noise;      // 信噪比
+};
+
+FitQuality assess_fit_quality(
+    std::span<const DataPoint> points,
+    const GaussianParams& params);
 
 // 添加性能优化相关常量
 constexpr int PARALLEL_THRESHOLD = 1000; // 并行处理的最小数据量阈值

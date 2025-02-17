@@ -7,6 +7,7 @@
 using json = nlohmann::json;
 namespace cv {
 class Mat;
+
 }
 using namespace cv;
 using namespace std;

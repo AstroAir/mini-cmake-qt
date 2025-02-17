@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FWHM.hpp"
 #include <filesystem>
 #include <vector>
 
@@ -34,6 +35,11 @@ struct StarDetectionConfig {
   fs::path visualization_save_path;  ///< Path to save visualization.
   int local_region_size = 32;     ///< Size of local region for metrics calculation
   bool calculate_metrics = true;   ///< Whether to calculate FWHM and HFR
+  bool use_gaussian_fit = true;     ///< 是否使用高斯拟合进行星点分析
+  double fit_convergence = 1e-6;    ///< 高斯拟合收敛阈值
+  int fit_max_iterations = 100;     ///< 高斯拟合最大迭代次数
+  bool parallel_processing = true;   ///< 是否启用并行处理
+  int block_size = 16;              ///< 并行处理块大小
 };
 
 /**
@@ -77,6 +83,24 @@ public:
       const cv::Mat& image,
       const std::vector<cv::Point>& centers,
       int region_size) const;
+
+  /**
+   * @brief 计算星点的综合质量指标
+   * @param image 输入图像
+   * @param center 星点中心
+   * @param region_size 区域大小
+   * @return 包含FWHM、HFR和高斯拟合参数的结构
+   */
+  struct StarMetrics {
+    double fwhm;
+    double hfr;
+    std::optional<GaussianFit::GaussianParams> gaussian_params;
+    double quality_score;
+  };
+
+  StarMetrics calculate_star_quality(const cv::Mat& image,
+                                    const cv::Point& center,
+                                    int region_size) const;
 
 private:
   StarDetectionConfig config_; ///< Configuration for star detection.
@@ -179,4 +203,16 @@ private:
   cv::Mat extract_star_region(const cv::Mat& image, 
                               const cv::Point& center,
                               int size) const;
+
+  /**
+   * @brief 计算星点质量的综合得分
+   */
+  double calculate_quality_score(const StarMetrics& metrics) const;
+  
+  /**
+   * @brief 使用高斯拟合优化星点检测
+   */
+  std::vector<cv::Point> refine_star_positions(
+      const cv::Mat& image,
+      const std::vector<cv::Point>& initial_positions) const;
 };

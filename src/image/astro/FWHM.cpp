@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <omp.h>
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -345,6 +346,77 @@ bool GaussianFitter::validate_parameters(const cv::Mat &params) {
     return false;
   }
   return true;
+}
+
+std::vector<std::optional<GaussianParams>> batch_fit(
+    const std::vector<std::span<const DataPoint>>& data_sets,
+    bool use_parallel,
+    double epsilon,
+    int max_iterations) {
+    std::vector<std::optional<GaussianParams>> results(data_sets.size());
+    
+    if (use_parallel && data_sets.size() >= PARALLEL_THRESHOLD) {
+        #pragma omp parallel for schedule(dynamic, BLOCK_SIZE)
+        for (size_t i = 0; i < data_sets.size(); ++i) {
+            results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
+        }
+    } else {
+        for (size_t i = 0; i < data_sets.size(); ++i) {
+            results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
+        }
+    }
+    
+    return results;
+}
+
+FitQuality assess_fit_quality(
+    std::span<const DataPoint> points,
+    const GaussianParams& params) {
+    FitQuality quality{};
+    
+    if (points.empty() || !params.valid()) {
+        return quality;
+    }
+    
+    // 计算总平方和和残差平方和
+    double total_sum_squares = 0.0;
+    double residual_sum_squares = 0.0;
+    double mean_y = 0.0;
+    
+    // 首先计算平均值
+    for (const auto& point : points) {
+        mean_y += point.y;
+    }
+    mean_y /= points.size();
+    
+    // 计算R方值和残差
+    std::vector<double> residuals;
+    residuals.reserve(points.size());
+    
+    for (const auto& point : points) {
+        double predicted = GaussianFitter::evaluate(params, point.x);
+        double residual = point.y - predicted;
+        residuals.push_back(residual);
+        
+        residual_sum_squares += residual * residual;
+        total_sum_squares += (point.y - mean_y) * (point.y - mean_y);
+    }
+    
+    // 计算R方值
+    quality.r_squared = 1.0 - (residual_sum_squares / total_sum_squares);
+    
+    // 计算残差标准差
+    double mean_residual = std::accumulate(residuals.begin(), residuals.end(), 0.0) / residuals.size();
+    double variance = 0.0;
+    for (double residual : residuals) {
+        variance += (residual - mean_residual) * (residual - mean_residual);
+    }
+    quality.residual_std = std::sqrt(variance / (residuals.size() - 1));
+    
+    // 计算信噪比
+    quality.peak_to_noise = params.peak / std::max(quality.residual_std, 1e-10);
+    
+    return quality;
 }
 
 } // namespace GaussianFit

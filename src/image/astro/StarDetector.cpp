@@ -119,6 +119,11 @@ StarDetector::multiscale_detect_stars(const cv::Mat &input_image) {
     visualize_stars(gray_image, unique_stars);
   }
 
+  // 使用高斯拟合优化星点位置
+  if (config_.use_gaussian_fit) {
+    unique_stars = refine_star_positions(input_image, unique_stars);
+  }
+
   return unique_stars;
 }
 
@@ -452,4 +457,95 @@ cv::Mat StarDetector::extract_star_region(const cv::Mat &image,
   }
 
   return region;
+}
+
+StarDetector::StarMetrics StarDetector::calculate_star_quality(
+    const cv::Mat &image, const cv::Point &center, int region_size) const {
+  StarMetrics metrics{};
+
+  cv::Mat roi = extract_star_region(image, center, region_size);
+  if (roi.empty()) {
+    return metrics;
+  }
+
+  // 计算HFR
+  metrics.hfr = calcHfr(roi, region_size / 2.0);
+
+  // 准备数据点用于高斯拟合
+  if (config_.use_gaussian_fit) {
+    std::vector<GaussianFit::DataPoint> points;
+    points.reserve(region_size);
+
+    cv::Mat row_profile;
+    cv::reduce(roi, row_profile, 0, cv::REDUCE_AVG);
+
+    for (int i = 0; i < row_profile.cols; ++i) {
+      points.push_back({static_cast<double>(i),
+                        static_cast<double>(row_profile.at<float>(0, i))});
+    }
+
+    // 执行高斯拟合
+    metrics.gaussian_params = GaussianFit::GaussianFitter::fit(
+        points, config_.fit_convergence, config_.fit_max_iterations);
+
+    if (metrics.gaussian_params) {
+      metrics.fwhm = 2.355 * metrics.gaussian_params->width;
+    }
+  }
+
+  metrics.quality_score = calculate_quality_score(metrics);
+  return metrics;
+}
+
+double StarDetector::calculate_quality_score(const StarMetrics &metrics) const {
+  const double fwhm_weight = 0.4;
+  const double hfr_weight = 0.4;
+  const double gaussian_weight = 0.2;
+
+  double score = 0.0;
+
+  // FWHM得分（较小的FWHM更好）
+  if (metrics.fwhm > 0) {
+    score += fwhm_weight * (1.0 / std::max(metrics.fwhm, 1.0));
+  }
+
+  // HFR得分（较小的HFR更好）
+  if (metrics.hfr > 0) {
+    score += hfr_weight * (1.0 / std::max(metrics.hfr, 1.0));
+  }
+
+  // 高斯拟合质量得分
+  if (metrics.gaussian_params) {
+    const auto &params = *metrics.gaussian_params;
+    double peak_to_base_ratio = params.peak / std::max(params.base, 1.0);
+    score += gaussian_weight * std::min(peak_to_base_ratio, 1.0);
+  }
+
+  return score;
+}
+
+std::vector<cv::Point> StarDetector::refine_star_positions(
+    const cv::Mat &image,
+    const std::vector<cv::Point> &initial_positions) const {
+  std::vector<cv::Point> refined_positions;
+  refined_positions.reserve(initial_positions.size());
+
+#pragma omp parallel for if (config_.parallel_processing)                      \
+    schedule(dynamic, config_.block_size)
+  for (size_t i = 0; i < initial_positions.size(); ++i) {
+    const auto &pos = initial_positions[i];
+    auto metrics =
+        calculate_star_quality(image, pos, config_.local_region_size);
+
+    if (metrics.gaussian_params) {
+      cv::Point refined_pos(
+          pos.x + static_cast<int>(metrics.gaussian_params->center -
+                                   config_.local_region_size / 2.0),
+          pos.y);
+#pragma omp critical
+      refined_positions.push_back(refined_pos);
+    }
+  }
+
+  return refined_positions;
 }
