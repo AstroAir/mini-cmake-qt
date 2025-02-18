@@ -8,7 +8,7 @@
 #include "image/Exif.hpp"
 #include "image/Filter.hpp"
 #include "image/MetaData.hpp"
-#include "image/StarDetector.hpp"
+#include "image/astro/StarDetector.hpp"
 
 #include <QCache>
 #include <QDialog>

@@ -1,8 +1,10 @@
 #include "VideoIO.hpp"
 #include <chrono>
 #include <filesystem>
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/video/tracking.hpp>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/spdlog.h>
 
@@ -416,4 +418,112 @@ void VideoIO::initializeGPU() {
     cv::cuda::setDevice(0);
     videoLogger->info("GPU初始化成功");
   }
+}
+
+bool VideoIO::stabilizeVideo(const std::string &input,
+                             const std::string &output,
+                             double smoothingRadius) {
+  try {
+    auto cap = openVideo(input);
+    if (!cap.isOpened())
+      return false;
+
+    VideoInfo info = getVideoInfo(cap);
+    auto writer = createVideo(output, getFourCC(getDefaultCodec()), info.fps,
+                              cv::Size(info.width, info.height));
+
+    std::vector<cv::Mat> frames;
+    std::vector<cv::Mat> transforms;
+    cv::Mat prevFrame, currFrame;
+
+    // 计算帧间变换
+    while (cap.read(currFrame)) {
+      if (!prevFrame.empty()) {
+        transforms.push_back(getMotionTransform(prevFrame, currFrame));
+      }
+      frames.push_back(currFrame.clone());
+      currFrame.copyTo(prevFrame);
+    }
+
+    // 平滑变换
+    for (size_t i = 0; i < transforms.size(); ++i) {
+      int start = std::max(0, static_cast<int>(i - smoothingRadius));
+      int end = std::min(static_cast<int>(transforms.size()),
+                         static_cast<int>(i + smoothingRadius + 1));
+      cv::Mat smoothed =
+          cv::Mat::zeros(transforms[i].size(), transforms[i].type());
+
+      for (int j = start; j < end; ++j) {
+        smoothed += transforms[j];
+      }
+      smoothed /= (end - start);
+
+      cv::warpAffine(frames[i + 1], frames[i + 1], smoothed,
+                     frames[i + 1].size());
+    }
+
+    // 写入稳定后的帧
+    for (const auto &frame : frames) {
+      writer.write(frame);
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    return handleException(e, "stabilizeVideo");
+  }
+}
+
+bool VideoIO::addWatermark(const std::string &input, const std::string &output,
+                           const cv::Mat &watermark,
+                           const cv::Point &position) {
+  try {
+    auto cap = openVideo(input);
+    if (!cap.isOpened())
+      return false;
+
+    VideoInfo info = getVideoInfo(cap);
+    auto writer = createVideo(output, getFourCC(getDefaultCodec()), info.fps,
+                              cv::Size(info.width, info.height));
+
+    cv::Mat frame;
+    cv::Mat watermarkResized;
+    cv::resize(watermark, watermarkResized,
+               cv::Size(info.width / 4, info.height / 4));
+
+    while (cap.read(frame)) {
+      cv::Mat roi =
+          frame(cv::Rect(position.x, position.y, watermarkResized.cols,
+                         watermarkResized.rows));
+      cv::addWeighted(roi, 1.0, watermarkResized, 0.3, 0.0, roi);
+      writer.write(frame);
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    return handleException(e, "addWatermark");
+  }
+}
+
+cv::Mat VideoIO::getMotionTransform(const cv::Mat &frame1,
+                                    const cv::Mat &frame2) {
+  cv::Mat gray1, gray2;
+  cv::cvtColor(frame1, gray1, cv::COLOR_BGR2GRAY);
+  cv::cvtColor(frame2, gray2, cv::COLOR_BGR2GRAY);
+
+  std::vector<cv::Point2f> points1, points2;
+  cv::goodFeaturesToTrack(gray1, points1, 100, 0.01, 10);
+
+  std::vector<uchar> status;
+  std::vector<float> err;
+  cv::calcOpticalFlowPyrLK(gray1, gray2, points1, points2, status, err);
+
+  std::vector<cv::Point2f> goodPoints1, goodPoints2;
+  for (size_t i = 0; i < status.size(); i++) {
+    if (status[i]) {
+      goodPoints1.push_back(points1[i]);
+      goodPoints2.push_back(points2[i]);
+    }
+  }
+
+  return cv::estimateAffinePartial2D(goodPoints1, goodPoints2);
 }

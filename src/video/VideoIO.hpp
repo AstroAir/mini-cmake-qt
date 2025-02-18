@@ -52,6 +52,36 @@ public:
                                std::vector<cv::Mat> &keyFrames,
                                double threshold = 0.1);
 
+  // 新增视频处理功能
+  static bool stabilizeVideo(const std::string &input,
+                             const std::string &output,
+                             double smoothingRadius = 10.0);
+
+  static bool addWatermark(const std::string &input, const std::string &output,
+                           const cv::Mat &watermark, const cv::Point &position);
+
+  static bool addSubtitles(const std::string &input, const std::string &output,
+                           const std::vector<std::string> &subtitles,
+                           const std::vector<double> &timestamps);
+
+  static bool trimVideo(const std::string &input, const std::string &output,
+                        double startTime, double endTime);
+
+  static bool mergeVideos(const std::vector<std::string> &inputs,
+                          const std::string &output, bool horizontally = true);
+
+  static bool adjustVideoProperties(const std::string &input,
+                                    const std::string &output,
+                                    double brightness = 1.0,
+                                    double contrast = 1.0,
+                                    double saturation = 1.0);
+
+  static bool applyFilter(const std::string &input, const std::string &output,
+                          const cv::Mat &kernel);
+
+  static bool convertFormat(const std::string &input, const std::string &output,
+                            const std::string &targetCodec);
+
   // 性能优化相关
   static void enableParallelProcessing(bool enable = true);
   static void setBufferSize(size_t size);
@@ -68,4 +98,10 @@ private:
   static size_t m_bufferSize;
   static bool m_useGPU;
   static bool m_enableParallel;
+
+  static cv::Mat applyImageFilter(const cv::Mat &frame, const cv::Mat &kernel);
+  static void adjustFrame(cv::Mat &frame, double brightness, double contrast,
+                          double saturation);
+  static cv::Mat getMotionTransform(const cv::Mat &frame1,
+                                    const cv::Mat &frame2);
 };
