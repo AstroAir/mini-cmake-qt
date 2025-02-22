@@ -1,4 +1,5 @@
 #include "Stack.hpp"
+#include "src/image/ImageUtils.hpp"
 
 #include <algorithm>
 #include <cmath>

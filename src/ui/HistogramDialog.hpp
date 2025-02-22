@@ -1,7 +1,7 @@
 #ifndef HISTOGRAMDIALOG_H
 #define HISTOGRAMDIALOG_H
 
-#include "image/Histogram.hpp"
+#include "../image/Histogram.hpp"
 #include <QDialog>
 #include <QtCharts/QtCharts>
 #include <opencv2/opencv.hpp>

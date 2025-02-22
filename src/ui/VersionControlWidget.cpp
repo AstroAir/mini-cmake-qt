@@ -1,14 +1,20 @@
 #include "VersionControlWidget.h"
 #include "CropPreviewWidget.h"
 
+#include "ElaComboBox.h"
 #include "ElaDockWidget.h"
+#include "ElaLineEdit.h"
 #include "ElaListView.h"
 #include "ElaPushButton.h"
+#include "ElaSlider.h"
+#include "ElaStatusBar.h"
 #include "ElaToolButton.h"
 #include "ElaTreeView.h"
 
+
 #include <QContextMenuEvent>
-#include <QStandardItemModel>
+#include <QFileDialog>
+#include <QFormLayout>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -17,13 +23,15 @@
 #include <QMessageBox>
 #include <QSettings>
 #include <QSplitter>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
-#include <QFormLayout>
+#include <QWidget>
+#include <QTimer>
+#include <QMenuBar>
+#include <QTextEdit> // Added to fix unknown type QTextEdit
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
-
-
 
 VersionControlWidget::VersionControlWidget(QWidget *parent)
     : QWidget(parent), versionControl(std::make_unique<ImageVersionControl>()),
@@ -57,6 +65,10 @@ void VersionControlWidget::setupLayout() {
   setupToolbar();
   mainLayout->addWidget(toolbarArea);
 
+  // 添加搜索框
+  auto searchWidget = setupSearchWidget();
+  toolbarLayout->addWidget(searchWidget);
+
   // 主分割器
   mainSplitter = new QSplitter(this);
   mainSplitter->setHandleWidth(1);
@@ -76,9 +88,13 @@ void VersionControlWidget::setupLayout() {
   // 预览区域
   auto previewArea = createPreviewArea();
 
+  // 添加右侧分割器
+  rightSplitter = new QSplitter(Qt::Vertical);
+  rightSplitter->addWidget(previewArea);
+  rightSplitter->addWidget(infoDock);
+
   mainSplitter->addWidget(historyDock);
-  mainSplitter->addWidget(previewArea);
-  mainSplitter->addWidget(infoDock);
+  mainSplitter->addWidget(rightSplitter);
 
   mainLayout->addWidget(mainSplitter, 1);
 
@@ -97,78 +113,64 @@ void VersionControlWidget::setupLayout() {
   buttonBox->addWidget(mergeButton);
   buttonBox->addWidget(checkoutButton);
   mainLayout->addLayout(buttonBox);
+
+  // 添加状态栏
+  setupStatusBar();
+  mainLayout->addWidget(statusBar);
+
+  // 设置拖拽
+  setupDragDrop();
+
+  // 恢复分割器状态
+  restoreSplitterState();
 }
 
-void VersionControlWidget::setupToolbar() {
-  compareButton = new ElaToolButton(this);
-  exportButton = new ElaToolButton(this);
-  refreshButton = new ElaToolButton(this);
-
-  compareButton->setIcon(QIcon::fromTheme("edit-copy"));
-  exportButton->setIcon(QIcon::fromTheme("document-save"));
-  refreshButton->setIcon(QIcon::fromTheme("view-refresh"));
-
-  auto toolbar = new QHBoxLayout;
-  toolbar->addWidget(compareButton);
-  toolbar->addWidget(exportButton);
-  toolbar->addWidget(refreshButton);
-  toolbar->addStretch();
-}
-
-QWidget *VersionControlWidget::createHistoryPanel() {
-  auto panel = new QWidget;
-  auto layout = new QVBoxLayout(panel);
-  layout->setContentsMargins(2, 2, 2, 2);
-  layout->setSpacing(4);
-
-  historyTree = new ElaTreeView; // 修改为 ElaTreeView
-
-  // 创建并设置模型
-  auto model = new QStandardItemModel(this);
-  model->setHorizontalHeaderLabels({tr("提交"), tr("作者"), tr("日期")});
-  historyTree->setModel(model);
-
-  branchList = new ElaListView; // 修改为 ElaListView
-  tagList = new ElaListView;    // 修改为 ElaListView
-
-  layout->addWidget(new QLabel(tr("提交历史")));
-  layout->addWidget(historyTree);
-  layout->addWidget(new QLabel(tr("分支")));
-  layout->addWidget(branchList);
-  layout->addWidget(new QLabel(tr("标签")));
-  layout->addWidget(tagList);
-
-  return panel;
-}
-
-QWidget *VersionControlWidget::createInfoPanel() {
-  auto panel = new QWidget;
-  auto layout = new QVBoxLayout(panel);
-  layout->setContentsMargins(2, 2, 2, 2);
-  layout->setSpacing(4);
-
-  // 添加提交信息显示组件
-  auto infoLabel = new QLabel(tr("提交信息"));
-  auto infoText = new QLabel;
-  infoText->setWordWrap(true);
-  infoText->setTextInteractionFlags(Qt::TextSelectableByMouse);
-
-  layout->addWidget(infoLabel);
-  layout->addWidget(infoText);
-  layout->addStretch();
-
-  return panel;
-}
-
-QWidget *VersionControlWidget::createPreviewArea() {
+QWidget *VersionControlWidget::setupSearchWidget() {
   auto container = new QWidget;
-  auto layout = new QVBoxLayout(container);
+  auto layout = new QHBoxLayout(container);
   layout->setContentsMargins(0, 0, 0, 0);
 
-  imagePreview = new CropPreviewWidget(this);
-  layout->addWidget(imagePreview);
+  searchBox = new ElaLineEdit;
+  searchBox->setPlaceholderText(tr("搜索提交..."));
+  searchBox->setClearButtonEnabled(true);
+
+  auto searchButton = new ElaToolButton;
+  searchButton->setIcon(QIcon::fromTheme("search"));
+
+  layout->addWidget(searchBox);
+  layout->addWidget(searchButton);
+
+  connect(searchBox, &QLineEdit::textChanged, this,
+          &VersionControlWidget::onFilterChanged);
 
   return container;
+}
+
+void VersionControlWidget::setupStatusBar() {
+  statusBar = new ElaStatusBar(this);
+  statusLabel = new QLabel(tr("就绪"));
+  statusBar->addWidget(statusLabel);
+
+  // 添加主题选择器
+  themeSelector = new ElaComboBox;
+  themeSelector->addItems({tr("浅色"), tr("深色"), tr("跟随系统")});
+  statusBar->addPermanentWidget(themeSelector);
+
+  // 添加预览质量滑块
+  qualitySlider = new ElaSlider(Qt::Horizontal);
+  qualitySlider->setRange(10, 100);
+  qualitySlider->setValue(settings.previewQuality);
+  qualitySlider->setFixedWidth(100);
+  statusBar->addPermanentWidget(new QLabel(tr("预览质量:")));
+  statusBar->addPermanentWidget(qualitySlider);
+
+  connect(qualitySlider, &QSlider::valueChanged, this,
+          &VersionControlWidget::updatePreviewQuality);
+}
+
+void VersionControlWidget::setupDragDrop() {
+  setAcceptDrops(true);
+  imagePreview->setAcceptDrops(true);
 }
 
 void VersionControlWidget::connectSignals() {
@@ -270,6 +272,7 @@ void VersionControlWidget::updateTagList() {
 
 void VersionControlWidget::showDiffDialog(const QString &hash1,
                                           const QString &hash2) {
+  // checkout now returns a cv::Mat; convert to QImage if needed later.
   auto img1 = versionControl->checkout(hash1.toStdString());
   auto img2 = versionControl->checkout(hash2.toStdString());
 
@@ -423,195 +426,389 @@ QImage CvMatToQImage(const cv::Mat &mat) {
 } // namespace
 
 void VersionControlWidget::showMetadataDialog(const QString &hash) {
-    // 创建对话框
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("版本元数据"));
-    
-    auto layout = new QVBoxLayout(&dialog);
-    auto form = new QFormLayout;
-    
-    auto titleEdit = new QLineEdit;
-    auto descEdit = new QTextEdit;
-    auto tagsEdit = new QLineEdit;
-    
-    form->addRow(tr("标题:"), titleEdit);
-    form->addRow(tr("描述:"), descEdit);
-    form->addRow(tr("标签:"), tagsEdit);
-    
-    layout->addLayout(form);
-    
-    auto buttonBox = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-    connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    
-    layout->addWidget(buttonBox);
-    
-    if (dialog.exec() == QDialog::Accepted) {
-        // 保存元数据
-        versionControl->set_metadata(hash.toStdString(), {
-            {"title", titleEdit->text().toStdString()},
-            {"description", descEdit->toPlainText().toStdString()},
-            {"tags", tagsEdit->text().toStdString()}
-        });
-    }
+  // 创建对话框
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("版本元数据"));
+
+  auto layout = new QVBoxLayout(&dialog);
+  auto form = new QFormLayout;
+
+  auto titleEdit = new QLineEdit;
+  auto descEdit = new QTextEdit;
+  auto tagsEdit = new QLineEdit;
+
+  form->addRow(tr("标题:"), titleEdit);
+  form->addRow(tr("描述:"), descEdit);
+  form->addRow(tr("标签:"), tagsEdit);
+
+  layout->addLayout(form);
+
+  auto buttonBox =
+      new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+  layout->addWidget(buttonBox);
+
+  if (dialog.exec() == QDialog::Accepted) {
+    // 保存元数据，使用 update_metadata 替换原 set_metadata
+    versionControl->update_metadata(
+        hash.toStdString(),
+        {{"title", titleEdit->text().toStdString()},
+         {"description", descEdit->toPlainText().toStdString()},
+         {"tags", tagsEdit->text().toStdString()}});
+  }
 }
 
 void VersionControlWidget::createMenus() {
-    auto menuBar = new QMenuBar(this);
-    auto fileMenu = menuBar->addMenu(tr("文件"));
-    fileMenu->addAction(actions.exportVersion);
-    fileMenu->addAction(actions.importVersion);
-    
-    auto editMenu = menuBar->addMenu(tr("编辑"));
-    editMenu->addAction(actions.addMetadata);
-    editMenu->addAction(actions.editMetadata);
-    
-    auto viewMenu = menuBar->addMenu(tr("视图"));
-    viewMenu->addAction(actions.toggleHistoryPanel);
-    viewMenu->addAction(actions.toggleInfoPanel);
+  auto menuBar = new QMenuBar(this);
+  auto fileMenu = menuBar->addMenu(tr("文件"));
+  fileMenu->addAction(actions.exportVersion);
+  fileMenu->addAction(actions.importVersion);
+
+  auto editMenu = menuBar->addMenu(tr("编辑"));
+  editMenu->addAction(actions.addMetadata);
+  editMenu->addAction(actions.editMetadata);
+
+  auto viewMenu = menuBar->addMenu(tr("视图"));
+  viewMenu->addAction(actions.toggleHistoryPanel);
+  viewMenu->addAction(actions.toggleInfoPanel);
 }
 
 void VersionControlWidget::loadSettings() {
-    QSettings settings;
-    settings.beginGroup("VersionControl");
-    
-    splitOrientation = static_cast<Qt::Orientation>(
-        settings.value("SplitOrientation", Qt::Horizontal).toInt());
-    historyPanelVisible = settings.value("HistoryPanelVisible", true).toBool();
-    infoPanelVisible = settings.value("InfoPanelVisible", true).toBool();
-    
-    settings.endGroup();
-    
-    updatePanelVisibility();
+  QSettings settings;
+  settings.beginGroup("VersionControl");
+
+  splitOrientation = static_cast<Qt::Orientation>(
+      settings.value("SplitOrientation", Qt::Horizontal).toInt());
+  historyPanelVisible = settings.value("HistoryPanelVisible", true).toBool();
+  infoPanelVisible = settings.value("InfoPanelVisible", true).toBool();
+
+  settings.endGroup();
+
+  updatePanelVisibility();
 }
 
 void VersionControlWidget::onCommit() {
-    QString message = QInputDialog::getMultiLineText(
-        this, tr("提交更改"), tr("请输入提交信息:"));
-        
-    if (!message.isEmpty()) {
-        try {
-            versionControl->commit(currentImage, message.toStdString());
-            refreshHistory();
-        } catch (const std::exception &e) {
-            QMessageBox::critical(this, tr("错误"), 
-                tr("提交失败: %1").arg(e.what()));
-        }
+  QString message = QInputDialog::getMultiLineText(this, tr("提交更改"),
+                                                   tr("请输入提交信息:"));
+
+  if (!message.isEmpty()) {
+    try {
+      // Convert QImage to cv::Mat before commit
+      versionControl->commit(QImageToCvMat(currentImage), message.toStdString());
+      refreshHistory();
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, tr("错误"), tr("提交失败: %1").arg(e.what()));
     }
+  }
 }
 
 void VersionControlWidget::onCreateBranch() {
-    QString name = QInputDialog::getText(
-        this, tr("新建分支"), tr("分支名称:"));
-        
-    if (!name.isEmpty()) {
-        try {
-            versionControl->create_branch(name.toStdString());
-            updateBranchList();
-        } catch (const std::exception &e) {
-            QMessageBox::critical(this, tr("错误"),
-                tr("创建分支失败: %1").arg(e.what()));
-        }
+  QString name = QInputDialog::getText(this, tr("新建分支"), tr("分支名称:"));
+
+  if (!name.isEmpty()) {
+    try {
+      versionControl->create_branch(name.toStdString());
+      updateBranchList();
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, tr("错误"),
+                            tr("创建分支失败: %1").arg(e.what()));
     }
+  }
 }
 
 void VersionControlWidget::onCreateTag() {
-    QString name = QInputDialog::getText(
-        this, tr("新建标签"), tr("标签名称:"));
-        
-    if (!name.isEmpty()) {
-        try {
-            versionControl->create_tag(name.toStdString());
-            updateTagList();
-        } catch (const std::exception &e) {
-            QMessageBox::critical(this, tr("错误"),
-                tr("创建标签失败: %1").arg(e.what()));
-        }
+  QString name = QInputDialog::getText(this, tr("新建标签"), tr("标签名称:"));
+
+  if (!name.isEmpty()) {
+    try {
+      // Fix: Pass an extra parameter (assuming "HEAD" as current commit)
+      versionControl->create_tag("HEAD", name.toStdString());
+      updateTagList();
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, tr("错误"),
+                            tr("创建标签失败: %1").arg(e.what()));
     }
+  }
 }
 
 void VersionControlWidget::onMergeBranch() {
-    // 获取当前选中的分支
-    auto current = branchList->currentIndex();
-    if (!current.isValid()) {
-        QMessageBox::warning(this, tr("警告"),
-            tr("请先选择要合并的分支"));
-        return;
-    }
-    
-    QString branch = current.data().toString();
-    try {
-        versionControl->merge_branch(branch.toStdString());
-        refreshHistory();
-    } catch (const std::exception &e) {
-        QMessageBox::critical(this, tr("错误"),
-            tr("合并分支失败: %1").arg(e.what()));
-    }
+  // 获取当前选中的分支
+  auto current = branchList->currentIndex();
+  if (!current.isValid()) {
+    QMessageBox::warning(this, tr("警告"), tr("请先选择要合并的分支"));
+    return;
+  }
+
+  QString branch = current.data().toString();
+  try {
+    versionControl->merge_branch(branch.toStdString());
+    refreshHistory();
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, tr("错误"),
+                          tr("合并分支失败: %1").arg(e.what()));
+  }
 }
 
 void VersionControlWidget::onCheckout() {
-    // 获取当前选中的提交
-    auto current = historyTree->currentIndex();
-    if (!current.isValid()) {
-        QMessageBox::warning(this, tr("警告"),
-            tr("请先选择要检出的版本"));
-        return;
-    }
-    
-    QString hash = current.data().toString();
-    try {
-        auto image = versionControl->checkout(hash.toStdString());
-        currentImage = CvMatToQImage(image);
-        imagePreview->setImage(currentImage);
-    } catch (const std::exception &e) {
-        QMessageBox::critical(this, tr("错误"),
-            tr("检出失败: %1").arg(e.what()));
-    }
+  // 获取当前选中的提交
+  auto current = historyTree->currentIndex();
+  if (!current.isValid()) {
+    QMessageBox::warning(this, tr("警告"), tr("请先选择要检出的版本"));
+    return;
+  }
+
+  QString hash = current.data().toString();
+  try {
+    auto image = versionControl->checkout(hash.toStdString());
+    currentImage = CvMatToQImage(image);
+    imagePreview->setImage(currentImage);
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, tr("错误"), tr("检出失败: %1").arg(e.what()));
+  }
 }
 
 void VersionControlWidget::onCompareVersions() {
-    auto selection = historyTree->selectionModel()->selectedIndexes();
-    if (selection.size() < 2) {
-        QMessageBox::warning(this, tr("警告"),
-            tr("请选择两个版本进行比较"));
-        return;
-    }
-    
-    showDiffDialog(selection[0].data().toString(),
-                   selection[1].data().toString());
+  auto selection = historyTree->selectionModel()->selectedIndexes();
+  if (selection.size() < 2) {
+    QMessageBox::warning(this, tr("警告"), tr("请选择两个版本进行比较"));
+    return;
+  }
+
+  showDiffDialog(selection[0].data().toString(),
+                 selection[1].data().toString());
 }
 
 void VersionControlWidget::onExportCommit() {
-    QString path = QFileDialog::getSaveFileName(
-        this, tr("导出版本"), QString(),
-        tr("图像文件 (*.png *.jpg *.bmp)"));
-        
-    if (!path.isEmpty()) {
-        try {
-            currentImage.save(path);
-        } catch (const std::exception &e) {
-            QMessageBox::critical(this, tr("错误"),
-                tr("导出失败: %1").arg(e.what()));
-        }
+  QString path = QFileDialog::getSaveFileName(
+      this, tr("导出版本"), QString(), tr("图像文件 (*.png *.jpg *.bmp)"));
+
+  if (!path.isEmpty()) {
+    try {
+      currentImage.save(path);
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, tr("错误"), tr("导出失败: %1").arg(e.what()));
     }
+  }
 }
 
 void VersionControlWidget::refreshHistory() {
-    historyModel->clear();
-    historyModel->setHorizontalHeaderLabels(
-        {tr("提交"), tr("作者"), tr("日期")});
-        
-    for (const auto &commit : versionControl->list_commits()) {
-        QList<QStandardItem*> row;
-        row << new QStandardItem(QString::fromStdString(commit.hash))
-            << new QStandardItem(QString::fromStdString(commit.author))
-            << new QStandardItem(QString::fromStdString(commit.date));
-        historyModel->appendRow(row);
-    }
+  historyModel->clear();
+  historyModel->setHorizontalHeaderLabels({tr("提交"), tr("作者"), tr("日期")});
+
+  // Fix: Use commits() instead of list_commits()
+  for (const auto &commit : versionControl->commits()) {
+    QList<QStandardItem *> row;
+    row << new QStandardItem(QString::fromStdString(commit.hash))
+        << new QStandardItem(QString::fromStdString(commit.author))
+        << new QStandardItem(QString::fromStdString(commit.date));
+    historyModel->appendRow(row);
+  }
 }
 
 void VersionControlWidget::updatePanelVisibility() {
-    historyDock->setVisible(historyPanelVisible);
-    infoDock->setVisible(infoPanelVisible);
+  historyDock->setVisible(historyPanelVisible);
+  infoDock->setVisible(infoPanelVisible);
+}
+
+void VersionControlWidget::onThemeChanged() {
+  bool isDark = themeSelector->currentIndex() == 1;
+  settings.darkTheme = isDark;
+  setupTheme();
+}
+
+void VersionControlWidget::setupTheme() {
+  QString style = settings.darkTheme
+                      ? "QWidget { background-color: #2d2d2d; color: #ffffff; }"
+                        "QSplitter::handle { background-color: #404040; }"
+                        "QHeaderView::section { background-color: #404040; }"
+                      : "";
+  setStyleSheet(style);
+}
+
+void VersionControlWidget::onAutoRefreshToggled(bool enabled) {
+  settings.autoRefresh = enabled;
+  if (enabled) {
+    autoRefreshTimer->start(5000); // 5秒自动刷新
+  } else {
+    autoRefreshTimer->stop();
+  }
+}
+
+void VersionControlWidget::onFilterChanged(const QString &filter) {
+  for (int i = 0; i < historyModel->rowCount(); ++i) {
+    bool show = true;
+    for (int j = 0; i < historyModel->columnCount(); ++j) {
+      auto item = historyModel->item(i, j);
+      if (!item->text().contains(filter, Qt::CaseInsensitive)) {
+        show = false;
+        break;
+      }
+    }
+    historyTree->setRowHidden(i, QModelIndex(), !show);
+  }
+}
+
+void VersionControlWidget::saveSplitterState() {
+  QSettings settings;
+  settings.beginGroup("VersionControl");
+  settings.setValue("MainSplitterState", mainSplitter->saveState());
+  settings.setValue("RightSplitterState", rightSplitter->saveState());
+  settings.endGroup();
+}
+
+void VersionControlWidget::restoreSplitterState() {
+  QSettings settings;
+  settings.beginGroup("VersionControl");
+  mainSplitter->restoreState(settings.value("MainSplitterState").toByteArray());
+  rightSplitter->restoreState(
+      settings.value("RightSplitterState").toByteArray());
+  settings.endGroup();
+}
+
+void VersionControlWidget::onShowStatistics() {
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("版本统计"));
+  auto layout = new QVBoxLayout(&dialog);
+
+  // 添加统计信息
+  QStringList stats;
+  stats << tr("总提交数: %1").arg(historyModel->rowCount())
+        << tr("活跃分支数: %1").arg(branchModel->rowCount())
+        << tr("标签数: %1").arg(tagModel->rowCount());
+
+  for (const auto &stat : stats) {
+    layout->addWidget(new QLabel(stat));
+  }
+
+  dialog.exec();
+}
+
+void VersionControlWidget::setupToolbar() {
+  auto toolbar = new QWidget(this);
+  auto layout = new QHBoxLayout(toolbar);
+  layout->setContentsMargins(5, 2, 5, 2);
+  layout->setSpacing(2);
+
+  compareButton = new ElaToolButton(this);
+  compareButton->setIcon(QIcon::fromTheme("compare"));
+  compareButton->setToolTip(tr("比较版本"));
+
+  exportButton = new ElaToolButton(this);
+  exportButton->setIcon(QIcon::fromTheme("export"));
+  exportButton->setToolTip(tr("导出"));
+
+  refreshButton = new ElaToolButton(this);
+  refreshButton->setIcon(QIcon::fromTheme("refresh"));
+  refreshButton->setToolTip(tr("刷新"));
+
+  layout->addWidget(compareButton);
+  layout->addWidget(exportButton);
+  layout->addWidget(refreshButton);
+  layout->addStretch();
+}
+
+void VersionControlWidget::updatePreviewQuality() {
+  if (!imagePreview || currentImage.isNull())
+    return;
+
+  int quality = qualitySlider->value();
+  QImage scaled = currentImage.scaled(imagePreview->size(), Qt::KeepAspectRatio,
+                                      quality < 100 ? Qt::SmoothTransformation
+                                                    : Qt::FastTransformation);
+
+  imagePreview->setImage(scaled);
+  settings.previewQuality = quality;
+}
+
+QWidget *VersionControlWidget::createHistoryPanel() {
+  auto panel = new QWidget;
+  auto layout = new QVBoxLayout(panel);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  historyTree = new ElaTreeView;
+  historyTree->setAlternatingRowColors(true);
+  historyTree->setSortingEnabled(true);
+  historyTree->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+  branchList = new ElaListView;
+  tagList = new ElaListView;
+
+  layout->addWidget(historyTree);
+  layout->addWidget(branchList);
+  layout->addWidget(tagList);
+
+  return panel;
+}
+
+QWidget *VersionControlWidget::createInfoPanel() {
+  auto panel = new QWidget;
+  auto layout = new QVBoxLayout(panel);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  commitInfoLabel = new QLabel;
+  commitInfoLabel->setWordWrap(true);
+  commitInfoLabel->setTextFormat(Qt::RichText);
+
+  layout->addWidget(commitInfoLabel);
+  layout->addStretch();
+
+  return panel;
+}
+
+QWidget *VersionControlWidget::createPreviewArea() {
+  auto area = new QWidget;
+  auto layout = new QVBoxLayout(area);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  imagePreview = new CropPreviewWidget;
+  imagePreview->setMinimumSize(200, 200);
+
+  layout->addWidget(imagePreview);
+
+  return area;
+}
+
+void VersionControlWidget::showCommitInfo(const QString &hash) {
+  try {
+    // Fix: Use commit_info() instead of get_commit_info()
+    auto info = versionControl->commit_info(hash.toStdString());
+    QString text =
+        tr("<b>提交</b>: %1<br>").arg(QString::fromStdString(info.hash));
+    text += tr("<b>作者</b>: %1<br>").arg(QString::fromStdString(info.author));
+    text += tr("<b>日期</b>: %1<br>").arg(QString::fromStdString(info.date));
+    text += tr("<b>消息</b>: %1").arg(QString::fromStdString(info.message));
+
+    commitInfoLabel->setText(text);
+  } catch (const std::exception &e) {
+    commitInfoLabel->setText(tr("获取提交信息失败: %1").arg(e.what()));
+  }
+}
+
+void VersionControlWidget::setImage(const QImage &image) {
+  currentImage = image;
+  imagePreview->setImage(image);
+  updatePreviewQuality();
+}
+
+VersionControlWidget::~VersionControlWidget() {
+  saveSplitterState();
+  saveSettings();
+}
+
+void VersionControlWidget::saveSettings() {
+  QSettings settings;
+  settings.beginGroup("VersionControl");
+  settings.setValue("AutoRefresh", this->settings.autoRefresh);
+  settings.setValue("PreviewQuality", this->settings.previewQuality);
+  settings.setValue("ShowLineNumbers", this->settings.showLineNumbers);
+  settings.setValue("CompactMode", this->settings.compactMode);
+  settings.setValue("DefaultExportPath", this->settings.defaultExportPath);
+  settings.setValue("RecentBranches", this->settings.recentBranches);
+  settings.setValue("MaxRecentBranches", this->settings.maxRecentBranches);
+  settings.setValue("ShowAuthorAvatar", this->settings.showAuthorAvatar);
+  settings.setValue("ThumbnailSize", this->settings.thumbnailSize);
+  settings.setValue("DarkTheme", this->settings.darkTheme);
+  settings.endGroup();
 }

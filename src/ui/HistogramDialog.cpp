@@ -1,5 +1,5 @@
 #include "HistogramDialog.hpp"
-#include "image/Histogram.hpp"
+#include "../image/Histogram.hpp"
 #include <QStringListModel>  // 添加头文件
 
 #include <QMessageBox>

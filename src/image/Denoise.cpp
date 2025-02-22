@@ -797,7 +797,7 @@ cv::Mat ImageDenoiser::detectNoiseDistribution(const cv::Mat &img) {
 
 #pragma omp parallel for collapse(2)
   for (int y = border; y < img.rows - border; ++y) {
-    for (int x = border; x < img.cols - border; ++x) {
+    for (int x = border; y < img.cols - border; ++x) {
       double localVar = calculateLocalVariance(img, x, y, windowSize);
       double pixelIntensity = img.at<uchar>(y, x);
 
@@ -858,4 +858,103 @@ void ImageDenoiser::updateDenoiseParams(DenoiseParameters &params,
     params.nlm_h = analysis.intensity * 10;
     break;
   }
+}
+
+double ImageDenoiser::calculateLocalVariance(const cv::Mat &img, int x, int y,
+                                             int windowSize) {
+  cv::Mat roi = img(cv::Range(y - windowSize / 2, y + windowSize / 2 + 1),
+                    cv::Range(x - windowSize / 2, x + windowSize / 2 + 1));
+  cv::Scalar mean, stddev;
+  cv::meanStdDev(roi, mean, stddev);
+  return stddev[0] * stddev[0];
+}
+
+cv::Mat ImageDenoiser::computeNoiseSpectrum(const cv::Mat &img) {
+  // 扩展图像尺寸到最优DFT大小
+  cv::Mat padded;
+  int m = cv::getOptimalDFTSize(img.rows);
+  int n = cv::getOptimalDFTSize(img.cols);
+  cv::copyMakeBorder(img, padded, 0, m - img.rows, 0, n - img.cols,
+                     cv::BORDER_CONSTANT, cv::Scalar::all(0));
+
+  // 转换到频域
+  cv::Mat planes[] = {cv::Mat_<float>(padded),
+                      cv::Mat::zeros(padded.size(), CV_32F)};
+  cv::Mat complexImg;
+  cv::merge(planes, 2, complexImg);
+  cv::dft(complexImg, complexImg);
+
+  // 分离实部和虚部
+  cv::split(complexImg, planes);
+  cv::Mat magnitude;
+  cv::magnitude(planes[0], planes[1], magnitude);
+
+  // 对数变换增强频谱可视性
+  magnitude += cv::Scalar::all(1);
+  cv::log(magnitude, magnitude);
+
+  // 移动频谱零频率到中心
+  int cx = magnitude.cols / 2;
+  int cy = magnitude.rows / 2;
+
+  cv::Mat tmp;
+  cv::Mat q0(magnitude, cv::Rect(0, 0, cx, cy));
+  cv::Mat q1(magnitude, cv::Rect(cx, 0, cx, cy));
+  cv::Mat q2(magnitude, cv::Rect(0, cy, cx, cy));
+  cv::Mat q3(magnitude, cv::Rect(cx, cy, cx, cy));
+
+  q0.copyTo(tmp);
+  q3.copyTo(q0);
+  tmp.copyTo(q3);
+
+  q1.copyTo(tmp);
+  q2.copyTo(q1);
+  tmp.copyTo(q2);
+
+  // 归一化到[0,1]范围
+  cv::normalize(magnitude, magnitude, 0, 1, cv::NORM_MINMAX);
+
+  return magnitude;
+}
+
+double ImageDenoiser::estimateNoiseLevel(const cv::Mat &img) {
+  cv::Mat laplacian;
+  cv::Laplacian(img, laplacian, CV_64F);
+
+  cv::Scalar mean, stddev;
+  cv::meanStdDev(laplacian, mean, stddev);
+
+  // 使用拉普拉斯算子的标准差作为噪声水平估计
+  double noiseLevel = stddev[0] / 255.0; // 归一化到[0,1]范围
+
+  // 应用sigmoid函数使结果更平滑
+  noiseLevel = 1.0 / (1.0 + std::exp(-10 * (noiseLevel - 0.5)));
+
+  return noiseLevel;
+}
+
+void WaveletDenoiser::parallel_wavelet_transform(cv::Mat &data) {
+  const int rows = data.rows;
+  const int cols = data.cols;
+  const int tile_size = 32; // 分块大小
+
+// 并行处理每个块
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < rows; i += tile_size) {
+    for (int j = 0; j < cols; j += tile_size) {
+      // 计算当前块的实际大小
+      int current_rows = std::min(tile_size, rows - i);
+      int current_cols = std::min(tile_size, cols - j);
+
+      // 获取当前块
+      cv::Mat tile =
+          data(cv::Range(i, i + current_rows), cv::Range(j, j + current_cols));
+
+      // 对当前块应用SIMD优化的小波变换
+      process_tile_simd(tile);
+    }
+  }
+
+// 同步所有线程
+#pragma omp barrier
 }

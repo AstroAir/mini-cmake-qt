@@ -16,12 +16,15 @@
 #include <QStyleOption>
 #include <QTreeView>
 #include <QVBoxLayout>
+#include <QCache>
 
 #include <filesystem>
 
-#include "ImagePreviewDialog.h"
+#include "ui/ImagePreviewDialog.h"
 #include "utils/ThreadPool.hpp"
-#include <QCache>
+
+class ElaListView;
+class ElaTreeView;
 
 namespace fs = std::filesystem;
 

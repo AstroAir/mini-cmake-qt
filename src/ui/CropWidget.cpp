@@ -1,5 +1,5 @@
 #include "CropWidget.h"
-#include "../HistogramDialog.hpp"
+#include "HistogramDialog.hpp"
 #include "CropPreviewWidget.h"
 
 #include <QGridLayout>

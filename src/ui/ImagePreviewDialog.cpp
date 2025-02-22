@@ -1553,7 +1553,20 @@ void ImagePreviewDialog::cropImage() {
         QStringList parts = ratioCombo->currentText().split(":");
         ratio = parts[0].toDouble() / parts[1].toDouble();
       }
-      currentCropStrategy = RatioCrop{ratio};
+
+      // Create a rectangle based on the ratio
+      QSize imgSize = imageLabel->pixmap().size();
+      int width, height;
+      if (ratio > 1.0) {
+        width = imgSize.width();
+        height = static_cast<int>(width / ratio);
+      } else {
+        height = imgSize.height();
+        width = static_cast<int>(height * ratio);
+      }
+      currentCropStrategy =
+          cv::Rect((imgSize.width() - width) / 2,
+                   (imgSize.height() - height) / 2, width, height);
       applyCrop(currentCropStrategy);
     } else if (circleRadio->isChecked()) {
       QSize imgSize = imageLabel->pixmap().size();

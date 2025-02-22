@@ -1,3 +1,4 @@
+
 #include "UpdateCheck.h"
 #include <QFile>
 #include <QMutex>

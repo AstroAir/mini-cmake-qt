@@ -1,5 +1,5 @@
 #include "CrashDialog.hpp"
-#include "CrashHandler.hpp"
+#include "utils/CrashHandler.hpp"
 
 #include <QApplication>
 #include <QClipboard>

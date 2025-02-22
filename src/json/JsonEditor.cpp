@@ -21,7 +21,6 @@
 #include "ElaToolButton.h"
 #include "ElaTreeView.h"
 
-
 #include <fstream>
 
 #include <spdlog/spdlog.h>
@@ -43,29 +42,63 @@ JsonEditor::JsonEditor(QWidget *parent) : QWidget(parent) {
 
 void JsonEditor::setupUI() {
   auto *layout = new QVBoxLayout(this);
-  layout->setContentsMargins(2, 2, 2, 2);
-  layout->setSpacing(2);
+  layout->setContentsMargins(12, 12, 12, 12);
+  layout->setSpacing(8);
+
+  // 创建顶部容器
+  auto *topContainer = new QWidget(this);
+  topContainer->setObjectName("topContainer");
+  auto *topLayout = new QHBoxLayout(topContainer);
+  topLayout->setContentsMargins(0, 0, 0, 0);
+  topLayout->setSpacing(8);
+
+  toolbar = new ElaToolBar(this);
+  toolbar->setObjectName("jsonToolbar");
+  searchBar = new ElaLineEdit(this);
+  searchBar->setObjectName("jsonSearchBar");
+  searchBar->setPlaceholderText(tr("搜索 (Ctrl+F)"));
+
+  topLayout->addWidget(toolbar);
+  topLayout->addWidget(searchBar, 1);
+
+  // 创建树视图容器
+  auto *treeContainer = new QWidget(this);
+  treeContainer->setObjectName("treeContainer");
+  auto *treeLayout = new QVBoxLayout(treeContainer);
+  treeLayout->setContentsMargins(0, 0, 0, 0);
+  treeLayout->setSpacing(0);
 
   treeView = new ElaTreeView(this);
-  searchBar = new ElaLineEdit(this);
-  statusBar = new ElaStatusBar(this);
-  toolbar = new ElaToolBar(this);
-
-  layout->addWidget(toolbar);
-  layout->addWidget(searchBar);
-  layout->addWidget(treeView);
-  layout->addWidget(statusBar);
-
+  treeView->setObjectName("jsonTreeView");
   treeView->setModel(&model);
   treeView->setEditTriggers(QAbstractItemView::DoubleClicked);
   treeView->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
+  treeView->setFrameStyle(QFrame::NoFrame);
+  treeView->setAlternatingRowColors(true);
+  treeView->setAnimated(true);
+  treeView->setUniformRowHeights(true);
+  treeLayout->addWidget(treeView);
 
-  searchBar->setPlaceholderText(tr("搜索 (Ctrl+F)"));
+  // 创建底部状态栏容器
+  auto *bottomContainer = new QWidget(this);
+  bottomContainer->setObjectName("bottomContainer");
+  auto *bottomLayout = new QHBoxLayout(bottomContainer);
+  bottomLayout->setContentsMargins(0, 0, 0, 0);
+  bottomLayout->setSpacing(8);
 
-  // 添加进度条
+  statusBar = new ElaStatusBar(this);
+  statusBar->setObjectName("jsonStatusBar");
   progressBar = new ElaProgressBar(this);
+  progressBar->setObjectName("jsonProgressBar");
   progressBar->setVisible(false);
-  statusBar->addWidget(progressBar);
+
+  bottomLayout->addWidget(statusBar);
+  bottomLayout->addWidget(progressBar);
+
+  // 添加所有容器到主布局
+  layout->addWidget(topContainer);
+  layout->addWidget(treeContainer, 1);
+  layout->addWidget(bottomContainer);
 
   // 设置拖放支持
   setAcceptDrops(true);
@@ -164,24 +197,190 @@ void JsonEditor::applyStyle() {
   setStyleSheet(R"(
       QWidget {
         font-family: "Segoe UI", "Microsoft YaHei";
+        font-size: 14px;
       }
-      QTreeView {
-        border: 1px solid #ccc;
-        border-radius: 4px;
+      
+      #topContainer {
+        background-color: rgba(30, 30, 30, 0.95);
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 8px;
       }
-      ElaLineEdit {
-        padding: 4px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-      }
-      QToolBar {
+      
+      #jsonToolbar {
+        background: transparent;
         border: none;
-        spacing: 4px;
+        spacing: 8px;
+        padding: 4px;
       }
-      ElaPushButton {
-        border: 1px solid #ccc;
+      
+      #jsonSearchBar {
+        background-color: rgba(45, 45, 45, 0.95);
+        color: #ffffff;
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        min-height: 20px;
+        transition: all 0.2s ease;
+      }
+      
+      #jsonSearchBar:focus {
+        border-color: #0078d4;
+        background-color: rgba(50, 50, 50, 0.95);
+        box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.25);
+      }
+      
+      #treeContainer {
+        background-color: rgba(30, 30, 30, 0.95);
+        border-radius: 8px;
+        padding: 12px;
+      }
+      
+      #jsonTreeView {
+        background-color: rgba(35, 35, 35, 0.95);
+        alternate-background-color: rgba(40, 40, 40, 0.95);
+        color: #ffffff;
+        border: none;
+        border-radius: 6px;
+        padding: 8px;
+        animation: fadeIn 0.3s ease-in-out;
+      }
+      
+      #jsonTreeView::item {
+        padding: 6px;
+        margin: 2px;
         border-radius: 4px;
+        transition: all 0.2s ease;
+      }
+      
+      #jsonTreeView::item:hover {
+        background-color: rgba(60, 60, 60, 0.95);
+      }
+      
+      #jsonTreeView::item:selected {
+        background-color: #0078d4;
+      }
+      
+      #jsonTreeView::branch:has-children:!has-siblings:closed,
+      #jsonTreeView::branch:closed:has-children:has-siblings {
+        image: url(:/images/chevron-right.png);
+      }
+      
+      #jsonTreeView::branch:open:has-children:!has-siblings,
+      #jsonTreeView::branch:open:has-children:has-siblings {
+        image: url(:/images/chevron-down.png);
+      }
+      
+      #bottomContainer {
+        background-color: rgba(30, 30, 30, 0.95);
+        border-radius: 8px;
+        padding: 8px;
+        margin-top: 8px;
+      }
+      
+      #jsonStatusBar {
+        color: #ffffff;
+        background: transparent;
         padding: 4px 8px;
+        font-size: 12px;
+      }
+      
+      #jsonProgressBar {
+        background-color: rgba(45, 45, 45, 0.95);
+        border-radius: 4px;
+        text-align: center;
+        min-height: 6px;
+      }
+      
+      #jsonProgressBar::chunk {
+        background-color: #0078d4;
+        border-radius: 4px;
+        width: 20px;
+      }
+      
+      ElaPushButton {
+        background-color: rgba(45, 45, 45, 0.95);
+        color: #ffffff;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        padding: 8px 16px;
+        min-height: 20px;
+        font-weight: 500;
+        transition: all 0.2s ease;
+      }
+      
+      ElaPushButton:hover {
+        background-color: rgba(60, 60, 60, 0.95);
+        border-color: rgba(255, 255, 255, 0.2);
+      }
+      
+      ElaPushButton:pressed {
+        background-color: rgba(70, 70, 70, 0.95);
+        transform: scale(0.98);
+      }
+      
+      QScrollBar:vertical {
+        background-color: rgba(45, 45, 45, 0.95);
+        width: 12px;
+        margin: 0px;
+      }
+      
+      QScrollBar::handle:vertical {
+        background-color: rgba(80, 80, 80, 0.95);
+        border-radius: 6px;
+        min-height: 20px;
+        margin: 2px;
+      }
+      
+      QScrollBar::handle:vertical:hover {
+        background-color: rgba(100, 100, 100, 0.95);
+      }
+      
+      QScrollBar::add-line:vertical,
+      QScrollBar::sub-line:vertical {
+        height: 0px;
+      }
+      
+      QScrollBar:horizontal {
+        background-color: rgba(45, 45, 45, 0.95);
+        height: 12px;
+        margin: 0px;
+      }
+      
+      QScrollBar::handle:horizontal {
+        background-color: rgba(80, 80, 80, 0.95);
+        border-radius: 6px;
+        min-width: 20px;
+        margin: 2px;
+      }
+      
+      QScrollBar::handle:horizontal:hover {
+        background-color: rgba(100, 100, 100, 0.95);
+      }
+      
+      QScrollBar::add-line:horizontal,
+      QScrollBar::sub-line:horizontal {
+        width: 0px;
+      }
+      
+      @keyframes fadeIn {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      
+      @media (max-width: 768px) {
+        QWidget {
+          font-size: 12px;
+        }
+        
+        #jsonSearchBar,
+        ElaPushButton {
+          padding: 6px 12px;
+        }
+        
+        #jsonTreeView::item {
+          padding: 4px;
+        }
       }
     )");
 }

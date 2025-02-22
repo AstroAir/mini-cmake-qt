@@ -1,83 +1,99 @@
 #ifndef SHAKEEFFECT_H
 #define SHAKEEFFECT_H
 
+#include <QEasingCurve>
 #include <QList>
 #include <QObject>
 #include <QPair>
 #include <QPoint>
 #include <QPropertyAnimation>
+#include <QRandomGenerator>
+#include <QTime>
+#include <QTimer>
 #include <QWidget>
-#include <spdlog/spdlog.h>
-#include <stdexcept>
-
 
 /**
- * @brief The ShakeEffect class 实现一个窗口抖动效果。
+ * @brief 抖动效果类型枚举
+ */
+enum class ShakeType {
+  Horizontal, // 水平抖动
+  Vertical,   // 垂直抖动
+  Circular,   // 圆形抖动
+  Random,     // 随机抖动
+  Elastic     // 弹性抖动
+};
+
+/**
+ * @brief 抖动效果配置结构体
+ */
+struct ShakeConfig {
+  int duration = 500;                                       // 持续时间(ms)
+  int shakeDistance = 10;                                   // 抖动距离(像素)
+  int frameCount = 10;                                      // 关键帧数量
+  float dampingRatio = 0.7f;                                // 阻尼比例
+  ShakeType type = ShakeType::Horizontal;                   // 抖动类型
+  QEasingCurve::Type easingType = QEasingCurve::OutElastic; // 缓动类型
+  bool autoReverse = false;                                 // 是否自动反向
+  int loopCount = 1;                                        // 循环次数
+};
+
+/**
+ * @brief The ShakeEffect class 实现一个高度可定制的窗口抖动效果
  */
 class ShakeEffect : public QObject {
   Q_OBJECT
 public:
-  /**
-   * @brief 构造函数
-   * @param target 要应用抖动效果的窗口控件
-   * @param duration 抖动持续时间，单位毫秒（默认500ms）
-   * @param shakeDistance 抖动最大偏移距离（默认10像素）
-   * @param parent 父对象
-   */
-  explicit ShakeEffect(QWidget *target, int duration = 500,
-                       int shakeDistance = 10, QObject *parent = nullptr)
-      : QObject(parent), m_target(target), m_duration(duration),
-        m_shakeDistance(shakeDistance) {
-    if (!m_target) {
-      spdlog::error("ShakeEffect: 无效的目标窗口");
-      throw std::invalid_argument("Invalid target widget for ShakeEffect");
-    }
-  }
+  explicit ShakeEffect(QWidget *target,
+                       const ShakeConfig &config = ShakeConfig(),
+                       QObject *parent = nullptr);
 
-  /**
-   * @brief 启动抖动效果
-   */
-  void start() {
-    try {
-      m_originalPos = m_target->pos();
+  // 开始抖动
+  void start();
 
-      // 创建动画对象
-      auto animation = new QPropertyAnimation(m_target, "pos", this);
-      animation->setDuration(m_duration);
-      animation->setLoopCount(1);
+  // 停止抖动
+  void stop();
 
-      // 设置动画关键帧，这里使用了一组预定义的位移实现抖动效果
-      QList<QPair<int, QPoint>> keyFrames = {
-          {0, m_originalPos},
-          {10, m_originalPos + QPoint(-m_shakeDistance, 0)},
-          {20, m_originalPos + QPoint(m_shakeDistance, 0)},
-          {30, m_originalPos + QPoint(0, -m_shakeDistance)},
-          {40, m_originalPos + QPoint(0, m_shakeDistance)},
-          {50, m_originalPos + QPoint(-m_shakeDistance, 0)},
-          {60, m_originalPos + QPoint(m_shakeDistance, 0)},
-          {70, m_originalPos + QPoint(0, m_shakeDistance)},
-          {80, m_originalPos + QPoint(0, -m_shakeDistance)},
-          {90, m_originalPos},
-          {100, m_originalPos}};
+  // 暂停抖动
+  void pause();
 
-      for (const auto &keyFrame : keyFrames) {
-        double step = keyFrame.first / 100.0;
-        animation->setKeyValueAt(step, keyFrame.second);
-      }
+  // 恢复抖动
+  void resume();
 
-      animation->start(QAbstractAnimation::DeleteWhenStopped);
-      spdlog::info("ShakeEffect: 开始对窗口 '{}' 进行抖动",
-                   m_target->objectName().toStdString());
-    } catch (const std::exception &e) {
-      spdlog::error("ShakeEffect: 启动抖动时发生异常: {}", e.what());
-    }
-  }
+  // 更新配置
+  void updateConfig(const ShakeConfig &newConfig);
+
+signals:
+  void effectStarted();
+  void effectStopped();
+  void effectPaused();
+  void effectResumed();
+  void effectCompleted();
+
+private:
+  void initializeAnimation();
+
+  void generateKeyFrames();
+
+  void generateHorizontalShake(QList<QPair<qreal, QPoint>> &keyFrames);
+
+  void generateVerticalShake(QList<QPair<qreal, QPoint>> &keyFrames);
+
+  void generateCircularShake(QList<QPair<qreal, QPoint>> &keyFrames);
+
+  void generateRandomShake(QList<QPair<qreal, QPoint>> &keyFrames);
+
+  void generateElasticShake(QList<QPair<qreal, QPoint>> &keyFrames);
+
+private slots:
+  void onAnimationFinished();
 
 private:
   QWidget *m_target;
-  int m_duration;
-  int m_shakeDistance;
+  ShakeConfig m_config;
+  QPropertyAnimation *m_animation = nullptr;
   QPoint m_originalPos;
+  bool m_isPlaying;
+  bool m_isPaused;
 };
 
 #endif // SHAKEEFFECT_H

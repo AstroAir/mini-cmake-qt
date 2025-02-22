@@ -1,5 +1,5 @@
 #include "FolderWatcher.h"
-
+#include <QTimer>
 #include <QRegularExpression>
 #include <spdlog/sinks/basic_file_sink.h>
 
@@ -24,6 +24,10 @@ FolderMonitor::FolderMonitor(QObject *parent) : QObject(parent) {
           &FolderMonitor::onDirectoryChanged);
   connect(&watcher, &QFileSystemWatcher::fileChanged, this,
           &FolderMonitor::onFileChanged);
+
+  debounceTimer = new QTimer(this);
+  debounceTimer->setSingleShot(true);
+  connect(debounceTimer, &QTimer::timeout, this, &FolderMonitor::processPendingEvents);
 }
 
 FolderMonitor::FolderMonitor(const QString &path, bool recursive,
@@ -32,22 +36,47 @@ FolderMonitor::FolderMonitor(const QString &path, bool recursive,
   addFolder(path, recursive);
 }
 
+void FolderMonitor::setConfig(const Config& config) {
+  this->config = config;
+  debounceTimer->setInterval(config.debounceMs);
+  getFolderWatcherLogger()->info("更新配置: 防抖时间={}ms, 忽略隐藏文件={}", 
+                                config.debounceMs, config.ignoreHiddenFiles);
+}
+
 void FolderMonitor::addFolder(const QString &path, bool recursive) {
-  if (!QDir(path).exists()) {
-    getFolderWatcherLogger()->error("Directory不存在: {}", path.toStdString());
-    throw std::runtime_error("Directory does not exist");
-  }
+  try {
+    if (!validatePath(path)) {
+      handleError(WatcherErrorCode::PathNotFound, 
+                 QString("无效路径: %1").arg(path));
+      return;
+    }
 
-  monitoredFolders[path] = recursive;
-  if (recursive) {
-    addRecursivePath(path);
-  } else {
-    watcher.addPath(path);
-  }
+    if (watchedFileCount >= config.maxWatchedFiles) {
+      handleError(WatcherErrorCode::WatcherLimitExceeded, 
+                 "已达到最大监控文件数限制");
+      return;
+    }
 
-  getFolderWatcherLogger()->info("开始监控目录: {}, 递归: {}",
-                                 path.toStdString(), recursive);
-  updateDirectoryContents(path);
+    if (!QDir(path).exists()) {
+      getFolderWatcherLogger()->error("Directory不存在: {}", path.toStdString());
+      throw std::runtime_error("Directory does not exist");
+    }
+
+    monitoredFolders[path] = recursive;
+    if (recursive) {
+      addRecursivePath(path);
+    } else {
+      watcher.addPath(path);
+    }
+
+    getFolderWatcherLogger()->info("开始监控目录: {}, 递归: {}",
+                                   path.toStdString(), recursive);
+    updateDirectoryContents(path);
+
+  } catch (const std::exception& e) {
+    handleError(WatcherErrorCode::SystemError, 
+               QString("添加文件夹失败: %1").arg(e.what()));
+  }
 }
 
 void FolderMonitor::removeFolder(const QString &path) {
@@ -203,4 +232,216 @@ QStringList FolderMonitor::getFilteredFiles(const QDir &dir) const {
     }
   }
   return files;
+}
+
+void FolderMonitor::handleError(WatcherErrorCode code, const QString& message) {
+  FileSystemEvent event;
+  event.type = FileSystemEventType::WatcherError;
+  event.errorCode = code;
+  event.errorMessage = message;
+  
+  getFolderWatcherLogger()->error("监控错误: {}", message.toStdString());
+  emit watcherError(event);
+}
+
+bool FolderMonitor::validatePath(const QString& path) const {
+  if (invalidPaths.contains(path)) {
+    return false;
+  }
+
+  QFileInfo fileInfo(path);
+  if (!fileInfo.exists() || !fileInfo.isReadable()) {
+    return false;
+  }
+
+  // 检查是否在排除列表中
+  for (const QString& excludePath : config.excludePaths) {
+    if (path.startsWith(excludePath)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void FolderMonitor::scheduleEventProcessing() {
+  if (!debounceTimer->isActive()) {
+    debounceTimer->start();
+  }
+}
+
+void FolderMonitor::processPendingEvents() {
+  QMutexLocker locker(&eventQueueMutex);
+  while (!eventQueue.isEmpty()) {
+    FileSystemEvent event = eventQueue.dequeue();
+    
+    if (config.ignoreHiddenFiles) {
+      QFileInfo fileInfo(event.path);
+      if (fileInfo.isHidden()) {
+        continue;
+      }
+    }
+
+    QString key = event.path + QString::number(static_cast<int>(event.type));
+    QDateTime now = QDateTime::currentDateTime();
+    if (lastEventTimes.contains(key)) {
+      if (lastEventTimes[key].msecsTo(now) < config.debounceMs) {
+        continue;
+      }
+    }
+    lastEventTimes[key] = now;
+
+    // 使用新的回调处理机制
+    invokeCallbacks(event);
+    emit fileSystemEvent(event);
+  }
+}
+
+void FolderMonitor::checkWatcherStatus() {
+  bool previousStatus = watcherActive;
+  watcherActive = !watcher.directories().isEmpty() || !watcher.files().isEmpty();
+
+  if (previousStatus != watcherActive) {
+    getFolderWatcherLogger()->info("监控状态改变: {}", 
+                                  watcherActive ? "活动" : "非活动");
+    emit watcherStatusChanged(watcherActive);
+  }
+}
+
+QStringList FolderMonitor::getWatchedFiles() const {
+  QStringList files = watcher.files();
+  QStringList dirs = watcher.directories();
+  files.append(dirs);
+  return files;
+}
+
+void FolderMonitor::clearAllWatchers() {
+  watcher.removePaths(watcher.files());
+  watcher.removePaths(watcher.directories());
+  monitoredFolders.clear();
+  directoryContents.clear();
+  watchedFileCount = 0;
+  getFolderWatcherLogger()->info("清除所有监控");
+  checkWatcherStatus();
+}
+
+bool FolderMonitor::addCallback(const QString& path, Callback callback,
+                               CallbackPriority priority,
+                               const QString& description) {
+  if (!validatePath(path)) {
+    handleError(WatcherErrorCode::PathNotFound,
+                QString("添加回调函数失败：无效路径 %1").arg(path));
+    return false;
+  }
+
+  QMutexLocker locker(&callbackMapMutex);
+  pathCallbacks[path] = CallbackInfo{
+    std::move(callback),
+    priority,
+    true,
+    description
+  };
+
+  getFolderWatcherLogger()->info("添加回调函数: 路径={}, 优先级={}, 描述={}",
+                                path.toStdString(),
+                                static_cast<int>(priority),
+                                description.toStdString());
+  return true;
+}
+
+bool FolderMonitor::removeCallback(const QString& path) {
+  QMutexLocker locker(&callbackMapMutex);
+  if (pathCallbacks.remove(path) > 0) {
+    getFolderWatcherLogger()->info("移除回调函数: 路径={}", path.toStdString());
+    return true;
+  }
+  return false;
+}
+
+void FolderMonitor::enableCallback(const QString& path, bool enable) {
+  QMutexLocker locker(&callbackMapMutex);
+  if (pathCallbacks.contains(path)) {
+    pathCallbacks[path].enabled = enable;
+    getFolderWatcherLogger()->info("{}回调函数: 路径={}",
+                                  enable ? "启用" : "禁用",
+                                  path.toStdString());
+  }
+}
+
+void FolderMonitor::clearCallbacks() {
+  QMutexLocker locker(&callbackMapMutex);
+  pathCallbacks.clear();
+  globalCallback = nullptr;
+  getFolderWatcherLogger()->info("清除所有回调函数");
+}
+
+void FolderMonitor::setGlobalCallback(Callback callback) {
+  QMutexLocker locker(&callbackMapMutex);
+  globalCallback = std::move(callback);
+  getFolderWatcherLogger()->info("设置全局回调函数");
+}
+
+QString FolderMonitor::findMatchingCallbackPath(const QString& filePath) const {
+  // 找到最长匹配的路径
+  QString bestMatch;
+  int maxLength = -1;
+
+  for (auto it = pathCallbacks.constBegin(); it != pathCallbacks.constEnd(); ++it) {
+    const QString& path = it.key();
+    if (filePath.startsWith(path) && path.length() > maxLength) {
+      maxLength = path.length();
+      bestMatch = path;
+    }
+  }
+  return bestMatch;
+}
+
+void FolderMonitor::invokeCallbacks(const FileSystemEvent& event) {
+  QMutexLocker locker(&callbackMapMutex);
+
+  // 按优先级排序的回调函数列表
+  QMultiMap<CallbackPriority, std::pair<QString, Callback>> priorityCallbacks;
+
+  // 查找匹配的回调函数
+  QString matchingPath = findMatchingCallbackPath(event.path);
+  if (!matchingPath.isEmpty() && pathCallbacks.contains(matchingPath)) {
+    const auto& callbackInfo = pathCallbacks[matchingPath];
+    if (callbackInfo.enabled) {
+      priorityCallbacks.insert(callbackInfo.priority,
+                             {matchingPath, callbackInfo.callback});
+    }
+  }
+
+  // 添加全局回调（如果存在）
+  if (globalCallback) {
+    priorityCallbacks.insert(CallbackPriority::Low,
+                           {QString(), globalCallback});
+  }
+
+  // 按优先级执行回调
+  try {
+    for (auto it = priorityCallbacks.end(); it != priorityCallbacks.begin();) {
+      --it;
+      const auto& [path, callback] = it.value();
+      if (callback) {
+        callback(event);
+        getFolderWatcherLogger()->debug("执行回调函数: 路径={}, 优先级={}",
+                                      path.toStdString(),
+                                      static_cast<int>(it.key()));
+      }
+    }
+  } catch (const std::exception& e) {
+    handleError(WatcherErrorCode::SystemError,
+               QString("回调函数执行失败: %1").arg(e.what()));
+  }
+}
+
+QStringList FolderMonitor::getCallbackPaths() const {
+  QMutexLocker locker(&callbackMapMutex);
+  return pathCallbacks.keys();
+}
+
+bool FolderMonitor::hasCallback(const QString& path) const {
+  QMutexLocker locker(&callbackMapMutex);
+  return pathCallbacks.contains(path);
 }

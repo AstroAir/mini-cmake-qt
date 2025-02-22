@@ -90,6 +90,16 @@ public:
   std::unordered_map<std::string, std::string> 
   get_metadata(std::string_view commit_hash) const;
 
+  // 修改元数据管理方法
+  void update_metadata(std::string_view commit_hash,
+                      const std::unordered_map<std::string, std::string>& metadata);
+  
+  // 添加提交信息查询方法
+  CommitInfo commit_info(std::string_view commit_hash) const;
+  
+  // 获取所有提交记录
+  std::vector<CommitInfo> commits() const;
+
 private:
   /**
    * @brief Computes the optimized difference between two images.

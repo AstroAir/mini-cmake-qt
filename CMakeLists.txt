@@ -23,16 +23,11 @@ set(COMPANY "Example")
 set(COPYRIGHT "Copyright (c) 2014 Vincent Lee. All rights reserved.")
 set(IDENTIFIER "com.example.Example")
 
+include_directories(src)
+
 set(SOURCE_FILES
     src/main.cpp
     src/mainwindow.cpp
-    src/CrashDialog.cpp
-    src/CrashHandler.cpp
-    src/HistogramDialog.cpp
-    src/ImageContextMenu.cpp
-    src/ImagePreviewDialog.cpp
-    src/MetaDataDialog.cpp
-    src/UpdateCheck.cpp
 
     src/image/Calibration.cpp
     src/image/Convolve.cpp
@@ -42,10 +37,10 @@ set(SOURCE_FILES
     src/image/Filter.cpp
     src/image/Histogram.cpp
     src/image/ImageIO.cpp
+    src/image/ImageUtils.cpp
     src/image/MetaData.cpp
     src/image/SIMDHelper.cpp
     src/image/Stack.cpp
-    
     src/image/VersionControl.cpp
 
     src/image/astro/BiasField.cpp
@@ -65,7 +60,19 @@ set(SOURCE_FILES
     src/log/LogPanel.cpp
     src/log/LogSearchCompleter.cpp
 
+    src/utils/CrashHandler.cpp
     src/utils/ThreadPool.cpp
+
+    src/ui/CrashDialog.cpp
+    src/ui/CropPreviewWidget.cpp
+    src/ui/CropWidget.cpp
+    src/ui/DiffWidget.cpp
+    src/ui/ImageContextMenu.cpp
+    src/ui/ImagePreviewDialog.cpp
+    src/ui/MetaDataDialog.cpp
+    src/ui/UpdateCheck.cpp
+    src/ui/HistogramDialog.cpp
+    src/ui/VersionControlWidget.cpp
 )
 
 add_project_meta(META_FILES_TO_INCLUDE)
