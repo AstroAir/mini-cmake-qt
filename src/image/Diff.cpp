@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <immintrin.h> // SIMD指令
+#include <iostream>
 #include <map>
 #include <numeric>
 #include <ranges>
@@ -13,8 +14,26 @@
 #include <QPainter>
 
 namespace {
-std::shared_ptr<spdlog::logger> diffLogger =
-    spdlog::basic_logger_mt("DiffLogger", "logs/diff.log");
+std::shared_ptr<spdlog::logger> diffLogger;
+
+void initLogger() {
+  if (!diffLogger) {
+    try {
+      diffLogger = spdlog::basic_logger_mt("DiffLogger", "logs/diff.log");
+      diffLogger->set_level(spdlog::level::debug);
+      diffLogger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
+      diffLogger->flush_on(spdlog::level::warn);
+    } catch (const spdlog::spdlog_ex &ex) {
+
+      std::cerr << "Logger initialization failed: " << ex.what() << std::endl;
+    }
+  }
+}
+
+struct LoggerInitializer {
+  LoggerInitializer() { initLogger(); }
+} loggerInit;
+
 } // namespace
 
 std::tuple<int, int, int> qUnpack(QRgb rgb) {
@@ -32,25 +51,63 @@ CIELAB RGB2LAB(QRgb rgb) {
 
 bool ImageDiff::validateImages(const QImage &img1, const QImage &img2) {
   if (img1.isNull() || img2.isNull()) {
-    diffLogger->error("Invalid input images");
+    diffLogger->error("One or both images are null");
     return false;
   }
+
   if (img1.size() != img2.size()) {
-    diffLogger->warn("Image size mismatch: {} vs {}", img1.size(), img2.size());
+    diffLogger->error("Image sizes don't match: {}x{} vs {}x{}", img1.width(),
+                      img1.height(), img2.width(), img2.height());
     return false;
   }
+
+  if (img1.format() != QImage::Format_ARGB32 &&
+      img1.format() != QImage::Format_RGB32) {
+    diffLogger->warn("First image format is not optimal: {}",
+                     static_cast<int>(img1.format()));
+  }
+
+  if (img2.format() != QImage::Format_ARGB32 &&
+      img2.format() != QImage::Format_RGB32) {
+    diffLogger->warn("Second image format is not optimal: {}",
+                     static_cast<int>(img2.format()));
+  }
+
   return true;
 }
 
 void ImageDiff::postProcessResult(ComparisonResult &result) const {
-  if (!result.differenceImage.isNull()) {
-    auto bits = result.differenceImage.bits();
-    const auto [min, max] =
-        std::minmax_element(bits, bits + result.differenceImage.sizeInBytes());
-    const float scale = 255.0f / (*max - *min + 1e-5f);
-    std::transform(bits, bits + result.differenceImage.sizeInBytes(), bits,
-                   [=](auto val) { return (val - *min) * scale; });
+  if (result.differenceImage.isNull()) {
+    diffLogger->warn("Difference image is null, skipping post-processing");
+    return;
   }
+
+  // 规范化差异图像
+  uchar *bits = result.differenceImage.bits();
+  size_t size = result.differenceImage.sizeInBytes();
+
+  // 找到最大和最小差异值
+  uchar minVal = 255, maxVal = 0;
+  for (size_t i = 0; i < size; ++i) {
+    minVal = std::min(minVal, bits[i]);
+    maxVal = std::max(maxVal, bits[i]);
+  }
+
+  // 避免除以零
+  if (maxVal == minVal) {
+    diffLogger->warn("No variance in difference image");
+    return;
+  }
+
+  // 应用对比度拉伸
+  float scale = 255.0f / (maxVal - minVal);
+  for (size_t i = 0; i < size; ++i) {
+    bits[i] = static_cast<uchar>((bits[i] - minVal) * scale);
+  }
+
+  // 记录统计信息
+  diffLogger->debug("Post-process stats - Min: {}, Max: {}, Scale: {}",
+                    static_cast<int>(minVal), static_cast<int>(maxVal), scale);
 }
 
 void processRows(const QImage &img, int height,

@@ -16,6 +16,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QtConcurrent>
+#include <QContextMenuEvent>
 
 #include "ElaComboBox.h"
 #include "ElaDockWidget.h"
@@ -509,6 +510,54 @@ QWidget *DiffWidget::createToolPanel() {
   panel->setMaximumWidth(400);
 
   return panel;
+}
+
+void DiffWidget::onSplitHorizontally() {
+    updateLayout(Qt::Horizontal);
+}
+
+void DiffWidget::onSplitVertically() {
+    updateLayout(Qt::Vertical);
+}
+
+void DiffWidget::onToggleToolPanel() {
+    toolPanelVisible = !toolPanelVisible;
+    toolPanelDock->setVisible(toolPanelVisible);
+    actions.toggleToolPanel->setChecked(toolPanelVisible);
+}
+
+void DiffWidget::onToggleStatusBar() {
+    statusBarVisible = !statusBarVisible;
+    statusBar->setVisible(statusBarVisible);
+    actions.toggleStatusBar->setChecked(statusBarVisible);
+}
+
+void DiffWidget::onCustomizeToolbar() {
+    // 显示工具栏自定义对话框
+    QMessageBox::information(this, tr("自定义工具栏"), 
+        tr("工具栏自定义功能将在后续版本中提供"));
+}
+
+void DiffWidget::onResetLayout() {
+    // 重置为默认布局
+    updateLayout(Qt::Horizontal);
+    toolPanelDock->setVisible(true);
+    statusBar->setVisible(true);
+    actions.toggleToolPanel->setChecked(true);
+    actions.toggleStatusBar->setChecked(true);
+    
+    // 重置分割器大小
+    QList<int> sizes;
+    int width = mainSplitter->width();
+    sizes << width/3 << width/3 << width/3;
+    mainSplitter->setSizes(sizes);
+}
+
+void DiffWidget::contextMenuEvent(QContextMenuEvent *event) {
+    QMenu menu(this);
+    menu.addMenu(viewMenu);
+    menu.addMenu(toolsMenu);
+    menu.exec(event->globalPos());
 }
 
 DiffWidget::~DiffWidget() = default;

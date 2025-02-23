@@ -666,4 +666,144 @@ void CropWidget::showHistogram() {
   histogramDialog->showHistogram(sourceImage);
 }
 
+void CropWidget::createThemeMenu() {
+    // 创建主题相关的 Actions
+    actions.darkTheme = new QAction(tr("深色主题"), this);
+    actions.lightTheme = new QAction(tr("浅色主题"), this);
+    actions.systemTheme = new QAction(tr("系统主题"), this);
+    actions.customTheme = new QAction(tr("自定义主题"), this);
+
+    // 设置这些 actions 为可选中的
+    actions.darkTheme->setCheckable(true);
+    actions.lightTheme->setCheckable(true);
+    actions.systemTheme->setCheckable(true);
+    actions.customTheme->setCheckable(true);
+
+    // 将这些 actions 加入到一个 action group 中
+    auto themeGroup = new QActionGroup(this);
+    themeGroup->addAction(actions.darkTheme);
+    themeGroup->addAction(actions.lightTheme);
+    themeGroup->addAction(actions.systemTheme);
+    themeGroup->addAction(actions.customTheme);
+
+    // 连接信号槽
+    connect(actions.darkTheme, &QAction::triggered, this, [this]() { setTheme("dark"); });
+    connect(actions.lightTheme, &QAction::triggered, this, [this]() { setTheme("light"); });
+    connect(actions.systemTheme, &QAction::triggered, this, [this]() { setTheme("system"); });
+    connect(actions.customTheme, &QAction::triggered, this, [this]() {
+        // 实现自定义主题对话框
+        // TODO: 添加自定义主题功能
+    });
+}
+
+void CropWidget::enableAdvancedMode(bool enable) {
+    isAdvancedMode = enable;
+    if (advancedPanel) {
+        advancedPanel->setVisible(enable);
+    }
+    
+    // 更新UI元素的可见性
+    if (customRatioWidth) customRatioWidth->setEnabled(enable);
+    if (customRatioHeight) customRatioHeight->setEnabled(enable);
+    
+    emit onAdvancedModeToggled(enable);
+}
+
+void CropWidget::setPresets(const QMap<QString, CropStrategy>& newPresets) {
+    presets.clear();
+    presetCombo->clear();
+    
+    for (auto it = newPresets.begin(); it != newPresets.end(); ++it) {
+        presets[it.key()] = it.value();
+        presetCombo->addItem(it.key());
+    }
+}
+
+void CropWidget::onAdvancedModeToggled(bool enabled) {
+    // 更新高级模式相关的UI元素
+    if (advancedPanel) {
+        advancedPanel->setVisible(enabled);
+    }
+    
+    // 更新自定义比例控件的状态
+    if (customRatioWidth && customRatioHeight) {
+        customRatioWidth->setEnabled(enabled);
+        customRatioHeight->setEnabled(enabled);
+    }
+}
+
+void CropWidget::onHistogramUpdate() {
+    if (histogramDialog && histogramDialog->isVisible()) {
+        histogramDialog->showHistogram(sourceImage);
+    }
+}
+
+void CropWidget::onGridToggled(bool show) {
+    isGridVisible = show;
+    if (previewWidget) {
+        previewWidget->setGridVisible(show);
+    }
+}
+
+void CropWidget::onAspectRatioLocked(bool locked) {
+    isAspectRatioLocked = locked;
+    if (previewWidget) {
+        previewWidget->setAspectRatioLocked(locked);
+    }
+}
+
+void CropWidget::onCustomRatioChanged() {
+    if (!customRatioWidth || !customRatioHeight) return;
+    
+    double width = customRatioWidth->value();
+    double height = customRatioHeight->value();
+    double ratio = width / height;
+    
+    if (isAspectRatioLocked && previewWidget) {
+        previewWidget->setAspectRatio(ratio);
+    }
+}
+
+void CropWidget::onThemeChanged() {
+    // 根据当前主题更新UI元素的样式
+    setupTheme();
+    
+    // 更新所有子控件的主题
+    if (previewWidget) previewWidget->update();
+    if (histogramDialog) histogramDialog->update();
+    
+    // 触发重绘
+    update();
+}
+
+void CropWidget::createMenus() {
+    // 创建主菜单
+    auto menuBar = new QMenuBar(this);
+    
+    // 文件菜单
+    auto fileMenu = menuBar->addMenu(tr("文件"));
+    fileMenu->addAction(actions.reset);
+    
+    // 编辑菜单
+    auto editMenu = menuBar->addMenu(tr("编辑"));
+    editMenu->addAction(actions.undo);
+    editMenu->addAction(actions.redo);
+    
+    // 视图菜单
+    auto viewMenu = menuBar->addMenu(tr("视图"));
+    viewMenu->addAction(actions.toggleAdvanced);
+    viewMenu->addAction(actions.showGrid);
+    
+    // 主题菜单
+    auto themeMenu = menuBar->addMenu(tr("主题"));
+    themeMenu->addAction(actions.darkTheme);
+    themeMenu->addAction(actions.lightTheme);
+    themeMenu->addAction(actions.systemTheme);
+    themeMenu->addAction(actions.customTheme);
+    
+    // 帮助菜单
+    auto helpMenu = menuBar->addMenu(tr("帮助"));
+    helpMenu->addAction(actions.help);
+}
+
 CropWidget::~CropWidget() = default;

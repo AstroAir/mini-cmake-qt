@@ -526,30 +526,30 @@ cv::Mat ImageVersionControl::find_conflict_regions(const cv::Mat &base,
 
 void ImageVersionControl::update_metadata(
     std::string_view commit_hash,
-    const std::unordered_map<std::string, std::string>& metadata) {
+    const std::unordered_map<std::string, std::string> &metadata) {
   const auto metadata_path = metadata_dir_ / std::string(commit_hash);
-  
+
   // 如果已存在元数据，先读取现有数据
   std::unordered_map<std::string, std::string> existing_metadata;
   if (fs::exists(metadata_path)) {
     existing_metadata = get_metadata(commit_hash);
   }
-  
+
   // 合并新的元数据
-  for (const auto& [key, value] : metadata) {
+  for (const auto &[key, value] : metadata) {
     existing_metadata[key] = value;
   }
-  
+
   // 写入更新后的元数据
   std::ofstream file(metadata_path);
-  for (const auto& [key, value] : existing_metadata) {
+  for (const auto &[key, value] : existing_metadata) {
     file << key << ": " << value << '\n';
   }
-  
+
   versionControlLogger->info("Updated metadata for commit: {}", commit_hash);
 }
 
-ImageVersionControl::CommitInfo 
+ImageVersionControl::CommitInfo
 ImageVersionControl::commit_info(std::string_view commit_hash) const {
   const auto commit_path = objects_dir / (std::string(commit_hash) + ".commit");
   if (!fs::exists(commit_path)) {
@@ -580,37 +580,149 @@ ImageVersionControl::commit_info(std::string_view commit_hash) const {
     if (metadata.contains("message")) {
       info.message = metadata["message"];
     }
-  } catch (const std::exception& e) {
-    versionControlLogger->warn("Failed to get metadata for commit {}: {}", 
-                             commit_hash, e.what());
+  } catch (const std::exception &e) {
+    versionControlLogger->warn("Failed to get metadata for commit {}: {}",
+                               commit_hash, e.what());
   }
 
   return info;
 }
 
-std::vector<ImageVersionControl::CommitInfo> 
+std::vector<ImageVersionControl::CommitInfo>
 ImageVersionControl::commits() const {
   std::vector<CommitInfo> result;
-  
+
   // 遍历objects目录
-  for (const auto& entry : fs::directory_iterator(objects_dir)) {
+  for (const auto &entry : fs::directory_iterator(objects_dir)) {
     if (entry.path().extension() == ".commit") {
       try {
         // 获取提交哈希（文件名去掉.commit后缀）
         std::string hash = entry.path().stem().string();
         result.push_back(commit_info(hash));
-      } catch (const std::exception& e) {
-        versionControlLogger->error("Failed to read commit file {}: {}", 
-                                  entry.path().string(), e.what());
+      } catch (const std::exception &e) {
+        versionControlLogger->error("Failed to read commit file {}: {}",
+                                    entry.path().string(), e.what());
       }
     }
   }
-  
+
   // 按日期排序，最新的在前
-  std::sort(result.begin(), result.end(), 
-    [](const CommitInfo& a, const CommitInfo& b) {
-      return std::stoll(a.date) > std::stoll(b.date);
-    });
+  std::sort(result.begin(), result.end(),
+            [](const CommitInfo &a, const CommitInfo &b) {
+              return std::stoll(a.date) > std::stoll(b.date);
+            });
 
   return result;
+}
+
+void ImageVersionControl::delete_tag(std::string_view tag_name) {
+  const auto tag_path = tags_dir_ / (std::string(tag_name) + ".tag");
+
+  // 检查标签是否存在
+  if (!fs::exists(tag_path)) {
+    throw std::runtime_error("Tag not found: " + std::string(tag_name));
+  }
+
+  // 删除标签文件
+  fs::remove(tag_path);
+  versionControlLogger->info("Deleted tag: {}", tag_name);
+}
+
+void ImageVersionControl::merge_branch(std::string_view source_branch) {
+  // 获取源分支信息
+  const auto source = load_branch_info(source_branch);
+  if (source.head_commit.empty()) {
+    throw std::runtime_error("Source branch not found: " +
+                             std::string(source_branch));
+  }
+
+  // 获取当前分支信息
+  const auto current = load_branch_info(current_branch_);
+  if (current.head_commit.empty()) {
+    throw std::runtime_error("Current branch not found: " + current_branch_);
+  }
+
+  // 找到共同祖先
+  auto source_history = build_commit_chain(source.head_commit);
+  auto current_history = build_commit_chain(current.head_commit);
+
+  std::string common_ancestor;
+  for (const auto &hash : source_history) {
+    if (std::find(current_history.begin(), current_history.end(), hash) !=
+        current_history.end()) {
+      common_ancestor = hash;
+      break;
+    }
+  }
+
+  if (common_ancestor.empty()) {
+    throw std::runtime_error("No common ancestor found between branches");
+  }
+
+  // 获取三个版本的图像
+  cv::Mat base_image = checkout(common_ancestor);
+  cv::Mat source_image = checkout(source.head_commit);
+  cv::Mat current_image = checkout(current.head_commit);
+
+  // 执行三路合并
+  cv::Mat merged = merge_images(base_image, current_image, source_image);
+
+  // 检查是否有冲突
+  cv::Mat conflicts =
+      find_conflict_regions(base_image, current_image, source_image);
+  cv::Mat gray_conflicts;
+  cv::cvtColor(conflicts, gray_conflicts, cv::COLOR_BGR2GRAY);
+
+  if (cv::countNonZero(gray_conflicts) > 0) {
+    // 如果有冲突，将合并结果和冲突信息保存为临时文件
+    const auto temp_dir = repo_root / "temp";
+    fs::create_directories(temp_dir);
+
+    cv::imwrite((temp_dir / "merged.png").string(), merged);
+    cv::imwrite((temp_dir / "conflicts.png").string(), conflicts);
+
+    throw std::runtime_error(
+        "Merge conflicts detected. Resolve conflicts in temp directory");
+  }
+
+  // 如果没有冲突，提交合并结果
+  std::string merge_message = "Merge branch '" + std::string(source_branch) +
+                              "' into " + current_branch_;
+  commit(merged, "Merge Bot");
+
+  // 更新元数据
+  std::unordered_map<std::string, std::string> metadata;
+  metadata["merge_source"] = std::string(source_branch);
+  metadata["merge_target"] = current_branch_;
+  metadata["merge_base"] = common_ancestor;
+  metadata["message"] = merge_message;
+
+  add_metadata(parent_hash_, metadata);
+  update_branch_head(current_branch_, parent_hash_);
+
+  versionControlLogger->info("Successfully merged {} into {}", source_branch,
+                             current_branch_);
+}
+
+void ImageVersionControl::update_branch_head(std::string_view branch_name,
+                                             std::string_view commit_hash) {
+  const auto branch_path =
+      branches_dir_ / (std::string(branch_name) + ".branch");
+
+  // 首先检查分支是否存在
+  if (!fs::exists(branch_path)) {
+    throw std::runtime_error("Branch not found: " + std::string(branch_name));
+  }
+
+  // 读取现有分支信息
+  Branch branch = load_branch_info(branch_name);
+
+  // 更新head commit
+  branch.head_commit = std::string(commit_hash);
+
+  // 保存更新后的分支信息
+  save_branch_info(branch);
+
+  versionControlLogger->info("Updated branch {} head to commit {}", branch_name,
+                             commit_hash);
 }

@@ -25,6 +25,11 @@ void CropPreviewWidget::paintEvent(QPaintEvent *event) {
     painter.resetTransform();
   }
 
+  // 绘制网格
+  if (drawGrid) {
+    drawGridLines(painter);
+  }
+
   // 绘制裁切形状
   drawCropShape(painter);
 }
@@ -545,4 +550,91 @@ void CropPreviewWidget::updatePolygonDrag(std::vector<cv::Point> &points, const 
       }
     }
   }
+}
+
+void CropPreviewWidget::setAspectRatioLocked(bool locked) {
+    if (aspectRatioLocked != locked) {
+        aspectRatioLocked = locked;
+        if (locked) {
+            enforceAspectRatio();
+        }
+        update();
+    }
+}
+
+void CropPreviewWidget::setGridVisible(bool visible) {
+    if (drawGrid != visible) {
+        drawGrid = visible;
+        update();
+    }
+}
+
+void CropPreviewWidget::setAspectRatio(double ratio) {
+    if (aspectRatio != ratio) {
+        aspectRatio = ratio;
+        if (aspectRatioLocked) {
+            enforceAspectRatio();
+        }
+        update();
+    }
+}
+
+void CropPreviewWidget::enforceAspectRatio() {
+    std::visit([this](auto&& arg) {
+        using T = std::decay_t<decltype(arg)>;
+        if constexpr (std::is_same_v<T, cv::Rect>) {
+            // 调整矩形以匹配宽高比
+            double currentRatio = static_cast<double>(arg.width) / arg.height;
+            if (std::abs(currentRatio - aspectRatio) > 0.001) {
+                if (currentRatio > aspectRatio) {
+                    // 需要减小宽度
+                    int newWidth = static_cast<int>(arg.height * aspectRatio);
+                    arg.x += (arg.width - newWidth) / 2;
+                    arg.width = newWidth;
+                } else {
+                    // 需要减小高度
+                    int newHeight = static_cast<int>(arg.width / aspectRatio);
+                    arg.y += (arg.height - newHeight) / 2;
+                    arg.height = newHeight;
+                }
+            }
+        } else if constexpr (std::is_same_v<T, EllipseCrop>) {
+            // 调整椭圆以匹配宽高比
+            double currentRatio = static_cast<double>(arg.axes.width) / arg.axes.height;
+            if (std::abs(currentRatio - aspectRatio) > 0.001) {
+                if (currentRatio > aspectRatio) {
+                    arg.axes.width = static_cast<int>(arg.axes.height * aspectRatio);
+                } else {
+                    arg.axes.height = static_cast<int>(arg.axes.width / aspectRatio);
+                }
+            }
+        }
+    }, currentStrategy);
+}
+
+void CropPreviewWidget::drawGridLines(QPainter& painter) {
+    if (!drawGrid) return;
+
+    painter.save();
+    
+    // 设置网格线的样式
+    QPen gridPen(Qt::white);
+    gridPen.setStyle(Qt::DashLine);
+    gridPen.setWidth(1);
+    painter.setPen(gridPen);
+    
+    // 计算网格大小
+    int gridSize = 50;  // 可以根据需要调整网格大小
+    
+    // 绘制垂直线
+    for (int x = gridSize; x < width(); x += gridSize) {
+        painter.drawLine(x, 0, x, height());
+    }
+    
+    // 绘制水平线
+    for (int y = gridSize; y < height(); y += gridSize) {
+        painter.drawLine(0, y, width(), y);
+    }
+    
+    painter.restore();
 }

@@ -10,6 +10,7 @@
 #include "ElaStatusBar.h"
 #include "ElaToolButton.h"
 #include "ElaTreeView.h"
+#include <ElaCheckBox.h>
 
 
 #include <QContextMenuEvent>
@@ -20,15 +21,17 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QSettings>
 #include <QSplitter>
 #include <QStandardItemModel>
+#include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
-#include <QTimer>
-#include <QMenuBar>
-#include <QTextEdit> // Added to fix unknown type QTextEdit
+
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -496,7 +499,8 @@ void VersionControlWidget::onCommit() {
   if (!message.isEmpty()) {
     try {
       // Convert QImage to cv::Mat before commit
-      versionControl->commit(QImageToCvMat(currentImage), message.toStdString());
+      versionControl->commit(QImageToCvMat(currentImage),
+                             message.toStdString());
       refreshHistory();
     } catch (const std::exception &e) {
       QMessageBox::critical(this, tr("错误"), tr("提交失败: %1").arg(e.what()));
@@ -811,4 +815,373 @@ void VersionControlWidget::saveSettings() {
   settings.setValue("ThumbnailSize", this->settings.thumbnailSize);
   settings.setValue("DarkTheme", this->settings.darkTheme);
   settings.endGroup();
+}
+
+void VersionControlWidget::onShowHistory() {
+  auto selection = historyTree->selectionModel()->currentIndex();
+  if (!selection.isValid()) {
+    return;
+  }
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("版本历史详情"));
+  dialog.resize(600, 400);
+
+  auto layout = new QVBoxLayout(&dialog);
+  auto textEdit = new QTextEdit;
+  textEdit->setReadOnly(true);
+
+  QString hash = selection.data().toString();
+  try {
+    auto info = versionControl->commit_info(hash.toStdString());
+    QString details;
+    details += tr("提交哈希: %1\n").arg(QString::fromStdString(info.hash));
+    details += tr("作者: %1\n").arg(QString::fromStdString(info.author));
+    details += tr("日期: %1\n").arg(QString::fromStdString(info.date));
+    details += tr("\n提交信息:\n%1").arg(QString::fromStdString(info.message));
+
+    textEdit->setText(details);
+  } catch (const std::exception &e) {
+    textEdit->setText(tr("获取历史信息失败: %1").arg(e.what()));
+  }
+
+  layout->addWidget(textEdit);
+
+  auto buttonBox = new QDialogButtonBox(QDialogButtonBox::Close);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(buttonBox);
+
+  dialog.exec();
+}
+
+void VersionControlWidget::onFilterBranches() {
+  QString filter = searchBox->text().toLower();
+  for (int i = 0; i < branchModel->rowCount(); ++i) {
+    auto item = branchModel->item(i);
+    bool show = item->text().toLower().contains(filter);
+    branchList->setRowHidden(i, !show);
+  }
+}
+
+void VersionControlWidget::onMergeSelected() {
+  auto selection = branchList->selectionModel()->selectedIndexes();
+  if (selection.isEmpty()) {
+    QMessageBox::warning(this, tr("警告"), tr("请选择要合并的分支"));
+    return;
+  }
+
+  QString branchName = selection.first().data().toString();
+  try {
+    versionControl->merge_branch(branchName.toStdString());
+    refreshHistory();
+    QMessageBox::information(this, tr("成功"), tr("分支合并成功"));
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, tr("错误"),
+                          tr("分支合并失败: %1").arg(e.what()));
+  }
+}
+
+void VersionControlWidget::onShowDiffVisual() {
+  auto selection = historyTree->selectionModel()->selectedIndexes();
+  if (selection.size() != 2) {
+    QMessageBox::warning(this, tr("警告"), tr("请选择两个版本进行对比"));
+    return;
+  }
+
+  QString hash1 = selection[0].data().toString();
+  QString hash2 = selection[1].data().toString();
+
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("可视化差异"));
+  dialog.resize(800, 600);
+
+  auto layout = new QHBoxLayout(&dialog);
+
+  // 左侧图像
+  auto leftPreview = new CropPreviewWidget;
+  auto rightPreview = new CropPreviewWidget;
+
+  try {
+    auto img1 = versionControl->checkout(hash1.toStdString());
+    auto img2 = versionControl->checkout(hash2.toStdString());
+
+    leftPreview->setImage(CvMatToQImage(img1));
+    rightPreview->setImage(CvMatToQImage(img2));
+
+  } catch (const std::exception &e) {
+    QMessageBox::critical(this, tr("错误"),
+                          tr("加载图像失败: %1").arg(e.what()));
+    return;
+  }
+
+  layout->addWidget(leftPreview);
+  layout->addWidget(rightPreview);
+
+  dialog.exec();
+}
+
+void VersionControlWidget::onSortCommits(int column) {
+  historyModel->sort(column);
+}
+
+void VersionControlWidget::onBatchExport() {
+  QString dir = QFileDialog::getExistingDirectory(
+      this, tr("选择导出目录"), settings.defaultExportPath,
+      QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+
+  if (dir.isEmpty()) {
+    return;
+  }
+
+  auto selection = historyTree->selectionModel()->selectedIndexes();
+  QStringList hashes;
+  for (const auto &index : selection) {
+    if (index.column() == 0) { // 只处理第一列的哈希值
+      hashes << index.data().toString();
+    }
+  }
+
+  if (hashes.isEmpty()) {
+    QMessageBox::warning(this, tr("警告"), tr("请选择要导出的版本"));
+    return;
+  }
+
+  QProgressDialog progress(tr("正在导出版本..."), tr("取消"), 0, hashes.size(),
+                           this);
+  progress.setWindowModality(Qt::WindowModal);
+
+  int exported = 0;
+  for (const QString &hash : hashes) {
+    if (progress.wasCanceled())
+      break;
+
+    try {
+      auto img = versionControl->checkout(hash.toStdString());
+      QString filename = QString("%1/%2.png").arg(dir).arg(hash);
+      CvMatToQImage(img).save(filename);
+      exported++;
+    } catch (const std::exception &) {
+      continue;
+    }
+
+    progress.setValue(exported);
+  }
+
+  QMessageBox::information(this, tr("完成"),
+                           tr("成功导出 %1 个版本").arg(exported));
+}
+
+void VersionControlWidget::updateRecentBranches(const QString &branch) {
+  int index = settings.recentBranches.indexOf(branch);
+  if (index != -1) {
+    settings.recentBranches.removeAt(index);
+  }
+
+  settings.recentBranches.prepend(branch);
+
+  while (settings.recentBranches.size() > settings.maxRecentBranches) {
+    settings.recentBranches.removeLast();
+  }
+}
+
+void VersionControlWidget::onDeleteTag() {
+  auto selection = tagList->selectionModel()->selectedIndexes();
+  if (selection.isEmpty()) {
+    QMessageBox::warning(this, tr("警告"), tr("请选择要删除的标签"));
+    return;
+  }
+
+  QString tagName = selection.first().data().toString();
+  if (QMessageBox::question(
+          this, tr("确认"), tr("确定要删除标签 '%1' 吗?").arg(tagName),
+          QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+    try {
+      versionControl->delete_tag(tagName.toStdString());
+      updateTagList();
+    } catch (const std::exception &e) {
+      QMessageBox::critical(this, tr("错误"),
+                            tr("删除标签失败: %1").arg(e.what()));
+    }
+  }
+}
+
+void VersionControlWidget::onCustomizeColumns() {
+  QDialog dialog(this);
+  dialog.setWindowTitle(tr("自定义列"));
+  auto layout = new QVBoxLayout(&dialog);
+
+  QStringList columns = {tr("提交"), tr("作者"), tr("日期"), tr("消息")};
+
+  for (const QString &column : columns) {
+    auto cb = new ElaCheckBox(column);
+    cb->setChecked(columnVisibility.value(column, true));
+    layout->addWidget(cb);
+    connect(cb, &ElaCheckBox::toggled, this, [this, column](bool checked) {
+      columnVisibility[column] = checked;
+      updateColumnVisibility();
+    });
+  }
+
+  auto buttonBox =
+      new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+  connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+  layout->addWidget(buttonBox);
+
+  dialog.exec();
+}
+
+void VersionControlWidget::updateColumnVisibility() {
+  for (int i = 0; i < historyModel->columnCount(); ++i) {
+    QString columnName = historyModel->headerData(i, Qt::Horizontal).toString();
+    historyTree->setColumnHidden(i, !columnVisibility.value(columnName, true));
+  }
+}
+
+void VersionControlWidget::onSplitHorizontally() {
+  updateLayout(Qt::Horizontal);
+}
+
+void VersionControlWidget::onSplitVertically() { updateLayout(Qt::Vertical); }
+
+void VersionControlWidget::updateLayout(Qt::Orientation orientation) {
+  splitOrientation = orientation;
+  mainSplitter->setOrientation(orientation);
+  rightSplitter->setOrientation(orientation == Qt::Horizontal ? Qt::Vertical
+                                                              : Qt::Horizontal);
+}
+
+void VersionControlWidget::onToggleHistoryPanel() {
+  historyPanelVisible = !historyPanelVisible;
+  historyDock->setVisible(historyPanelVisible);
+  actions.toggleHistoryPanel->setChecked(historyPanelVisible);
+}
+
+void VersionControlWidget::onToggleInfoPanel() {
+  infoPanelVisible = !infoPanelVisible;
+  infoDock->setVisible(infoPanelVisible);
+  actions.toggleInfoPanel->setChecked(infoPanelVisible);
+}
+
+void VersionControlWidget::onCompactModeToggled(bool enabled) {
+  settings.compactMode = enabled;
+  // 调整UI元素间距和大小
+  historyTree->setStyleSheet(enabled ? "QTreeView { margin: 0; padding: 0; }"
+                                     : "");
+  branchList->setStyleSheet(enabled ? "QListView { margin: 0; padding: 0; }"
+                                    : "");
+  tagList->setStyleSheet(enabled ? "QListView { margin: 0; padding: 0; }" : "");
+}
+
+void VersionControlWidget::updatePreview() {
+  if (!imagePreview || currentImage.isNull()) {
+    return;
+  }
+
+  QSize previewSize = imagePreview->size();
+  if (previewSize.isEmpty()) {
+    previewSize = QSize(640, 480); // 默认预览大小
+  }
+
+  // 根据预览质量设置缩放图像
+  Qt::TransformationMode mode = settings.previewQuality < 100
+                                    ? Qt::SmoothTransformation
+                                    : Qt::FastTransformation;
+
+  QImage previewImage =
+      currentImage.scaled(previewSize, Qt::KeepAspectRatio, mode);
+
+  imagePreview->setImage(previewImage);
+}
+
+cv::Mat VersionControlWidget::QImageToCvMat(const QImage &image) {
+  if (image.isNull()) {
+    return cv::Mat();
+  }
+
+  // 标准化图像格式为 ARGB32 或 RGB32
+  QImage converted;
+  switch (image.format()) {
+  case QImage::Format_ARGB32:
+  case QImage::Format_ARGB32_Premultiplied:
+  case QImage::Format_RGB32:
+    converted = image;
+    break;
+  default:
+    converted = image.convertToFormat(QImage::Format_ARGB32);
+  }
+
+  cv::Mat mat;
+  switch (converted.format()) {
+  case QImage::Format_ARGB32:
+  case QImage::Format_ARGB32_Premultiplied: {
+    mat = cv::Mat(converted.height(), converted.width(), CV_8UC4,
+                  const_cast<uchar *>(converted.bits()),
+                  converted.bytesPerLine());
+    cv::Mat channels[4];
+    cv::split(mat, channels);
+    // 重新排列通道顺序：BGRA -> RGBA
+    std::swap(channels[0], channels[2]);
+    cv::merge(channels, 4, mat);
+    break;
+  }
+  case QImage::Format_RGB32: {
+    mat = cv::Mat(converted.height(), converted.width(), CV_8UC4,
+                  const_cast<uchar *>(converted.bits()),
+                  converted.bytesPerLine());
+    cv::cvtColor(mat, mat, cv::COLOR_BGRA2BGR);
+    break;
+  }
+  default:
+    return cv::Mat();
+  }
+
+  return mat.clone(); // 返回深拷贝以确保数据所有权
+}
+
+QImage VersionControlWidget::CvMatToQImage(const cv::Mat &mat) {
+  if (mat.empty()) {
+    return QImage();
+  }
+
+  // 根据Mat的类型选择适当的转换方式
+  switch (mat.type()) {
+  case CV_8UC4: // 8位无符号，4通道
+  {
+    cv::Mat rgba;
+    // 确保通道顺序正确（BGRA -> RGBA）
+    cv::Mat channels[4];
+    cv::split(mat, channels);
+    std::swap(channels[0], channels[2]);
+    cv::merge(channels, 4, rgba);
+
+    return QImage(rgba.data, rgba.cols, rgba.rows, rgba.step,
+                  QImage::Format_RGBA8888)
+        .copy();
+  }
+
+  case CV_8UC3: // 8位无符号，3通道
+  {
+    cv::Mat rgb;
+    cv::cvtColor(mat, rgb, cv::COLOR_BGR2RGB);
+    return QImage(rgb.data, rgb.cols, rgb.rows, rgb.step, QImage::Format_RGB888)
+        .copy();
+  }
+
+  case CV_8UC1: // 8位无符号，单通道
+  {
+    return QImage(mat.data, mat.cols, mat.rows, mat.step,
+                  QImage::Format_Grayscale8)
+        .copy();
+  }
+
+  default:
+    // 对于其他格式，尝试转换为BGR后再处理
+    cv::Mat temp;
+    mat.convertTo(temp, CV_8UC3);
+    cv::cvtColor(temp, temp, cv::COLOR_BGR2RGB);
+    return QImage(temp.data, temp.cols, temp.rows, temp.step,
+                  QImage::Format_RGB888)
+        .copy();
+  }
 }

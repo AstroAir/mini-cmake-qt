@@ -18,6 +18,9 @@ public:
   void zoomOut();
   void fitToView();
   void setZoom(float zoom);
+  void setAspectRatioLocked(bool locked);
+  void setGridVisible(bool visible);
+  void setAspectRatio(double ratio);
 
 signals:
   void strategyChanged();
@@ -90,4 +93,9 @@ private:
 
   QCursor defaultCursor;
   bool isHovered = false;
+  bool drawGrid = false;
+  bool aspectRatioLocked = false;
+  double aspectRatio = 1.0;
+  void drawGridLines(QPainter& painter);
+  void enforceAspectRatio();
 };

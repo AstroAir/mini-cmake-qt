@@ -33,6 +33,7 @@ set(SOURCE_FILES
     src/image/Convolve.cpp
     src/image/Crop.cpp
     src/image/Denoise.cpp
+    src/image/Diff.cpp
     src/image/Exif.cpp
     src/image/Filter.cpp
     src/image/Histogram.cpp
