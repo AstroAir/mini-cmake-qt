@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <thread>
 #include <utility>
 
@@ -57,6 +58,23 @@ public:
   static uint32_t fast_crc32(const uint8_t *data, size_t length,
                              uint32_t crc = 0);
 
+  // 在 CRCCalculator 类中添加新的配置结构体
+  struct CRCConfig {
+    enum class OptimizationLevel { None, Basic, SIMD, Maximum };
+
+    OptimizationLevel opt_level = OptimizationLevel::SIMD;
+    size_t chunk_size = 1024;
+    bool use_lookup_table = true;
+    bool enable_parallel = true;
+  };
+
+  // 在 CRCCalculator 类中添加新的方法
+  static void set_config(const CRCConfig &config) { s_config = config; }
+
+  static uint32_t calculate_with_progress(
+      const uint8_t *data, size_t length,
+      std::function<void(float)> progress_callback = nullptr);
+
 private:
 #if defined(__AVX2__)
   /**
@@ -67,6 +85,9 @@ private:
    */
   static uint32_t process_block_simd(__m128i data, uint32_t crc);
 #endif
+
+  static CRCConfig s_config;
+  static thread_local std::array<uint8_t, 4096> s_buffer;
 };
 
 namespace crc_utils {
@@ -93,6 +114,29 @@ std::pair<int, int>
 brute_force_crc(const IHDRData &original_ihdr, uint32_t target_crc,
                 int max_dim = 5000,
                 int num_threads = std::thread::hardware_concurrency());
+
+// 在 crc_utils namespace 中添加新的结构体和函数
+struct BruteForceConfig {
+  int min_width = 1;
+  int min_height = 1;
+  int max_width = 5000;
+  int max_height = 5000;
+  int num_threads = std::thread::hardware_concurrency();
+  bool enable_early_exit = true;
+  std::function<void(float)> progress_callback = nullptr;
+};
+
+struct BruteForceResult {
+  int width = -1;
+  int height = -1;
+  uint32_t iterations = 0;
+  double elapsed_time = 0.0;
+  bool success = false;
+};
+
+BruteForceResult enhanced_brute_force(const IHDRData &original_ihdr,
+                                      uint32_t target_crc,
+                                      const BruteForceConfig &config = {});
 
 /**
  * @brief Exception class for CRC validation errors.

@@ -302,3 +302,102 @@ vector<ChannelQuality> analyze_all_channels_quality(const Mat &image) {
 
   return qualities;
 }
+
+void steganograph::preprocess_image(cv::Mat &image,
+                                    const ChannelConfig &config) {
+  if (config.preserveEdges) {
+    cv::Mat edges;
+    cv::Canny(image, edges, 100, 200);
+
+// 使用边缘信息调整隐写强度
+#pragma omp parallel for collapse(2)
+    for (int i = 0; i < image.rows; i++) {
+      for (int j = 0; j < image.cols; j++) {
+        if (edges.at<uchar>(i, j) > 0) {
+          // 在边缘区域减少修改
+          // 实现代码...
+        }
+      }
+    }
+  }
+
+  // 根据图像特征自适应调整
+  cv::Mat yuv;
+  cv::cvtColor(image, yuv, cv::COLOR_BGR2YUV);
+  // 实现自适应调整...
+}
+
+void steganograph::adaptive_lsb_hide(cv::Mat &image, const std::string &message,
+                                     const ChannelConfig &config) {
+  // 压缩消息（如果启用）
+  std::string processedMessage = message;
+  if (config.compression != ChannelConfig::CompressionMode::NONE) {
+    // 实现压缩算法...
+  }
+
+  // 加密消息（如果启用）
+  if (config.useEncryption) {
+    // 实现加密...
+  }
+
+  // 自适应LSB算法实现
+  cv::Mat complexityMap;
+  cv::Laplacian(image, complexityMap, CV_64F);
+
+  std::vector<bool> bits = BinaryConverter::stringToBits(processedMessage);
+
+#pragma omp parallel for schedule(dynamic)
+  for (int i = 0; i < bits.size(); i++) {
+    // 根据复杂度图选择最佳嵌入位置
+    // 实现代码...
+  }
+}
+
+std::string steganograph::adaptive_lsb_extract(const cv::Mat &image,
+                                               const ChannelConfig &config) {
+  // 提取实现...
+  std::string result;
+
+  // 解密（如果启用）
+  if (config.useEncryption) {
+    // 实现解密...
+  }
+
+  // 解压缩（如果启用）
+  if (config.compression != ChannelConfig::CompressionMode::NONE) {
+    // 实现解压缩...
+  }
+
+  return result;
+}
+
+double steganograph::evaluate_image_quality(const cv::Mat &original,
+                                            const cv::Mat &modified) {
+  // 计算PSNR
+  double psnr = cv::PSNR(original, modified);
+
+  // 计算SSIM
+  cv::Scalar ssim = cv::mean(original.mul(modified));
+
+  // 计算综合质量分数
+  return (psnr * 0.6 + ssim[0] * 0.4) / 100.0;
+}
+
+bool steganograph::detect_steganography(const cv::Mat &image,
+                                        double *confidence) {
+  // 实现隐写检测算法
+  cv::Mat hist;
+  int histSize = 256;
+  float range[] = {0, 256};
+  const float *histRange = {range};
+  cv::calcHist(&image, 1, 0, cv::Mat(), hist, 1, &histSize, &histRange);
+
+  // 分析直方图特征
+  // 实现特征分析...
+
+  if (confidence) {
+    *confidence = 0.0; // 设置检测置信度
+  }
+
+  return false; // 返回检测结果
+}

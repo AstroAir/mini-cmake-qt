@@ -1,29 +1,34 @@
-#include "StegoWindow.hpp"
-#include "Channels.hpp"
-#include "LSB.hpp"
-#include "MSB.hpp"
-#include "Stego.hpp"
-#include "WaterMark.hpp"
+#include "StegoWidget.hpp"
+#include "Def.h"
+#include "image/steganograph/Channels.hpp"
+#include "image/steganograph/LSB.hpp"
+#include "image/steganograph/MSB.hpp"
+#include "image/steganograph/Stego.hpp"
+#include "image/steganograph/WaterMark.hpp"
 
 #include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QMenuBar>
 
-#include "ElaPushButton.h"
-#include "ElaSpinBox.h"
-#include "ElaComboBox.h"
 #include "ElaCheckBox.h"
+#include "ElaComboBox.h"
 #include "ElaDoubleSpinBox.h"
+#include "ElaLineEdit.h"
+#include "ElaMenu.h"
+#include "ElaMenuBar.h"
 #include "ElaProgressBar.h"
+#include "ElaPushButton.h"
 #include "ElaSlider.h"
+#include "ElaSpinBox.h"
 #include "ElaStatusBar.h"
+#include "ElaTabWidget.h"
 
 StegoWindow::StegoWindow(QWidget *parent) : QMainWindow(parent) {
   setWindowTitle(tr("图像隐写工具"));
@@ -33,124 +38,168 @@ StegoWindow::StegoWindow(QWidget *parent) : QMainWindow(parent) {
 }
 
 void StegoWindow::setupUI() {
+  // 创建中心部件
   QWidget *centralWidget = new QWidget(this);
   setCentralWidget(centralWidget);
 
+  // 使用QHBoxLayout作为主布局
   QHBoxLayout *mainLayout = new QHBoxLayout(centralWidget);
-  mainLayout->setContentsMargins(5, 5, 5, 5);
-  mainLayout->setSpacing(10);
+  mainLayout->setContentsMargins(10, 10, 10, 10);
+  mainLayout->setSpacing(15);
 
   // 左侧控制面板
   QWidget *controlPanel = new QWidget;
   QVBoxLayout *controlLayout = new QVBoxLayout(controlPanel);
   controlLayout->setContentsMargins(0, 0, 0, 0);
-  controlLayout->setSpacing(5);
+  controlLayout->setSpacing(10);
 
-  // 设置最小宽度而不是固定宽度，允许放大
-  controlPanel->setMinimumWidth(280);
+  // 设置左侧面板的大小策略
+  controlPanel->setMinimumWidth(300);
   controlPanel->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-
-  // 基本操作按钮组
-  QGroupBox *operationsGroup = new QGroupBox(tr("基本操作"));
-  QVBoxLayout *operationsLayout = new QVBoxLayout(operationsGroup);
-
-  loadImageButton = new ElaPushButton(tr("载入图像"));
-  saveImageButton = new ElaPushButton(tr("保存图像"));
-  operationsLayout->addWidget(loadImageButton);
-  operationsLayout->addWidget(saveImageButton);
-
-  controlLayout->addWidget(operationsGroup);
-
-  // 设置显示控件组
-  setupDisplayControls();
-  controlLayout->addWidget(displayGroup);
-
-  // 设置图像信息组
-  setupImageInfo();
-  controlLayout->addWidget(imageInfoGroup);
-
-  // 创建标签页
-  tabWidget = new QTabWidget;
-  tabWidget->addTab(createLSBPanel(), tr("LSB隐写"));
-  tabWidget->addTab(createFourierPanel(), tr("傅里叶隐写"));
-  tabWidget->addTab(createChannelPanel(), tr("多通道隐写"));
-  tabWidget->addTab(createWatermarkPanel(), tr("数字水印"));
-  tabWidget->addTab(createMSBPanel(), tr("MSB压缩"));
-
-  controlLayout->addWidget(tabWidget);
-  controlLayout->addStretch();
 
   // 右侧预览区域
   QWidget *previewPanel = new QWidget;
   QVBoxLayout *previewLayout = new QVBoxLayout(previewPanel);
   previewLayout->setContentsMargins(0, 0, 0, 0);
-  previewLayout->setSpacing(5);
+  previewLayout->setSpacing(10);
 
+  // 设置预览标签的大小策略
   imagePreviewLabel = new QLabel;
   imagePreviewLabel->setMinimumSize(400, 300);
   imagePreviewLabel->setSizePolicy(QSizePolicy::Expanding,
                                    QSizePolicy::Expanding);
   imagePreviewLabel->setAlignment(Qt::AlignCenter);
-  imagePreviewLabel->setScaledContents(false); // 使用aspectRatioMode替代
+  imagePreviewLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
 
+  // 优化直方图显示
   histogramLabel = new QLabel;
-  histogramLabel->setMinimumHeight(120);
+  histogramLabel->setMinimumHeight(150);
+  histogramLabel->setMaximumHeight(200);
   histogramLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  histogramLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
 
+  // 添加预览控件
   previewLayout->addWidget(imagePreviewLabel, 4);
   previewLayout->addWidget(histogramLabel, 1);
 
-  // 设置分割比例
+  // 设置伸缩比例
   mainLayout->addWidget(controlPanel, 1);
   mainLayout->addWidget(previewPanel, 3);
 
-  // 设置状态栏
-  setupStatusBar();
+  // 优化控制面板的布局
+  setupControlPanel(controlLayout);
 
-  // 设置状态指示器
-  setupStatusIndicators();
-  setupPreviewControls();
+  // 添加质量监测面板
+  auto qualityMonitor = createQualityMonitorPanel();
+  controlLayout->addWidget(qualityMonitor);
 
-  // 预览定时器设置
-  previewTimer = new QTimer(this);
-  previewTimer->setInterval(500); // 500ms刷新间隔
-  connect(previewTimer, &QTimer::timeout, this, &StegoWindow::updatePreview);
+  // 添加处理控制选项
+  setupProcessingControls();
+  setupPreprocessingOptions();
 
-  // 连接信号
-  connect(loadImageButton, &ElaPushButton::clicked, this,
-          &StegoWindow::loadImage);
-  connect(saveImageButton, &ElaPushButton::clicked, this,
-          &StegoWindow::saveImage);
-  connect(previewModeBox, QOverload<int>::of(&ElaComboBox::currentIndexChanged),
-          this, &StegoWindow::updatePreview);
-  connect(displayModeBox, QOverload<int>::of(&ElaComboBox::currentIndexChanged),
-          this, &StegoWindow::switchDisplayMode);
-  connect(channelBox, QOverload<int>::of(&ElaComboBox::currentIndexChanged), this,
-          &StegoWindow::updateChannelPreview);
-  connect(bitPlaneBox, QOverload<int>::of(&ElaSpinBox::valueChanged), this,
-          &StegoWindow::updateBitPlanePreview);
+  // 设置通道质量指示器
+  setupChannelQualityIndicators();
+}
+
+void StegoWindow::setupControlPanel(QVBoxLayout *layout) {
+  // 基本操作按钮组
+  QGroupBox *operationsGroup = new QGroupBox(tr("基本操作"));
+  QVBoxLayout *operationsLayout = new QVBoxLayout(operationsGroup);
+  operationsLayout->setSpacing(8);
+
+  loadImageButton = new ElaPushButton(tr("载入图像"));
+  saveImageButton = new ElaPushButton(tr("保存图像"));
+
+  // 使用网格布局优化按钮排列
+  QGridLayout *buttonGrid = new QGridLayout;
+  buttonGrid->addWidget(loadImageButton, 0, 0);
+  buttonGrid->addWidget(saveImageButton, 0, 1);
+  operationsLayout->addLayout(buttonGrid);
+
+  // 添加显示控件组
+  setupDisplayControls();
+
+  // 添加图像信息组
+  setupImageInfo();
+
+  // 创建标签页并优化其布局
+  setupTabbedPanel();
+
+  // 按合理顺序添加组件
+  layout->addWidget(operationsGroup);
+  layout->addWidget(displayGroup);
+  layout->addWidget(imageInfoGroup);
+  layout->addWidget(tabWidget);
+
+  // 添加弹性空间
+  layout->addStretch();
 }
 
 void StegoWindow::setupDisplayControls() {
   displayGroup = new QGroupBox(tr("显示设置"));
   QGridLayout *displayLayout = new QGridLayout(displayGroup);
+  displayLayout->setVerticalSpacing(8);
+  displayLayout->setHorizontalSpacing(15);
 
+  // 使用网格布局优化控件排列
   displayModeBox = new ElaComboBox;
-  displayModeBox->addItems({tr("原始图像"), tr("处理结果"), tr("差异对比"),
-                            tr("通道视图"), tr("位平面视图"), tr("频谱分析")});
-
   channelBox = new ElaComboBox;
-  channelBox->addItems({tr("全部"), tr("红"), tr("绿"), tr("蓝"), tr("Alpha")});
-
   bitPlaneBox = new ElaSpinBox;
-  bitPlaneBox->setRange(0, 7);
 
-  displayLayout->addWidget(new QLabel(tr("显示模式:")), 0, 0);
-  displayLayout->addWidget(displayModeBox, 0, 1);
-  displayLayout->addWidget(new QLabel(tr("通道:")), 1, 0);
-  displayLayout->addWidget(channelBox, 1, 1);
-  displayLayout->addWidget(new QLabel(tr("位平面:")), 2, 0);
-  displayLayout->addWidget(bitPlaneBox, 2, 1);
+  int row = 0;
+  displayLayout->addWidget(new QLabel(tr("显示模式:")), row, 0);
+  displayLayout->addWidget(displayModeBox, row++, 1);
+
+  displayLayout->addWidget(new QLabel(tr("通道:")), row, 0);
+  displayLayout->addWidget(channelBox, row++, 1);
+
+  displayLayout->addWidget(new QLabel(tr("位平面:")), row, 0);
+  displayLayout->addWidget(bitPlaneBox, row, 1);
+
+  // 设置列的拉伸因子
+  displayLayout->setColumnStretch(1, 1);
+}
+
+void StegoWindow::resizeEvent(QResizeEvent *event) {
+  QMainWindow::resizeEvent(event);
+
+  // 计算预览图像的最佳大小
+  QSize labelSize = imagePreviewLabel->size();
+  if (!originalImage.empty()) {
+    double aspectRatio = (double)originalImage.cols / originalImage.rows;
+    int newWidth = labelSize.width();
+    int newHeight = newWidth / aspectRatio;
+
+    if (newHeight > labelSize.height()) {
+      newHeight = labelSize.height();
+      newWidth = newHeight * aspectRatio;
+    }
+
+    updatePreviewWithSize(QSize(newWidth, newHeight));
+  }
+}
+
+void StegoWindow::updatePreviewWithSize(const QSize &size) {
+  if (originalImage.empty())
+    return;
+
+  QImage display;
+  switch (previewModeBox->currentIndex()) {
+  case 0: // 原始图像
+    display = matToQImage(originalImage);
+    break;
+  case 1: // 处理结果
+    display = matToQImage(processedImage);
+    break;
+  case 2: // 差异对比
+    cv::Mat diff;
+    cv::absdiff(originalImage, processedImage, diff);
+    display = matToQImage(diff);
+    break;
+  }
+
+  imagePreviewLabel->setPixmap(QPixmap::fromImage(display).scaled(
+      size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
 QWidget *StegoWindow::createLSBPanel() {
@@ -404,7 +453,7 @@ void StegoWindow::loadImage() {
   processedImage = originalImage.clone();
   saveImageButton->setEnabled(true);
   updatePreview();
-  emit onImageLoaded();  // 添加这一行，发射信号
+  emit onImageLoaded(); // 添加这一行，发射信号
 }
 
 void StegoWindow::saveImage() {
@@ -426,40 +475,38 @@ void StegoWindow::saveImage() {
 }
 
 void StegoWindow::embedMessage() {
-  if (originalImage.empty()) {
-    showError(tr("请先载入图像"));
+  if (!checkImageValidity())
     return;
-  }
 
   try {
-    switch (tabWidget->currentIndex()) {
-    case 0: // LSB
-      embedLSB(processedImage, lsbMessageEdit->toPlainText().toStdString());
-      break;
-    case 1: // Fourier
-      processedImage = embed_message(
-          originalImage, fourierMessageEdit->toPlainText().toStdString(),
-          alphaSpinBox->value());
-      break;
-    case 2: { // Multi-channel
-      ChannelConfig config;
-      config.useBlue = blueChannelBox->isChecked();
-      config.useGreen = greenChannelBox->isChecked();
-      config.useRed = redChannelBox->isChecked();
-      config.useAlpha = alphaChannelBox->isChecked();
-      config.bitsPerChannel = bitsPerChannelBox->value();
-      config.scrambleKey = scrambleKeyBox->value();
+    startOperation(tr("消息嵌入"));
 
+    // 应用预处理
+    if (isPreprocessingEnabled) {
+      steganograph::preprocess_image(processedImage, channelConfig);
+    }
+
+    // 根据选择的模式执行嵌入
+    if (isAdaptiveEnabled) {
+      steganograph::adaptive_lsb_hide(
+          processedImage, lsbMessageEdit->toPlainText().toStdString(),
+          channelConfig);
+    } else {
       steganograph::multi_channel_hide(
-          processedImage, channelMessageEdit->toPlainText().toStdString(),
-          config);
-      break;
+          processedImage, lsbMessageEdit->toPlainText().toStdString(),
+          channelConfig);
     }
-    }
+
+    // 更新质量监测
+    updateQualityMonitor(originalImage, processedImage);
+    updateChannelAnalysis();
     updatePreview();
-    showSuccess(tr("消息嵌入成功"));
+
+    finishOperation(true);
+    showOperationResult(true, tr("消息嵌入成功"));
   } catch (const std::exception &e) {
-    showError(tr("嵌入失败: %1").arg(e.what()));
+    finishOperation(false);
+    showOperationResult(false, tr("消息嵌入失败: %1").arg(e.what()));
   }
 }
 
@@ -586,11 +633,6 @@ void StegoWindow::updateStatusInfo() {
                      .arg(originalImage.depth());
 
   statusBar->showMessage(info);
-}
-
-void StegoWindow::resizeEvent(QResizeEvent *event) {
-  QMainWindow::resizeEvent(event);
-  updatePreview(); // 重新调整预览图像大小
 }
 
 // 水印相关实现
@@ -823,98 +865,275 @@ bool StegoWindow::checkImageValidity() {
 }
 
 void StegoWindow::createMenus() {
-    // 创建文件菜单
-    QMenu *fileMenu = menuBar()->addMenu(tr("文件"));
-    
-    QAction *openAction = new QAction(tr("打开图像"), this);
-    openAction->setShortcut(QKeySequence::Open);
-    connect(openAction, &QAction::triggered, this, &StegoWindow::loadImage);
-    
-    QAction *saveAction = new QAction(tr("保存图像"), this);
-    saveAction->setShortcut(QKeySequence::Save);
-    saveAction->setEnabled(false);
-    connect(saveAction, &QAction::triggered, this, &StegoWindow::saveImage);
-    connect(this, &StegoWindow::onImageLoaded, [saveAction]() {
-        saveAction->setEnabled(true);
-    });
-    
-    QAction *exitAction = new QAction(tr("退出"), this);
-    exitAction->setShortcut(QKeySequence::Quit);
-    connect(exitAction, &QAction::triggered, this, &QWidget::close);
-    
-    fileMenu->addAction(openAction);
-    fileMenu->addAction(saveAction);
-    fileMenu->addSeparator();
-    fileMenu->addAction(exitAction);
+  // 替换menuBar
+  ElaMenuBar *menuBar = new ElaMenuBar(this);
+  setMenuBar(menuBar);
 
-    // 创建编辑菜单
-    QMenu *editMenu = menuBar()->addMenu(tr("编辑"));
-    
-    QAction *undoAction = new QAction(tr("撤销"), this);
-    undoAction->setShortcut(QKeySequence::Undo);
-    
-    QAction *redoAction = new QAction(tr("重做"), this);
-    redoAction->setShortcut(QKeySequence::Redo);
-    
-    QAction *resetAction = new QAction(tr("重置图像"), this);
-    resetAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
-    connect(resetAction, &QAction::triggered, [this]() {
-        if (!originalImage.empty()) {
-            processedImage = originalImage.clone();
-            updatePreview();
-        }
-    });
-    
-    editMenu->addAction(undoAction);
-    editMenu->addAction(redoAction);
-    editMenu->addSeparator();
-    editMenu->addAction(resetAction);
+  // 创建文件菜单
+  ElaMenu *fileMenu = menuBar->addMenu(ElaIconType::File, tr("文件"));
 
-    // 创建视图菜单
-    QMenu *viewMenu = menuBar()->addMenu(tr("视图"));
-    
-    QAction *zoomInAction = new QAction(tr("放大"), this);
-    zoomInAction->setShortcut(QKeySequence::ZoomIn);
-    connect(zoomInAction, &QAction::triggered, [this]() {
-        previewSizeSlider->setValue(previewSizeSlider->value() + 10);
-    });
-    
-    QAction *zoomOutAction = new QAction(tr("缩小"), this);
-    zoomOutAction->setShortcut(QKeySequence::ZoomOut);
-    connect(zoomOutAction, &QAction::triggered, [this]() {
-        previewSizeSlider->setValue(previewSizeSlider->value() - 10);
-    });
-    
-    QAction *fitToWindowAction = new QAction(tr("适应窗口"), this);
-    fitToWindowAction->setShortcut(Qt::CTRL | Qt::Key_F);
-    connect(fitToWindowAction, &QAction::triggered, [this]() {
-        previewSizeSlider->setValue(100);
-    });
-    
-    viewMenu->addAction(zoomInAction);
-    viewMenu->addAction(zoomOutAction);
-    viewMenu->addAction(fitToWindowAction);
+  // 添加带图标的文件操作
+  QAction *openAction = fileMenu->addElaIconAction(
+      ElaIconType::BoxOpen, tr("打开图像"), QKeySequence::Open);
+  connect(openAction, &QAction::triggered, this, &StegoWindow::loadImage);
 
-    // 创建帮助菜单
-    QMenu *helpMenu = menuBar()->addMenu(tr("帮助"));
-    
-    QAction *aboutAction = new QAction(tr("关于"), this);
-    connect(aboutAction, &QAction::triggered, [this]() {
-        QMessageBox::about(this, tr("关于图像隐写工具"),
-            tr("图像隐写工具 v1.0\n\n"
-               "一个用于图像隐写和水印嵌入的工具。\n"
-               "支持LSB隐写、傅里叶变换隐写、多通道隐写等功能。"));
-    });
-    
-    QAction *helpAction = new QAction(tr("使用帮助"), this);
-    helpAction->setShortcut(QKeySequence::HelpContents);
-    
-    helpMenu->addAction(helpAction);
-    helpMenu->addSeparator();
-    helpMenu->addAction(aboutAction);
+  QAction *saveAction = fileMenu->addElaIconAction(
+      ElaIconType::FloppyDisk, tr("保存图像"), QKeySequence::Save);
+  saveAction->setEnabled(false);
+  connect(saveAction, &QAction::triggered, this, &StegoWindow::saveImage);
+  connect(this, &StegoWindow::onImageLoaded,
+          [saveAction]() { saveAction->setEnabled(true); });
 
-    // 禁用尚未实现的功能
-    undoAction->setEnabled(false);
-    redoAction->setEnabled(false);
-    helpAction->setEnabled(false);
+  QAction *exitAction = fileMenu->addElaIconAction(
+      ElaIconType::Xmark, tr("退出"), QKeySequence::Quit);
+  connect(exitAction, &QAction::triggered, this, &QWidget::close);
+
+  fileMenu->addSeparator();
+  fileMenu->addAction(exitAction);
+
+  // 创建编辑菜单
+  ElaMenu *editMenu = menuBar->addMenu(ElaIconType::Pen, tr("编辑"));
+
+  QAction *undoAction = editMenu->addElaIconAction(
+      ElaIconType::RotateLeft, tr("撤销"), QKeySequence::Undo);
+  QAction *redoAction = editMenu->addElaIconAction(
+      ElaIconType::RotateReverse, tr("重做"), QKeySequence::Redo);
+  QAction *resetAction =
+      editMenu->addElaIconAction(ElaIconType::PowerOff, tr("重置图像"),
+                                 QKeySequence(Qt::CTRL | Qt::Key_R));
+
+  connect(resetAction, &QAction::triggered, [this]() {
+    if (!originalImage.empty()) {
+      processedImage = originalImage.clone();
+      updatePreview();
+    }
+  });
+
+  editMenu->addSeparator();
+  editMenu->addAction(resetAction);
+
+  // 创建视图菜单
+  ElaMenu *viewMenu =
+      menuBar->addMenu(ElaIconType::CameraViewfinder, tr("视图"));
+
+  QAction *zoomInAction = viewMenu->addElaIconAction(
+      ElaIconType::MagnifyingGlassPlus, tr("放大"), QKeySequence::ZoomIn);
+  connect(zoomInAction, &QAction::triggered, [this]() {
+    previewSizeSlider->setValue(previewSizeSlider->value() + 10);
+  });
+
+  QAction *zoomOutAction = viewMenu->addElaIconAction(
+      ElaIconType::MagnifyingGlassMinus, tr("缩小"), QKeySequence::ZoomOut);
+  connect(zoomOutAction, &QAction::triggered, [this]() {
+    previewSizeSlider->setValue(previewSizeSlider->value() - 10);
+  });
+
+  QAction *fitToWindowAction = viewMenu->addElaIconAction(
+      ElaIconType::Window, tr("适应窗口"), QKeySequence(Qt::CTRL | Qt::Key_F));
+  connect(fitToWindowAction, &QAction::triggered,
+          [this]() { previewSizeSlider->setValue(100); });
+
+  // 创建帮助菜单
+  ElaMenu *helpMenu = menuBar->addMenu(ElaIconType::Helicopter, tr("帮助"));
+
+  QAction *helpAction = helpMenu->addElaIconAction(
+      ElaIconType::HandshakeAngle, tr("使用帮助"), QKeySequence::HelpContents);
+
+  QAction *aboutAction =
+      helpMenu->addElaIconAction(ElaIconType::Info, tr("关于"));
+  connect(aboutAction, &QAction::triggered, [this]() {
+    QMessageBox::about(this, tr("关于图像隐写工具"),
+                       tr("图像隐写工具 v1.0\n\n"
+                          "一个用于图像隐写和水印嵌入的工具。\n"
+                          "支持LSB隐写、傅里叶变换隐写、多通道隐写等功能。"));
+  });
+
+  helpMenu->addSeparator();
+  helpMenu->addAction(aboutAction);
+
+  // 禁用尚未实现的功能
+  undoAction->setEnabled(false);
+  redoAction->setEnabled(false);
+  helpAction->setEnabled(false);
+}
+
+void StegoWindow::setupTabbedPanel() {
+  // 创建标签页控件
+  tabWidget = new ElaTabWidget;
+  tabWidget->setStyleSheet("QTabWidget::pane { border: 1px solid #C2C7CB; }");
+
+  // 添加LSB隐写标签页
+  QWidget *lsbPanel = createLSBPanel();
+  tabWidget->addTab(lsbPanel, tr("LSB隐写"));
+
+  // 添加傅里叶变换隐写标签页
+  QWidget *fourierPanel = createFourierPanel();
+  tabWidget->addTab(fourierPanel, tr("傅里叶隐写"));
+
+  // 添加多通道隐写标签页
+  QWidget *channelPanel = createChannelPanel();
+  tabWidget->addTab(channelPanel, tr("多通道隐写"));
+
+  // 添加水印嵌入标签页
+  QWidget *watermarkPanel = createWatermarkPanel();
+  tabWidget->addTab(watermarkPanel, tr("水印处理"));
+
+  // 添加MSB压缩标签页
+  QWidget *msbPanel = createMSBPanel();
+  tabWidget->addTab(msbPanel, tr("MSB压缩"));
+
+  // 连接标签页切换信号
+  connect(tabWidget, &QTabWidget::currentChanged, [this](int index) {
+    // 切换标签页时更新界面状态
+    updatePreview();
+    updateStatusInfo();
+  });
+
+  // 设置标签页的最小高度
+  tabWidget->setMinimumHeight(300);
+}
+
+QGroupBox *StegoWindow::createQualityMonitorPanel() {
+  QGroupBox *group = new QGroupBox(tr("图像质量监测"));
+  QVBoxLayout *layout = new QVBoxLayout(group);
+
+  // PSNR指示器
+  psnrLabel = new QLabel(tr("PSNR: N/A"));
+  layout->addWidget(psnrLabel);
+
+  // SSIM指示器
+  ssimLabel = new QLabel(tr("SSIM: N/A"));
+  layout->addWidget(ssimLabel);
+
+  // 容量指示器
+  capacityLabel = new QLabel(tr("可用容量: N/A"));
+  layout->addWidget(capacityLabel);
+
+  // 质量进度条
+  qualityBar = new ElaProgressBar;
+  qualityBar->setRange(0, 100);
+  layout->addWidget(qualityBar);
+
+  // 隐写检测指示器
+  detectionLabel = new QLabel(tr("隐写分析: 未检测"));
+  layout->addWidget(detectionLabel);
+
+  return group;
+}
+
+void StegoWindow::setupChannelQualityIndicators() {
+  channelQualityBars.clear();
+  channelQualityLabels.clear();
+
+  QStringList channelNames = {tr("蓝色"), tr("绿色"), tr("红色"), tr("Alpha")};
+  for (const auto &name : channelNames) {
+    ElaProgressBar *bar = new ElaProgressBar;
+    QLabel *label = new QLabel(name + tr(" 通道质量: N/A"));
+    channelQualityBars.push_back(bar);
+    channelQualityLabels.push_back(label);
+  }
+}
+
+void StegoWindow::setupProcessingControls() {
+  adaptiveProcessingBox = new ElaCheckBox(tr("自适应处理"));
+  preserveEdgesBox = new ElaCheckBox(tr("保护边缘"));
+  qualityThresholdBox = new ElaDoubleSpinBox;
+  qualityThresholdBox->setRange(0.0, 1.0);
+  qualityThresholdBox->setValue(0.8);
+  qualityThresholdBox->setSingleStep(0.05);
+
+  connect(adaptiveProcessingBox, &ElaCheckBox::toggled, [this](bool checked) {
+    isAdaptiveEnabled = checked;
+    channelConfig.embedMode = checked ? ChannelConfig::EmbedMode::ADAPTIVE_LSB
+                                      : ChannelConfig::EmbedMode::LSB;
+  });
+
+  connect(preserveEdgesBox, &ElaCheckBox::toggled,
+          [this](bool checked) { channelConfig.preserveEdges = checked; });
+
+  connect(qualityThresholdBox, &ElaDoubleSpinBox::valueChanged,
+          [this](double value) { channelConfig.qualityThreshold = value; });
+}
+
+void StegoWindow::setupPreprocessingOptions() {
+  compressionModeBox = new ElaComboBox;
+  compressionModeBox->addItems(
+      {tr("无压缩"), tr("Huffman压缩"), tr("LZW压缩")});
+
+  encryptionBox = new ElaCheckBox(tr("启用加密"));
+  encryptionKeyEdit = new ElaLineEdit;
+  encryptionKeyEdit->setPlaceholderText(tr("加密密钥"));
+  encryptionKeyEdit->setEnabled(false);
+
+  connect(compressionModeBox,
+          QOverload<int>::of(&ElaComboBox::currentIndexChanged),
+          [this](int index) {
+            channelConfig.compression =
+                static_cast<ChannelConfig::CompressionMode>(index);
+          });
+
+  connect(encryptionBox, &ElaCheckBox::toggled, [this](bool checked) {
+    channelConfig.useEncryption = checked;
+    encryptionKeyEdit->setEnabled(checked);
+  });
+
+  connect(encryptionKeyEdit, &ElaLineEdit::textChanged,
+          [this](const QString &text) {
+            channelConfig.encryptionKey = text.toStdString();
+          });
+}
+
+void StegoWindow::updateQualityMonitor(const cv::Mat &original,
+                                       const cv::Mat &processed) {
+  if (original.empty() || processed.empty())
+    return;
+
+  // 计算图像质量
+  double quality = steganograph::evaluate_image_quality(original, processed);
+  currentQualityScore = quality;
+
+  // 更新界面显示
+  double psnr = cv::PSNR(original, processed);
+  psnrLabel->setText(tr("PSNR: %1 dB").arg(psnr, 0, 'f', 2));
+
+  cv::Scalar ssim = MSSIM(original, processed);
+  ssimLabel->setText(tr("SSIM: %1").arg(ssim[0], 0, 'f', 3));
+
+  qualityBar->setValue(quality * 100);
+
+  // 检测是否存在隐写
+  double confidence;
+  bool hasStego = steganograph::detect_steganography(processed, &confidence);
+  detectionLabel->setText(tr("隐写分析: %1 (置信度: %2%)")
+                              .arg(hasStego ? tr("已检测到") : tr("未检测到"))
+                              .arg(confidence * 100, 0, 'f', 1));
+}
+
+void StegoWindow::updateChannelAnalysis() {
+  if (originalImage.empty())
+    return;
+
+  auto qualities = steganograph::analyze_all_channels_quality(originalImage);
+  for (size_t i = 0; i < qualities.size(); ++i) {
+    const auto &quality = qualities[i];
+    if (i < channelQualityBars.size()) {
+      int qualityScore = quality.correlation * 100;
+      channelQualityBars[i]->setValue(qualityScore);
+      channelQualityLabels[i]->setText(tr("%1 通道质量: %2%")
+                                           .arg(i == 0   ? "蓝色"
+                                                : i == 1 ? "绿色"
+                                                : i == 2 ? "红色"
+                                                         : "Alpha")
+                                           .arg(qualityScore));
+    }
+  }
+}
+
+void StegoWindow::updateCapacityLabel() {
+  if (originalImage.empty())
+    return;
+
+  size_t capacity =
+      steganograph::calculate_capacity(originalImage, channelConfig);
+  capacityLabel->setText(tr("可用容量: %1 字节").arg(capacity));
 }

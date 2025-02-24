@@ -1,4 +1,5 @@
 #include "Stego.hpp"
+#include "LSB.hpp"
 
 #include <bitset>
 #include <mutex>
@@ -14,6 +15,140 @@
 
 using namespace cv;
 using namespace std;
+
+namespace {
+// 新增：图像加密工具类
+class ImageEncryptor {
+  // ...implementation...
+};
+
+// 新增：DCT实现
+cv::Mat dct_embed(cv::Mat &carrier, const std::vector<bool> &bits,
+                  const StegoConfig &config) {
+  Mat gray;
+  cvtColor(carrier, gray, COLOR_BGR2GRAY);
+  gray.convertTo(gray, CV_32F);
+
+  const int blockSize = 8;
+  auto bit_it = bits.begin();
+
+  for (int i = 0; i < gray.rows; i += blockSize) {
+    for (int j = 0; j < gray.cols; j += blockSize) {
+      if (bit_it == bits.end())
+        break;
+
+      Rect roi(j, i, min(blockSize, gray.cols - j),
+               min(blockSize, gray.rows - i));
+      Mat block = gray(roi);
+      dct(block, block);
+
+      // 修改中频系数
+      if (*bit_it) {
+        block.at<float>(3, 3) += config.alpha * block.at<float>(0, 0);
+        block.at<float>(4, 4) += config.alpha * block.at<float>(0, 0);
+      }
+
+      idct(block, block);
+      block.copyTo(gray(roi));
+      ++bit_it;
+    }
+  }
+
+  Mat result;
+  gray.convertTo(result, CV_8U);
+  return result;
+}
+
+// 新增：DWT实现
+cv::Mat dwt_embed(cv::Mat &carrier, const std::vector<bool> &bits,
+                  const StegoConfig &config) {
+  Mat gray;
+  cvtColor(carrier, gray, COLOR_BGR2GRAY);
+  gray.convertTo(gray, CV_32F);
+
+  // 执行3层小波变换
+  vector<Mat> wavelets;
+  Mat current = gray.clone();
+
+  for (int level = 0; level < 3; level++) {
+    Mat LL, LH, HL, HH;
+    int rows = current.rows / 2;
+    int cols = current.cols / 2;
+
+    // 小波分解
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        float sum = current.at<float>(i * 2, j * 2) +
+                    current.at<float>(i * 2 + 1, j * 2) +
+                    current.at<float>(i * 2, j * 2 + 1) +
+                    current.at<float>(i * 2 + 1, j * 2 + 1);
+        LL.at<float>(i, j) = sum / 4.0f;
+      }
+    }
+
+    wavelets.push_back(current);
+    current = LL;
+  }
+
+  // 在LL子带嵌入信息
+  auto bit_it = bits.begin();
+  for (int i = 0; i < current.rows && bit_it != bits.end(); i++) {
+    for (int j = 0; j < current.cols && bit_it != bits.end(); j++) {
+      if (*bit_it) {
+        current.at<float>(i, j) += config.alpha;
+      }
+      ++bit_it;
+    }
+  }
+
+  // 逆变换
+  Mat result = current.clone();
+  for (int level = wavelets.size() - 1; level >= 0; level--) {
+    pyrUp(result, result, wavelets[level].size());
+    result = result.mul(wavelets[level]);
+  }
+
+  result.convertTo(result, CV_8U);
+  return result;
+}
+
+// 新增：LSB实现
+cv::Mat lsb_embed(cv::Mat &carrier, const std::vector<bool> &bits,
+                  const StegoConfig &config) {
+  Mat result = carrier.clone();
+  string bitString;
+  for (bool bit : bits) {
+    bitString += (bit ? '1' : '0');
+  }
+
+  // 使用现有的LSB功能
+  embedLSB(result, bitString);
+  return result;
+}
+
+#ifdef USE_CUDA
+void process_image_cuda(cv::cuda::GpuMat &d_image, const StegoConfig &config) {
+  cv::cuda::GpuMat d_gray;
+  cv::cuda::cvtColor(d_image, d_gray, COLOR_BGR2GRAY);
+
+  // 创建滤波器
+  Ptr<cuda::Filter> gaussian =
+      cuda::createGaussianFilter(CV_32F, CV_32F, Size(3, 3), config.alpha);
+
+  // 应用滤波
+  gaussian->apply(d_gray, d_gray);
+
+  // 频域处理
+  cv::cuda::dft(d_gray, d_gray, d_gray.size());
+
+  // 返回空域
+  cv::cuda::idft(d_gray, d_gray);
+
+  cv::cuda::cvtColor(d_gray, d_image, COLOR_GRAY2BGR);
+}
+#endif
+
+} // namespace
 
 // 辅助函数：字符串转二进制位流
 vector<bool> str_to_bits(const string &message) {
@@ -41,7 +176,8 @@ string bits_to_str(const vector<bool> &bits) {
 }
 
 // 傅里叶隐写嵌入函数
-Mat embed_message(Mat carrier, const string &message, double alpha) {
+Mat embed_dft(Mat carrier, const vector<bool> &msg_bits,
+              const StegoConfig &config) {
   // 转换为灰度图
   Mat gray;
   cvtColor(carrier, gray, COLOR_BGR2GRAY);
@@ -68,13 +204,6 @@ Mat embed_message(Mat carrier, const string &message, double alpha) {
   q2.copyTo(q1);
   tmp.copyTo(q2);
 
-  // 转换消息为二进制位流
-  vector<bool> msg_bits = str_to_bits(message);
-  const int required_bits = complex.rows * complex.cols / 16;
-  if (msg_bits.size() > required_bits) {
-    throw runtime_error("Message too long for carrier");
-  }
-
   // 在中高频区域嵌入信息（示例：环形区域）
   int min_radius = complex.rows / 8;
   int max_radius = complex.rows / 4;
@@ -99,7 +228,7 @@ Mat embed_message(Mat carrier, const string &message, double alpha) {
 
     Vec2f &pixel = complex.at<Vec2f>(y, x);
     float magnitude = norm(pixel);
-    float new_mag = magnitude + alpha * (*bit_it ? 1.0f : -1.0f);
+    float new_mag = magnitude + config.alpha * (*bit_it ? 1.0f : -1.0f);
     float scale = new_mag / magnitude;
 
     pixel[0] *= scale; // 实部
@@ -127,8 +256,33 @@ Mat embed_message(Mat carrier, const string &message, double alpha) {
   return result;
 }
 
+Mat embed_message(Mat carrier, const string &message,
+                  const StegoConfig &config) {
+  // 输入验证
+  if (carrier.empty()) {
+    throw runtime_error("Empty carrier image");
+  }
+
+  // 根据选择的方法调用相应的实现
+  vector<bool> msg_bits = str_to_bits(message);
+
+  switch (config.method) {
+  case StegoMethod::DFT:
+    // 使用现有的DFT实现，但传入config参数
+    return embed_dft(carrier, msg_bits, config);
+  case StegoMethod::DCT:
+    return dct_embed(carrier, msg_bits, config);
+  case StegoMethod::DWT:
+    return dwt_embed(carrier, msg_bits, config);
+  case StegoMethod::LSB:
+    return lsb_embed(carrier, msg_bits, config);
+  default:
+    throw runtime_error("Unsupported steganography method");
+  }
+}
+
 // 傅里叶隐写提取函数
-string extract_message(Mat stego, int msg_length, double alpha) {
+vector<bool> extract_dft(Mat stego, int msg_length, const StegoConfig &config) {
   Mat gray;
   cvtColor(stego, gray, COLOR_BGR2GRAY);
   gray.convertTo(gray, CV_32F);
@@ -202,9 +356,9 @@ string extract_message(Mat stego, int msg_length, double alpha) {
         Vec2f pixel = complex.at<Vec2f>(y, x);
         const float magnitude = norm(pixel);
         // 改进的阈值判断，使用浮点比较
-        const bool bit = std::abs(magnitude - alpha) >
+        const bool bit = std::abs(magnitude - config.alpha) >
                              std::numeric_limits<float>::epsilon() &&
-                         magnitude > alpha / 2;
+                         magnitude > config.alpha / 2;
         local_bits.push_back(bit);
       }
     }
@@ -231,9 +385,9 @@ string extract_message(Mat stego, int msg_length, double alpha) {
       Vec2f pixel = complex.at<Vec2f>(y, x);
       const float magnitude = norm(pixel);
       // 改进的阈值判断，使用浮点比较
-      const bool bit =
-          std::abs(magnitude - alpha) > std::numeric_limits<float>::epsilon() &&
-          magnitude > alpha / 2;
+      const bool bit = std::abs(magnitude - config.alpha) >
+                           std::numeric_limits<float>::epsilon() &&
+                       magnitude > config.alpha / 2;
       extracted_bits.push_back(bit);
     }
   }
@@ -244,5 +398,243 @@ string extract_message(Mat stego, int msg_length, double alpha) {
     extracted_bits.resize(msg_length * 8);
   }
 
+  return extracted_bits;
+}
+
+// 基于DCT的提取实现
+vector<bool> extract_dct(Mat stego, int msg_length, const StegoConfig &config) {
+  Mat gray;
+  cvtColor(stego, gray, COLOR_BGR2GRAY);
+  gray.convertTo(gray, CV_32F);
+
+  vector<bool> extracted_bits;
+  extracted_bits.reserve(msg_length * 8);
+
+  const int blockSize = 8;
+  for (int i = 0; i < gray.rows; i += blockSize) {
+    for (int j = 0; j < gray.cols; j += blockSize) {
+      if (extracted_bits.size() >= msg_length * 8)
+        break;
+
+      Rect roi(j, i, min(blockSize, gray.cols - j),
+               min(blockSize, gray.rows - i));
+      Mat block = gray(roi).clone();
+      dct(block, block);
+
+      // 从中频系数提取信息
+      float magnitude = block.at<float>(3, 3);
+      extracted_bits.push_back(magnitude > config.alpha / 2);
+    }
+  }
+
+  return extracted_bits;
+}
+
+// 基于DWT的提取实现
+vector<bool> extract_dwt(Mat stego, int msg_length, const StegoConfig &config) {
+  Mat gray;
+  cvtColor(stego, gray, COLOR_BGR2GRAY);
+  gray.convertTo(gray, CV_32F);
+
+  vector<bool> extracted_bits;
+  extracted_bits.reserve(msg_length * 8);
+
+  // 执行3层小波变换
+  Mat wavelet = gray.clone();
+  for (int level = 0; level < 3; level++) {
+    int rows = wavelet.rows / 2;
+    int cols = wavelet.cols / 2;
+    Mat LL(rows, cols, CV_32F);
+
+    // 提取LL子带系数
+    for (int i = 0; i < rows; i++) {
+      for (int j = 0; j < cols; j++) {
+        if (extracted_bits.size() >= msg_length * 8)
+          break;
+        float coef = wavelet.at<float>(i, j);
+        extracted_bits.push_back(coef > config.alpha / 2);
+      }
+    }
+
+    // 更新为下一层
+    wavelet = LL;
+  }
+
+  return extracted_bits;
+}
+
+// 基于LSB的提取实现
+vector<bool> extract_lsb(Mat stego, int msg_length, const StegoConfig &config) {
+  // 直接使用已有的LSB提取功能
+  string extracted = extractLSB(stego);
+
+  // 转换为位流
+  BitStreamBuffer buffer(extracted);
+  auto bits = buffer.getBits();
+
+  // 截取所需长度
+  if (bits.size() > msg_length * 8) {
+    bits.resize(msg_length * 8);
+  }
+
+  return bits;
+}
+
+string extract_message(Mat stego, int msg_length, const StegoConfig &config) {
+  // 输入验证
+  if (stego.empty()) {
+    throw runtime_error("Empty stego image");
+  }
+
+  vector<bool> extracted_bits;
+
+  switch (config.method) {
+  case StegoMethod::DFT:
+    extracted_bits = extract_dft(stego, msg_length, config);
+    break;
+  case StegoMethod::DCT:
+    extracted_bits = extract_dct(stego, msg_length, config);
+    break;
+  case StegoMethod::DWT:
+    extracted_bits = extract_dwt(stego, msg_length, config);
+    break;
+  case StegoMethod::LSB:
+    extracted_bits = extract_lsb(stego, msg_length, config);
+    break;
+  default:
+    throw runtime_error("Unsupported steganography method");
+  }
+
   return bits_to_str(extracted_bits);
+}
+
+#ifdef USE_CUDA
+// CUDA优化实现
+namespace {
+void process_image_cuda(cv::cuda::GpuMat &d_image, const StegoConfig &config) {
+  cv::cuda::GpuMat d_gray;
+  cv::cuda::cvtColor(d_image, d_gray, COLOR_BGR2GRAY);
+
+  // 创建滤波器
+  Ptr<cuda::Filter> gaussian =
+      cuda::createGaussianFilter(CV_32F, CV_32F, Size(3, 3), config.alpha);
+
+  // 应用滤波
+  gaussian->apply(d_gray, d_gray);
+
+  // 频域处理
+  cv::cuda::dft(d_gray, d_gray, d_gray.size());
+
+  // 返回空域
+  cv::cuda::idft(d_gray, d_gray);
+
+  cv::cuda::cvtColor(d_gray, d_image, COLOR_GRAY2BGR);
+}
+} // namespace
+#endif
+
+cv::Scalar MSSIM(const cv::Mat &i1, const cv::Mat &i2) {
+  const double C1 = 6.5025;  // (0.01 * 255)^2
+  const double C2 = 58.5225; // (0.03 * 255)^2
+
+  cv::Mat I1, I2;
+  i1.convertTo(I1, CV_32F);
+  i2.convertTo(I2, CV_32F);
+
+  cv::Mat I1_2 = I1.mul(I1);  // I1^2
+  cv::Mat I2_2 = I2.mul(I2);  // I2^2
+  cv::Mat I1_I2 = I1.mul(I2); // I1*I2
+
+  cv::Mat mu1, mu2;
+  cv::GaussianBlur(I1, mu1, cv::Size(11, 11), 1.5);
+  cv::GaussianBlur(I2, mu2, cv::Size(11, 11), 1.5);
+
+  cv::Mat mu1_2 = mu1.mul(mu1);
+  cv::Mat mu2_2 = mu2.mul(mu2);
+  cv::Mat mu1_mu2 = mu1.mul(mu2);
+
+  cv::Mat sigma1_2, sigma2_2, sigma12;
+
+  cv::GaussianBlur(I1_2, sigma1_2, cv::Size(11, 11), 1.5);
+  sigma1_2 -= mu1_2;
+
+  cv::GaussianBlur(I2_2, sigma2_2, cv::Size(11, 11), 1.5);
+  sigma2_2 -= mu2_2;
+
+  cv::GaussianBlur(I1_I2, sigma12, cv::Size(11, 11), 1.5);
+  sigma12 -= mu1_mu2;
+
+  cv::Mat ssim_map;
+  cv::Mat numerator = (2 * mu1_mu2 + C1).mul(2 * sigma12 + C2);
+  cv::Mat denominator = (mu1_2 + mu2_2 + C1).mul(sigma1_2 + sigma2_2 + C2);
+  cv::divide(numerator, denominator, ssim_map);
+
+  return cv::mean(ssim_map);
+}
+
+double evaluate_image_quality(const Mat &original, const Mat &stego) {
+  if (original.size() != stego.size()) {
+    throw runtime_error("Images must have same size");
+  }
+
+  // 计算PSNR
+  double psnr = PSNR(original, stego);
+
+  // 计算SSIM
+  Mat gray1, gray2;
+  cvtColor(original, gray1, COLOR_BGR2GRAY);
+  cvtColor(stego, gray2, COLOR_BGR2GRAY);
+
+  Scalar mssim = MSSIM(gray1, gray2);
+  double ssim = mssim[0];
+
+  // 返回综合评分
+  return (psnr * 0.6 + ssim * 0.4);
+}
+
+// 新增：鲁棒性测试实现
+bool test_robustness(const Mat &stego, const string &message,
+                     const StegoConfig &config) {
+  vector<Mat> attacked_images;
+
+  // 添加高斯噪声
+  Mat noisy = stego.clone();
+  randn(noisy, 0, 25);
+  attacked_images.push_back(noisy);
+
+  // JPEG压缩
+  vector<uchar> buffer;
+  vector<int> params = {IMWRITE_JPEG_QUALITY, 75};
+  imencode(".jpg", stego, buffer, params);
+  attacked_images.push_back(imdecode(buffer, IMREAD_COLOR));
+
+  // 旋转
+  Mat rotated;
+  Point2f center(stego.cols / 2.0f, stego.rows / 2.0f);
+  Mat rotation = getRotationMatrix2D(center, 1.0, 1.0);
+  warpAffine(stego, rotated, rotation, stego.size());
+  attacked_images.push_back(rotated);
+
+  // 测试每个攻击后的提取
+  for (const auto &img : attacked_images) {
+    string extracted = extract_message(img, message.length(), config);
+    if (extracted != message) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// 新增：压缩率估算实现
+double estimate_compression_ratio(const Mat &image, const StegoConfig &config) {
+  // 原始大小
+  size_t original_size = image.total() * image.elemSize();
+
+  // 压缩后大小估算
+  vector<uchar> buffer;
+  vector<int> params = {IMWRITE_JPEG_QUALITY, 95};
+  imencode(".jpg", image, buffer, params);
+
+  return static_cast<double>(buffer.size()) / original_size;
 }

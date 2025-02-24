@@ -36,6 +36,25 @@ struct ChannelConfig {
   bool useAlpha = true;   ///< Use the alpha channel
   int bitsPerChannel = 1; ///< Number of bits to use per channel
   double scrambleKey = 0; ///< Key for scrambling the channels
+
+  enum class EmbedMode {
+    LSB,            // 最低有效位
+    RANDOM_LSB,     // 随机LSB
+    ADAPTIVE_LSB    // 自适应LSB
+  };
+  
+  enum class CompressionMode {
+    NONE,
+    HUFFMAN,
+    LZW
+  };
+  
+  EmbedMode embedMode = EmbedMode::LSB;
+  CompressionMode compression = CompressionMode::NONE;
+  bool useEncryption = false;
+  std::string encryptionKey = "";
+  double qualityThreshold = 0.8;  // 图像质量阈值
+  bool preserveEdges = true;      // 保护边缘区域
 };
 
 /**
@@ -120,6 +139,35 @@ std::vector<ChannelQuality> analyze_all_channels_quality(const cv::Mat &image);
 class ChannelException : public std::runtime_error {
   using std::runtime_error::runtime_error;
 };
+
+/**
+ * @brief 预处理图像以提高隐写效果
+ */
+void preprocess_image(cv::Mat &image, const ChannelConfig &config);
+
+/**
+ * @brief 使用自适应LSB算法隐写
+ */
+void adaptive_lsb_hide(cv::Mat &image, const std::string &message,
+                      const ChannelConfig &config);
+
+/**
+ * @brief 使用自适应LSB算法提取
+ */
+std::string adaptive_lsb_extract(const cv::Mat &image,
+                               const ChannelConfig &config);
+
+/**
+ * @brief 评估隐写后的图像质量
+ */
+double evaluate_image_quality(const cv::Mat &original,
+                            const cv::Mat &modified);
+
+/**
+ * @brief 检测图像是否包含隐写内容
+ */
+bool detect_steganography(const cv::Mat &image,
+                        double *confidence = nullptr);
 
 } // namespace steganograph
 

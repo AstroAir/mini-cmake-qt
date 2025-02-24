@@ -2,6 +2,34 @@
 
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include <string>
+
+// 水印嵌入模式
+enum class WatermarkMode {
+    DCT_STANDARD,    // 标准DCT
+    DCT_ADAPTIVE,    // 自适应DCT
+    DWT_BASED,       // 小波变换
+    HYBRID          // 混合模式
+};
+
+// 水印配置参数
+struct WatermarkConfig {
+    double alpha = 0.1;              // 嵌入强度
+    int blockSize = 8;               // 分块大小
+    WatermarkMode mode = WatermarkMode::DCT_STANDARD;
+    std::vector<int> channelsToEmbed = {0}; // 要嵌入的通道
+    bool useAdaptiveStrength = false; // 是否使用自适应强度
+    double robustnessFactor = 1.0;    // 鲁棒性因子
+    bool useCuda = false;             // 是否使用CUDA加速
+};
+
+// 水印评估结果
+struct WatermarkMetrics {
+    double psnr;           // 峰值信噪比
+    double ssim;          // 结构相似度
+    double robustness;    // 鲁棒性评分
+    double capacity;      // 容量评估
+};
 
 /**
  * @brief Embeds a watermark into a host image using DCT.
@@ -48,3 +76,36 @@ size_t estimateWatermarkCapacity(const cv::Mat &host, int blockSize = 8);
  * @return The similarity score between the two watermarks.
  */
 double compareWatermarks(const cv::Mat &wm1, const cv::Mat &wm2);
+
+// 新增函数
+cv::Mat embedWatermarkAdvanced(const cv::Mat &host, const cv::Mat &watermark, 
+                              const WatermarkConfig &config);
+
+WatermarkMetrics evaluateWatermark(const cv::Mat &original, const cv::Mat &watermarked, 
+                                  const cv::Mat &extractedWatermark);
+
+cv::Mat applyAttack(const cv::Mat &image, const std::string &attackType, 
+                    double intensity = 1.0);
+
+// CUDA加速版本
+#ifdef USE_CUDA
+cv::Mat embedWatermarkCuda(const cv::Mat &host, const cv::Mat &watermark,
+                          const WatermarkConfig &config);
+#endif
+
+// 自适应强度计算
+double calculateAdaptiveStrength(const cv::Mat &block, const WatermarkConfig &config);
+
+// 水印压缩和加密
+cv::Mat compressWatermark(const cv::Mat &watermark, int quality);
+cv::Mat encryptWatermark(const cv::Mat &watermark, const std::string &key);
+
+// DWT相关函数声明
+void wavelet(const cv::Mat &input, cv::Mat &output);
+void inversewavelet(const cv::Mat &input, cv::Mat &output);
+
+// PSNR计算
+double PSNR(const cv::Mat &img1, const cv::Mat &img2);
+
+// SSIM计算（已存在）
+double SSIM(const cv::Mat &img1, const cv::Mat &img2);

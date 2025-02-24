@@ -13,7 +13,7 @@ struct NegativeConfig {
   bool save_alpha = true;       ///< Whether to save the alpha channel.
   std::string output_dir = "./output"; ///< Directory to save the output images.
   cv::Rect roi = cv::Rect(0, 0, 0, 0); ///< Region of interest for processing.
-
+  bool use_simd = true;                ///< Whether to use SIMD optimizations.
   /**
    * @brief Validates the configuration parameters.
    */

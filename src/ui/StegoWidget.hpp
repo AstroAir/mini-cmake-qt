@@ -1,10 +1,11 @@
 #pragma once
 
-#include "Channels.hpp"
 #include <QElapsedTimer>
 #include <QMainWindow>
-#include <QTabWidget>
 #include <opencv2/opencv.hpp>
+
+#include "image/steganograph/Channels.hpp"
+#include "image/steganograph/Stego.hpp"
 
 class QLabel;
 class ElaPushButton;
@@ -18,6 +19,9 @@ class QGroupBox;
 class ElaProgressBar;
 class ElaSlider;
 class QTimer;
+class QVBoxLayout;
+class ElaTabWidget;
+class ElaLineEdit;
 
 class StegoWindow : public QMainWindow {
   Q_OBJECT
@@ -26,7 +30,7 @@ public:
   explicit StegoWindow(QWidget *parent = nullptr);
 
 signals:
-  void onImageLoaded();  // 添加这个信号声明
+  void onImageLoaded(); // 添加这个信号声明
 
 protected:
   void resizeEvent(QResizeEvent *event) override;
@@ -53,10 +57,13 @@ private slots:
   void showOperationResult(bool success, const QString &message);
   void previewOriginalImage();
   void previewProcessedImage();
+  void updatePreviewWithSize(const QSize &size);
+  void setupControlPanel(QVBoxLayout *layout);
+  void setupTabbedPanel();
 
 private:
   // UI组件
-  QTabWidget *tabWidget;
+  ElaTabWidget *tabWidget;
   QLabel *imagePreviewLabel;
   QLabel *histogramLabel;
   ElaStatusBar *statusBar;
@@ -130,6 +137,29 @@ private:
   ElaProgressBar *msbQualityBar;
   ElaCheckBox *msbPreviewBox;
 
+  // 增加新的质量监测组件
+  QGroupBox *createQualityMonitorPanel();
+  QLabel *psnrLabel;
+  QLabel *ssimLabel;
+  ElaProgressBar *qualityBar;
+  QLabel *detectionLabel;
+
+  // 增加通道质量分析组件
+  void setupChannelQualityIndicators();
+  std::vector<QLabel *> channelQualityLabels;
+
+  // 增加处理控制组件
+  void setupProcessingControls();
+  ElaCheckBox *adaptiveProcessingBox;
+  ElaCheckBox *preserveEdgesBox;
+  ElaDoubleSpinBox *qualityThresholdBox;
+
+  // 增加预处理选项
+  void setupPreprocessingOptions();
+  ElaComboBox *compressionModeBox;
+  ElaCheckBox *encryptionBox;
+  ElaLineEdit *encryptionKeyEdit;
+
   // 通用控件
   ElaPushButton *loadImageButton;
   ElaPushButton *saveImageButton;
@@ -198,4 +228,20 @@ private:
   void enableControls(bool enable);
   void setupImageComparison();
   bool checkImageValidity();
+
+  // 辅助功能
+  void updateQualityMonitor(const cv::Mat &original, const cv::Mat &processed);
+  void updateChannelAnalysis();
+  void analyzeSteganography();
+  void applyPreprocessing();
+  void updateCapacityLabel();
+
+  // 新增的处理配置
+  ChannelConfig channelConfig;
+  StegoConfig stegoConfig;
+
+  // 状态追踪
+  bool isPreprocessingEnabled;
+  bool isAdaptiveEnabled;
+  double currentQualityScore;
 };

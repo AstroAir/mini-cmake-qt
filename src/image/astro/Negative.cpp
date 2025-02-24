@@ -2,7 +2,8 @@
 #include "ParallelConfig.hpp"
 #include <atomic>
 #include <filesystem>
-
+#include <fstream>
+#include <json/json.h>
 
 using namespace cv;
 using namespace std;
@@ -10,6 +11,20 @@ using namespace std;
 void NegativeConfig::validate() {
   intensity = std::clamp(intensity, 0.0f, 1.0f);
   channels = channels.substr(0, 4);
+
+  if (intensity < 0.0f || intensity > 1.0f) {
+    throw std::invalid_argument("Intensity must be between 0.0 and 1.0");
+  }
+
+  for (char ch : channels) {
+    if (ch != 'R' && ch != 'G' && ch != 'B' && ch != 'A') {
+      throw std::invalid_argument("Invalid channel specified");
+    }
+  }
+
+  if (!std::filesystem::exists(output_dir)) {
+    std::filesystem::create_directories(output_dir);
+  }
 }
 
 NegativeProcessor::NegativeProcessor(const NegativeConfig &cfg) : config_(cfg) {
@@ -24,16 +39,16 @@ void NegativeProcessor::init_lut() {
   // 仅在数据量足够大时使用并行
   if (max_value >= parallel_config::MIN_PARALLEL_SIZE) {
 #ifdef USE_OPENMP
-    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
 #endif
     for (int i = 0; i < max_value; i++) {
       lut_.at<uchar>(i) = static_cast<uchar>((255 - i) * config_.intensity +
-                                           i * (1 - config_.intensity));
+                                             i * (1 - config_.intensity));
     }
   } else {
     for (int i = 0; i < max_value; i++) {
       lut_.at<uchar>(i) = static_cast<uchar>((255 - i) * config_.intensity +
-                                           i * (1 - config_.intensity));
+                                             i * (1 - config_.intensity));
     }
   }
 }
@@ -67,7 +82,7 @@ void NegativeProcessor::process_channel_simd(Mat &channel) {
   const int total_pixels = channel.rows * channel.cols;
   if (total_pixels >= parallel_config::MIN_PARALLEL_SIZE) {
 #ifdef USE_OPENMP
-    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
 #endif
     for (int y = 0; y < channel.rows; y++) {
       uchar *row = channel.ptr<uchar>(y);
@@ -117,12 +132,13 @@ Mat NegativeProcessor::process(const Mat &input,
       count_if(config_.channels.begin(), config_.channels.end(),
                [&](char c) { return channel_map.count(toupper(c)); });
 
-  const int total_channels = count_if(config_.channels.begin(), config_.channels.end(),
-                                    [&](char c) { return channel_map.count(toupper(c)); });
+  const int total_channels =
+      count_if(config_.channels.begin(), config_.channels.end(),
+               [&](char c) { return channel_map.count(toupper(c)); });
 
   if (total_channels >= parallel_config::MIN_FRAMES_PARALLEL) {
 #ifdef USE_OPENMP
-    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
 #endif
     for (char c : config_.channels) {
       if (!channel_map.count(toupper(c)) ||
@@ -156,33 +172,52 @@ Mat NegativeProcessor::process(const Mat &input,
 }
 
 void save_config(const string &path, const NegativeConfig &config) {
-  FileStorage fs(path, FileStorage::WRITE);
-  fs << "intensity" << config.intensity << "channels" << config.channels
-     << "save_alpha" << config.save_alpha << "roi_x" << config.roi.x << "roi_y"
-     << config.roi.y << "roi_width" << config.roi.width << "roi_height"
-     << config.roi.height << "use_simd" << config.use_simd << "multi_thread"
-     << config.multi_thread;
+  Json::Value root;
+  root["intensity"] = config.intensity;
+  root["channels"] = config.channels;
+  root["save_alpha"] = config.save_alpha;
+  root["output_dir"] = config.output_dir;
+  root["roi"] = Json::Value(Json::arrayValue);
+  root["roi"].append(config.roi.x);
+  root["roi"].append(config.roi.y);
+  root["roi"].append(config.roi.width);
+  root["roi"].append(config.roi.height);
+
+  std::ofstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Failed to open config file for writing");
+  }
+
+  Json::StyledWriter writer;
+  file << writer.write(root);
 }
 
 void load_config(const string &path, NegativeConfig &config) {
-  FileStorage fs(path, FileStorage::READ);
-  if (!fs.isOpened())
-    return;
+  std::ifstream file(path);
+  if (!file.is_open()) {
+    throw std::runtime_error("Failed to open config file for reading");
+  }
 
-  fs["intensity"] >> config.intensity;
-  fs["channels"] >> config.channels;
-  fs["save_alpha"] >> config.save_alpha;
-  fs["roi_x"] >> config.roi.x;
-  fs["roi_y"] >> config.roi.y;
-  fs["roi_width"] >> config.roi.width;
-  fs["roi_height"] >> config.roi.height;
-  fs["use_simd"] >> config.use_simd;
-  fs["multi_thread"] >> config.multi_thread;
+  Json::Value root;
+  Json::Reader reader;
+  if (!reader.parse(file, root)) {
+    throw std::runtime_error("Failed to parse config file");
+  }
+
+  config.intensity = root.get("intensity", 1.0f).asFloat();
+  config.channels = root.get("channels", "RGB").asString();
+  config.save_alpha = root.get("save_alpha", true).asBool();
+  config.output_dir = root.get("output_dir", "./output").asString();
+
+  if (root.isMember("roi") && root["roi"].size() == 4) {
+    config.roi = cv::Rect(root["roi"][0].asInt(), root["roi"][1].asInt(),
+                          root["roi"][2].asInt(), root["roi"][3].asInt());
+  }
 
   config.validate();
 }
 
-NegativeApp::NegativeApp() { config_ = NegativeConfig(); }
+NegativeApp::NegativeApp() : processor_(nullptr) {}
 
 void NegativeApp::showHelp(const cv::CommandLineParser &parser) {
   parser.printMessage();
@@ -225,7 +260,9 @@ void NegativeApp::parseCommandLine(int argc, char **argv) {
 }
 
 void NegativeApp::processImage() {
-  processor_ = std::make_unique<NegativeProcessor>(config_);
+  if (!processor_) {
+    processor_ = std::make_unique<NegativeProcessor>(config_);
+  }
   std::cout << "开始处理..." << std::endl;
   negative_ = processor_->process(image_, [](float progress) {
     std::cout << "\r处理进度: " << static_cast<int>(progress * 100) << "%"
