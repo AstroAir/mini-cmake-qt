@@ -1,4 +1,5 @@
 #include "FWHM.hpp"
+#include "ParallelConfig.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -91,15 +92,42 @@ Statistics calculate_statistics(std::span<const DataPoint> points) {
     return {};
 
   const std::size_t n = points.size();
+  if (n < parallel_config::MIN_PARALLEL_SIZE) {
+    double sum_x = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+      sum_x += points[i].x;
+    }
+    const double mean_x = sum_x / n;
+
+    double variance = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+      const double diff = points[i].x - mean_x;
+      variance += diff * diff;
+    }
+    variance /= (n - 1);
+
+    auto [min_it, max_it] = std::minmax_element(
+        points.begin(), points.end(),
+        [](const DataPoint &a, const DataPoint &b) { return a.y < b.y; });
+
+    return Statistics{min_it->y, min_it->y, mean_x, std::sqrt(variance)};
+  }
+
   double sum_x = 0.0;
-#pragma omp parallel for reduction(+ : sum_x)
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)    \
+    reduction(+ : sum_x)
+#endif
   for (std::size_t i = 0; i < n; ++i) {
     sum_x += points[i].x;
   }
   const double mean_x = sum_x / n;
 
   double variance = 0.0;
-#pragma omp parallel for reduction(+ : variance)
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)    \
+    reduction(+ : variance)
+#endif
   for (std::size_t i = 0; i < n; ++i) {
     const double diff = points[i].x - mean_x;
     variance += diff * diff;
@@ -267,13 +295,27 @@ void GaussianFitter::visualize(std::span<const DataPoint> points,
 
   // 并行计算曲线点，预分配 vector 大小
   std::vector<cv::Point> curve_points(plot_width);
-#pragma omp parallel for
-  for (int px = 0; px < plot_width; ++px) {
-    double x = detail::safe_division(px * (x_max_val - x_min_val), plot_width) +
-               x_min_val;
-    double y = evaluate(params, x);
-    int py = static_cast<int>((params.base + params.peak - y) * y_scale);
-    curve_points[px] = cv::Point(px, std::clamp(py, 0, plot_height - 1));
+  if (plot_width >= parallel_config::MIN_PARALLEL_SIZE) {
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
+    for (int px = 0; px < plot_width; ++px) {
+      double x =
+          detail::safe_division(px * (x_max_val - x_min_val), plot_width) +
+          x_min_val;
+      double y = evaluate(params, x);
+      int py = static_cast<int>((params.base + params.peak - y) * y_scale);
+      curve_points[px] = cv::Point(px, std::clamp(py, 0, plot_height - 1));
+    }
+  } else {
+    for (int px = 0; px < plot_width; ++px) {
+      double x =
+          detail::safe_division(px * (x_max_val - x_min_val), plot_width) +
+          x_min_val;
+      double y = evaluate(params, x);
+      int py = static_cast<int>((params.base + params.peak - y) * y_scale);
+      curve_points[px] = cv::Point(px, std::clamp(py, 0, plot_height - 1));
+    }
   }
   cv::polylines(plot, curve_points, false, curve_color, 2, cv::LINE_AA);
 
@@ -302,7 +344,9 @@ void GaussianFitter::compute_residuals(const cv::Mat &params,
     throw std::invalid_argument("Invalid parameters in residual calculation");
   }
   const std::size_t n = points.size();
-#pragma omp parallel for
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
   for (std::size_t i = 0; i < n; ++i) {
     residuals.at<double>(i) = points[i].y - evaluate(p, points[i].x);
   }
@@ -324,7 +368,9 @@ void GaussianFitter::compute_jacobian(const cv::Mat &params,
   }
 
   const std::size_t n = points.size();
-#pragma omp parallel for
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
   for (std::size_t i = 0; i < n; ++i) {
     const double x = points[i].x;
     const double delta = x - center;
@@ -348,75 +394,77 @@ bool GaussianFitter::validate_parameters(const cv::Mat &params) {
   return true;
 }
 
-std::vector<std::optional<GaussianParams>> batch_fit(
-    const std::vector<std::span<const DataPoint>>& data_sets,
-    bool use_parallel,
-    double epsilon,
-    int max_iterations) {
-    std::vector<std::optional<GaussianParams>> results(data_sets.size());
-    
-    if (use_parallel && data_sets.size() >= PARALLEL_THRESHOLD) {
-        #pragma omp parallel for schedule(dynamic, BLOCK_SIZE)
-        for (size_t i = 0; i < data_sets.size(); ++i) {
-            results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
-        }
-    } else {
-        for (size_t i = 0; i < data_sets.size(); ++i) {
-            results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
-        }
+std::vector<std::optional<GaussianParams>>
+batch_fit(const std::vector<std::span<const DataPoint>> &data_sets,
+          bool use_parallel, double epsilon, int max_iterations) {
+  std::vector<std::optional<GaussianParams>> results(data_sets.size());
+
+  if (use_parallel && data_sets.size() >= parallel_config::MIN_PARALLEL_SIZE) {
+#ifdef USE_OPENMP
+#pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)    \
+    schedule(dynamic, parallel_config::DEFAULT_BLOCK_SIZE)
+#endif
+    for (size_t i = 0; i < data_sets.size(); ++i) {
+      results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
     }
-    
-    return results;
+  } else {
+    for (size_t i = 0; i < data_sets.size(); ++i) {
+      results[i] = GaussianFitter::fit(data_sets[i], epsilon, max_iterations);
+    }
+  }
+
+  return results;
 }
 
-FitQuality assess_fit_quality(
-    std::span<const DataPoint> points,
-    const GaussianParams& params) {
-    FitQuality quality{};
-    
-    if (points.empty() || !params.valid()) {
-        return quality;
-    }
-    
-    // 计算总平方和和残差平方和
-    double total_sum_squares = 0.0;
-    double residual_sum_squares = 0.0;
-    double mean_y = 0.0;
-    
-    // 首先计算平均值
-    for (const auto& point : points) {
-        mean_y += point.y;
-    }
-    mean_y /= points.size();
-    
-    // 计算R方值和残差
-    std::vector<double> residuals;
-    residuals.reserve(points.size());
-    
-    for (const auto& point : points) {
-        double predicted = GaussianFitter::evaluate(params, point.x);
-        double residual = point.y - predicted;
-        residuals.push_back(residual);
-        
-        residual_sum_squares += residual * residual;
-        total_sum_squares += (point.y - mean_y) * (point.y - mean_y);
-    }
-    
-    // 计算R方值
-    quality.r_squared = 1.0 - (residual_sum_squares / total_sum_squares);
-    
-    // 计算残差标准差
-    double mean_residual = std::accumulate(residuals.begin(), residuals.end(), 0.0) / residuals.size();
-    double variance = 0.0;
-    for (double residual : residuals) {
-        variance += (residual - mean_residual) * (residual - mean_residual);
-    }
-    quality.residual_std = std::sqrt(variance / (residuals.size() - 1));
-    
-    // 计算信噪比
-    quality.peak_to_noise = params.peak / std::max(quality.residual_std, 1e-10);
-    
+FitQuality assess_fit_quality(std::span<const DataPoint> points,
+                              const GaussianParams &params) {
+  FitQuality quality{};
+
+  if (points.empty() || !params.valid()) {
     return quality;
+  }
+
+  // 计算总平方和和残差平方和
+  double total_sum_squares = 0.0;
+  double residual_sum_squares = 0.0;
+  double mean_y = 0.0;
+
+  // 首先计算平均值
+  for (const auto &point : points) {
+    mean_y += point.y;
+  }
+  mean_y /= points.size();
+
+  // 计算R方值和残差
+  std::vector<double> residuals;
+  residuals.reserve(points.size());
+
+  for (const auto &point : points) {
+    double predicted = GaussianFitter::evaluate(params, point.x);
+    double residual = point.y - predicted;
+    residuals.push_back(residual);
+
+    residual_sum_squares += residual * residual;
+    total_sum_squares += (point.y - mean_y) * (point.y - mean_y);
+  }
+
+  // 计算R方值
+  quality.r_squared = 1.0 - (residual_sum_squares / total_sum_squares);
+
+  // 计算残差标准差
+  double mean_residual =
+      std::accumulate(residuals.begin(), residuals.end(), 0.0) /
+      residuals.size();
+  double variance = 0.0;
+  for (double residual : residuals) {
+    variance += (residual - mean_residual) * (residual - mean_residual);
+  }
+  quality.residual_std = std::sqrt(variance / (residuals.size() - 1));
+
+  // 计算信噪比
+  quality.peak_to_noise = params.peak / std::max(quality.residual_std, 1e-10);
+
+  return quality;
 }
 
 } // namespace GaussianFit

@@ -7,8 +7,8 @@
 using json = nlohmann::json;
 namespace cv {
 class Mat;
-
 }
+
 using namespace cv;
 using namespace std;
 
@@ -74,13 +74,23 @@ auto starDetectAndHfr(const Mat &img, bool if_removehotpixel,
                       bool down_sample_mean_std, Mat mark_img)
     -> tuple<Mat, int, double, json>;
 
-// 添加SIMD优化相关函数声明
 #ifdef __AVX2__
+/**
+ * @brief Processes stars using AVX2 SIMD optimizations.
+ * @param img The input image.
+ * @param radius The radius for HFR calculation.
+ * @return The calculated HFR value.
+ */
 auto processStarsAVX2(const cv::Mat &img, float radius) -> double;
 #endif
 
-// 添加并行处理相关函数声明  
+/**
+ * @brief Processes stars in parallel.
+ * @param img The input image.
+ * @param if_removehotpixel Flag to indicate if hot pixels should be removed.
+ * @param if_noiseremoval Flag to indicate if noise removal should be applied.
+ */
 auto processStarsParallel(const cv::Mat &img, bool if_removehotpixel,
-                         bool if_noiseremoval) -> void;
+                          bool if_noiseremoval) -> void;
 
 #endif // HFR_HPP

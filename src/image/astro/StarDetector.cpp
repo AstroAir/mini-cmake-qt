@@ -1,6 +1,7 @@
 #include "StarDetector.hpp"
 #include "FWHM.hpp"
 #include "HFR.hpp"
+#include "ParallelConfig.hpp"
 
 #include <algorithm>
 #include <execution>
@@ -79,19 +80,33 @@ StarDetector::multiscale_detect_stars(const cv::Mat &input_image) {
   std::vector<cv::Point> all_stars;
   std::mutex mutex;
 
-  // 并行处理不同尺度
-  std::for_each(std::execution::par, config_.scales.begin(),
-                config_.scales.end(), [&](float scale) {
-                  try {
-                    auto scaled_stars = process_scale(gray_image, scale);
-                    std::lock_guard lock(mutex);
-                    all_stars.insert(all_stars.end(), scaled_stars.begin(),
-                                     scaled_stars.end());
-                  } catch (const std::exception &e) {
-                    spdlog::error("Scale {} processing failed: {}", scale,
-                                  e.what());
-                  }
-                });
+  // 根据图像大小决定是否启用并行
+  const bool use_parallel =
+      input_image.total() >= parallel_config::MIN_PARALLEL_SIZE;
+
+  if (use_parallel) {
+#ifdef USE_OPENMP
+    omp_set_num_threads(parallel_config::DEFAULT_THREAD_COUNT);
+#endif
+    std::for_each(std::execution::par, config_.scales.begin(),
+                  config_.scales.end(), [&](float scale) {
+                    try {
+                      auto scaled_stars = process_scale(gray_image, scale);
+                      std::lock_guard lock(mutex);
+                      all_stars.insert(all_stars.end(), scaled_stars.begin(),
+                                       scaled_stars.end());
+                    } catch (const std::exception &e) {
+                      spdlog::error("Scale {} processing failed: {}", scale,
+                                    e.what());
+                    }
+                  });
+  } else {
+    for (float scale : config_.scales) {
+      auto scaled_stars = process_scale(gray_image, scale);
+      all_stars.insert(all_stars.end(), scaled_stars.begin(),
+                       scaled_stars.end());
+    }
+  }
 
   auto unique_stars = remove_duplicates(all_stars);
 
@@ -190,12 +205,64 @@ StarDetector::filter_stars(const std::vector<std::vector<cv::Point>> &contours,
   std::vector<cv::Point> valid_stars;
   valid_stars.reserve(contours.size());
 
-#pragma omp parallel
-  {
-    std::vector<cv::Point> local_valid;
-#pragma omp for schedule(dynamic) nowait
-    for (int idx = 0; idx < static_cast<int>(contours.size()); ++idx) {
-      const auto &contour = contours[idx];
+  const bool use_parallel =
+      contours.size() >= parallel_config::MIN_PARALLEL_SIZE;
+
+  if (use_parallel) {
+#ifdef USE_OPENMP
+#pragma omp parallel num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+    {
+      std::vector<cv::Point> local_valid;
+#pragma omp for schedule(dynamic, parallel_config::DEFAULT_BLOCK_SIZE)
+      for (int idx = 0; idx < static_cast<int>(contours.size()); ++idx) {
+        const auto &contour = contours[idx];
+        if (contour.empty())
+          continue;
+
+        // 使用高精度计算
+        const double area = cv::contourArea(contour);
+        const double perimeter = cv::arcLength(contour, true);
+        if (perimeter <= std::numeric_limits<double>::epsilon())
+          continue;
+
+        const double circularity =
+            (4.0 * M_PI * area) / (perimeter * perimeter);
+        if (circularity < config_.min_circularity ||
+            circularity > config_.max_circularity) {
+          continue;
+        }
+
+        cv::Rect rect = cv::boundingRect(contour);
+        if (rect.area() < config_.min_star_size)
+          continue;
+
+        cv::Mat mask = cv::Mat::zeros(binary_image.size(), CV_8U);
+        cv::drawContours(mask, {contour}, -1, 255, cv::FILLED);
+
+        // 使用 OpenCV SIMD优化
+        cv::Mat roi = binary_image(rect);
+        cv::Mat mask_roi = mask(rect);
+        cv::Scalar mean = cv::mean(roi, mask_roi);
+
+        if (mean[0] >= config_.min_star_brightness) {
+          cv::Moments m = cv::moments(contour);
+          // 使用double精度计算质心
+          double cx = m.m10 / m.m00;
+          double cy = m.m01 / m.m00;
+          local_valid.emplace_back(static_cast<int>(std::round(cx)),
+                                   static_cast<int>(std::round(cy)));
+        }
+      }
+
+#pragma omp critical
+      {
+        valid_stars.insert(valid_stars.end(), local_valid.begin(),
+                           local_valid.end());
+      }
+    }
+#else
+    // 串行处理
+    for (const auto &contour : contours) {
       if (contour.empty())
         continue;
 
@@ -228,15 +295,49 @@ StarDetector::filter_stars(const std::vector<std::vector<cv::Point>> &contours,
         // 使用double精度计算质心
         double cx = m.m10 / m.m00;
         double cy = m.m01 / m.m00;
-        local_valid.emplace_back(static_cast<int>(std::round(cx)),
+        valid_stars.emplace_back(static_cast<int>(std::round(cx)),
                                  static_cast<int>(std::round(cy)));
       }
     }
+#endif
+  } else {
+    // 串行处理
+    for (const auto &contour : contours) {
+      if (contour.empty())
+        continue;
 
-#pragma omp critical
-    {
-      valid_stars.insert(valid_stars.end(), local_valid.begin(),
-                         local_valid.end());
+      // 使用高精度计算
+      const double area = cv::contourArea(contour);
+      const double perimeter = cv::arcLength(contour, true);
+      if (perimeter <= std::numeric_limits<double>::epsilon())
+        continue;
+
+      const double circularity = (4.0 * M_PI * area) / (perimeter * perimeter);
+      if (circularity < config_.min_circularity ||
+          circularity > config_.max_circularity) {
+        continue;
+      }
+
+      cv::Rect rect = cv::boundingRect(contour);
+      if (rect.area() < config_.min_star_size)
+        continue;
+
+      cv::Mat mask = cv::Mat::zeros(binary_image.size(), CV_8U);
+      cv::drawContours(mask, {contour}, -1, 255, cv::FILLED);
+
+      // 使用 OpenCV SIMD优化
+      cv::Mat roi = binary_image(rect);
+      cv::Mat mask_roi = mask(rect);
+      cv::Scalar mean = cv::mean(roi, mask_roi);
+
+      if (mean[0] >= config_.min_star_brightness) {
+        cv::Moments m = cv::moments(contour);
+        // 使用double精度计算质心
+        double cx = m.m10 / m.m00;
+        double cy = m.m01 / m.m00;
+        valid_stars.emplace_back(static_cast<int>(std::round(cx)),
+                                 static_cast<int>(std::round(cy)));
+      }
     }
   }
 
@@ -405,33 +506,65 @@ StarDetector::calculate_batch_metrics(const cv::Mat &image,
 
   std::vector<std::pair<double, double>> results(centers.size());
 
-  // 预分配内存
-  std::vector<cv::Mat> rois(centers.size());
+  const bool use_parallel =
+      centers.size() >= parallel_config::MIN_PARALLEL_SIZE;
 
-#pragma omp parallel for schedule(dynamic)
-  for (size_t i = 0; i < centers.size(); ++i) {
-    rois[i] = extract_star_region(image, centers[i], region_size);
-    if (!rois[i].empty()) {
-      cv::Mat roi_double;
-      rois[i].convertTo(roi_double, CV_64F);
+  if (use_parallel) {
+#ifdef USE_OPENMP
+#pragma omp parallel for schedule(dynamic,                                     \
+                                      parallel_config::DEFAULT_BLOCK_SIZE)     \
+    num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
+    for (size_t i = 0; i < centers.size(); ++i) {
+      cv::Mat roi = extract_star_region(image, centers[i], region_size);
+      if (!roi.empty()) {
+        cv::Mat roi_double;
+        roi.convertTo(roi_double, CV_64F);
 
-      double hfr = calcHfr(roi_double, region_size / 2.0);
+        double hfr = calcHfr(roi_double, region_size / 2.0);
 
-      std::vector<GaussianFit::DataPoint> points;
-      points.reserve(region_size);
+        std::vector<GaussianFit::DataPoint> points;
+        points.reserve(region_size);
 
-      cv::Mat row_profile;
-      cv::reduce(roi_double, row_profile, 0, cv::REDUCE_AVG);
+        cv::Mat row_profile;
+        cv::reduce(roi_double, row_profile, 0, cv::REDUCE_AVG);
 
-      for (int j = 0; j < row_profile.cols; ++j) {
-        points.push_back(
-            {static_cast<double>(j), row_profile.at<double>(0, j)});
+        for (int j = 0; j < row_profile.cols; ++j) {
+          points.push_back(
+              {static_cast<double>(j), row_profile.at<double>(0, j)});
+        }
+
+        auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
+        double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
+
+        results[i] = {fwhm, hfr};
       }
+    }
+  } else {
+    for (size_t i = 0; i < centers.size(); ++i) {
+      cv::Mat roi = extract_star_region(image, centers[i], region_size);
+      if (!roi.empty()) {
+        cv::Mat roi_double;
+        roi.convertTo(roi_double, CV_64F);
 
-      auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
-      double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
+        double hfr = calcHfr(roi_double, region_size / 2.0);
 
-      results[i] = {fwhm, hfr};
+        std::vector<GaussianFit::DataPoint> points;
+        points.reserve(region_size);
+
+        cv::Mat row_profile;
+        cv::reduce(roi_double, row_profile, 0, cv::REDUCE_AVG);
+
+        for (int j = 0; j < row_profile.cols; ++j) {
+          points.push_back(
+              {static_cast<double>(j), row_profile.at<double>(0, j)});
+        }
+
+        auto gaussian_params = GaussianFit::GaussianFitter::fit(points);
+        double fwhm = gaussian_params ? 2.355 * gaussian_params->width : 0.0;
+
+        results[i] = {fwhm, hfr};
+      }
     }
   }
 

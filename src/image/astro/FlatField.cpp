@@ -352,3 +352,208 @@ Mat apply_flat_correction(const Mat &raw_image, const Mat &master_flat,
 
   return final_image;
 }
+
+void FlatFieldProcessor::initParallelResources() {
+  if (process_config_.use_thread_pool) {
+    thread_pool_ = std::make_shared<DynamicThreadPool>(
+        process_config_.thread_count,     // 最小线程数
+        process_config_.thread_count * 2, // 最大线程数
+        std::chrono::seconds(30)          // 空闲超时
+    );
+  }
+
+  if (process_config_.use_gpu) {
+    if (!initializeGPU()) {
+      spdlog::warn("GPU initialization failed, falling back to CPU");
+      process_config_.use_gpu = false;
+    }
+  }
+}
+
+void FlatFieldProcessor::submitTask(const Block &block, cv::Mat &result,
+                                    DynamicThreadPool::Priority priority) {
+  if (!thread_pool_)
+    return;
+
+  auto task = [this, block, &result]() { processBlock(block, result); };
+
+  thread_pool_->enqueueWithPriority(priority, task);
+}
+
+void FlatFieldProcessor::process_parallel_blocks(
+    const std::vector<cv::Mat> &frames, cv::Mat &result) {
+
+  auto blocks = generateBlocks(frames[0]);
+
+  if (process_config_.use_thread_pool && thread_pool_) {
+    std::vector<std::future<void>> futures;
+    futures.reserve(blocks.size());
+
+    // 提交任务
+    for (const auto &block : blocks) {
+      // 边缘块使用高优先级
+      auto priority = block.priority > 0 ? DynamicThreadPool::Priority::High
+                                         : DynamicThreadPool::Priority::Normal;
+
+      auto future = thread_pool_->enqueueWithPriority(
+          priority, [this, &block, &result]() { processBlock(block, result); });
+      futures.push_back(std::move(future));
+    }
+
+    // 等待所有任务完成
+    for (auto &future : futures) {
+      future.wait();
+    }
+  } else {
+#pragma omp parallel for if (process_config_.use_parallel)
+    for (int i = 0; i < blocks.size(); ++i) {
+      processBlock(blocks[i], result);
+    }
+  }
+}
+
+void FlatFieldProcessor::waitForTasks() {
+  if (thread_pool_) {
+    thread_pool_->waitAll();
+  }
+}
+
+void FlatFieldProcessor::processSIMDBlock(const cv::Mat &src, cv::Mat &dst,
+                                          const cv::Range &range) {
+#ifdef __AVX2__
+  for (int i = range.start; i < range.end; i += 8) {
+    __m256 src_vec = _mm256_loadu_ps(&src.at<float>(i));
+    __m256 dst_vec = _mm256_div_ps(_mm256_set1_ps(1.0f), src_vec);
+    _mm256_storeu_ps(&dst.at<float>(i), dst_vec);
+  }
+#else
+  for (int i = range.start; i < range.end; ++i) {
+    dst.at<float>(i) = 1.0f / src.at<float>(i);
+  }
+#endif
+}
+
+std::vector<FlatFieldProcessor::Block>
+FlatFieldProcessor::generateBlocks(const cv::Mat &image) const {
+  std::vector<Block> blocks;
+  int block_size = calculateOptimalBlockSize(image.size());
+
+  for (int y = 0; y < image.rows; y += block_size) {
+    for (int x = 0; x < image.cols; x += block_size) {
+      Block block;
+      block.row_range = cv::Range(y, std::min(y + block_size, image.rows));
+      block.col_range = cv::Range(x, std::min(x + block_size, image.cols));
+      block.priority = (y == 0 || y + block_size >= image.rows || x == 0 ||
+                        x + block_size >= image.cols)
+                           ? 1
+                           : 0;
+      blocks.push_back(block);
+    }
+  }
+
+  // 按优先级排序，边缘块优先处理
+  std::sort(blocks.begin(), blocks.end(), [](const Block &a, const Block &b) {
+    return a.priority > b.priority;
+  });
+
+  return blocks;
+}
+
+void FlatFieldProcessor::processBlock(const Block &block, cv::Mat &result) {
+  cv::Mat block_data = master_flat_(block.row_range, block.col_range);
+  cv::Mat result_roi = result(block.row_range, block.col_range);
+  if (process_config_.enable_simd) {
+    processSIMDBlock(block_data, result_roi, cv::Range(0, block_data.total()));
+  } else {
+    cv::divide(1.0, block_data, result_roi);
+  }
+}
+
+bool FlatFieldProcessor::initializeGPU() {
+#ifdef USE_CUDA
+  try {
+    int device_count;
+    cudaError_t error = cudaGetDeviceCount(&device_count);
+    if (error != cudaSuccess || device_count == 0) {
+      return false;
+    }
+
+    // 选择最佳GPU设备
+    int max_compute = 0;
+    int selected_device = 0;
+    for (int i = 0; i < device_count; ++i) {
+      cudaDeviceProp prop;
+      cudaGetDeviceProperties(&prop, i);
+      if (prop.multiProcessorCount > max_compute) {
+        max_compute = prop.multiProcessorCount;
+        selected_device = i;
+      }
+    }
+
+    cudaSetDevice(selected_device);
+    return true;
+  } catch (...) {
+    return false;
+  }
+#else
+  return false;
+#endif
+}
+
+void FlatFieldProcessor::processGPUBatch(const std::vector<cv::Mat> &batch,
+                                         cv::Mat &result) {
+#ifdef USE_CUDA
+  // 分配GPU内存
+  void *d_input;
+  void *d_output;
+  size_t total_size = batch[0].total() * batch.size() * sizeof(float);
+
+  cudaMalloc(&d_input, total_size);
+  cudaMalloc(&d_output, total_size);
+
+  // 批量上传数据
+  for (size_t i = 0; i < batch.size(); ++i) {
+    size_t offset = i * batch[0].total() * sizeof(float);
+    cudaMemcpy((char *)d_input + offset, batch[i].data,
+               batch[i].total() * sizeof(float), cudaMemcpyHostToDevice);
+  }
+
+  // 执行GPU kernel(此处需要实现相应的CUDA kernel)
+  processGPUKernel(d_input, d_output, batch[0].total(), batch.size());
+
+  // 下载结果
+  cudaMemcpy(result.data, d_output, total_size, cudaMemcpyDeviceToHost);
+
+  // 清理
+  cudaFree(d_input);
+  cudaFree(d_output);
+#endif
+}
+
+// 计算最优块大小
+int FlatFieldProcessor::calculateOptimalBlockSize(
+    const cv::Size &image_size) const {
+  if (!process_config_.dynamic_block_size) {
+    return process_config_.block_size;
+  }
+
+  const int cpu_cache_line = 64;         // 典型的缓存行大小
+  const int target_block_pixels = 32768; // 目标块大小(像素数)
+
+  int block_size = static_cast<int>(std::sqrt(target_block_pixels));
+  block_size =
+      std::min(block_size, std::min(image_size.width, image_size.height));
+  block_size = std::max(block_size, process_config_.min_block_size);
+  block_size = std::min(block_size, process_config_.max_block_size);
+
+  // 确保块大小是缓存行的整数倍
+  block_size = (block_size / cpu_cache_line) * cpu_cache_line;
+
+  return block_size;
+}
+
+// 判断是否适合使用GPU
+bool FlatFieldProcessor::isGPUBeneficial(const cv::Size &size) const {
+  const int min_pixels_for_gpu = 2048 * 2048; // 适合GPU的最小图像大小
+  return size.area() >= min_pixels_for_gpu;
+}

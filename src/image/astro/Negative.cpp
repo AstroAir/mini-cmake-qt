@@ -1,4 +1,5 @@
 #include "Negative.h"
+#include "ParallelConfig.hpp"
 #include <atomic>
 #include <filesystem>
 
@@ -20,12 +21,21 @@ void NegativeProcessor::init_lut() {
   const int max_value = 256;
   lut_.create(1, max_value, CV_8U);
 
-  parallel_for_(Range(0, max_value), [&](const Range &range) {
-    for (int i = range.start; i < range.end; i++) {
+  // 仅在数据量足够大时使用并行
+  if (max_value >= parallel_config::MIN_PARALLEL_SIZE) {
+#ifdef USE_OPENMP
+    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
+    for (int i = 0; i < max_value; i++) {
       lut_.at<uchar>(i) = static_cast<uchar>((255 - i) * config_.intensity +
-                                             i * (1 - config_.intensity));
+                                           i * (1 - config_.intensity));
     }
-  });
+  } else {
+    for (int i = 0; i < max_value; i++) {
+      lut_.at<uchar>(i) = static_cast<uchar>((255 - i) * config_.intensity +
+                                           i * (1 - config_.intensity));
+    }
+  }
 }
 
 void NegativeProcessor::process_channel(Mat &channel) {
@@ -54,8 +64,12 @@ void NegativeProcessor::process_channel_simd(Mat &channel) {
   const int step = 4;
 #endif
 
-  parallel_for_(Range(0, channel.rows), [&](const Range &range) {
-    for (int y = range.start; y < range.end; y++) {
+  const int total_pixels = channel.rows * channel.cols;
+  if (total_pixels >= parallel_config::MIN_PARALLEL_SIZE) {
+#ifdef USE_OPENMP
+    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
+    for (int y = 0; y < channel.rows; y++) {
       uchar *row = channel.ptr<uchar>(y);
       int x = 0;
 
@@ -69,7 +83,22 @@ void NegativeProcessor::process_channel_simd(Mat &channel) {
         row[x] = lut_.at<uchar>(row[x]);
       }
     }
-  });
+  } else {
+    for (int y = 0; y < channel.rows; y++) {
+      uchar *row = channel.ptr<uchar>(y);
+      int x = 0;
+
+      for (; x <= channel.cols - step; x += step) {
+        for (int i = 0; i < step; i++) {
+          row[x + i] = lut_.at<uchar>(row[x + i]);
+        }
+      }
+
+      for (; x < channel.cols; x++) {
+        row[x] = lut_.at<uchar>(row[x]);
+      }
+    }
+  }
 }
 
 Mat NegativeProcessor::process(const Mat &input,
@@ -88,17 +117,37 @@ Mat NegativeProcessor::process(const Mat &input,
       count_if(config_.channels.begin(), config_.channels.end(),
                [&](char c) { return channel_map.count(toupper(c)); });
 
-#pragma omp parallel for if (config_.multi_thread)
-  for (char c : config_.channels) {
-    if (!channel_map.count(toupper(c)) ||
-        channel_map.at(toupper(c)) >= channels.size())
-      continue;
+  const int total_channels = count_if(config_.channels.begin(), config_.channels.end(),
+                                    [&](char c) { return channel_map.count(toupper(c)); });
 
-    int idx = channel_map.at(toupper(c));
-    process_channel(channels[idx]);
+  if (total_channels >= parallel_config::MIN_FRAMES_PARALLEL) {
+#ifdef USE_OPENMP
+    #pragma omp parallel for num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+#endif
+    for (char c : config_.channels) {
+      if (!channel_map.count(toupper(c)) ||
+          channel_map.at(toupper(c)) >= channels.size())
+        continue;
 
-    if (progress_cb) {
-      progress_cb((++progress) / static_cast<float>(total_work));
+      int idx = channel_map.at(toupper(c));
+      process_channel(channels[idx]);
+
+      if (progress_cb) {
+        progress_cb((++progress) / static_cast<float>(total_work));
+      }
+    }
+  } else {
+    for (char c : config_.channels) {
+      if (!channel_map.count(toupper(c)) ||
+          channel_map.at(toupper(c)) >= channels.size())
+        continue;
+
+      int idx = channel_map.at(toupper(c));
+      process_channel(channels[idx]);
+
+      if (progress_cb) {
+        progress_cb((++progress) / static_cast<float>(total_work));
+      }
     }
   }
 
@@ -208,9 +257,4 @@ int NegativeApp::run(int argc, char **argv) {
     std::cerr << "程序错误: " << e.what() << std::endl;
     return -1;
   }
-}
-
-int main(int argc, char **argv) {
-  NegativeApp app;
-  return app.run(argc, argv);
 }

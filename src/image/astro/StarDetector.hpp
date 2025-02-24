@@ -5,10 +5,10 @@
 #include <vector>
 
 namespace cv {
-    template <typename T> class Point_;
-    typedef Point_<int> Point;
-    class Mat;
-}
+template <typename T> class Point_;
+typedef Point_<int> Point;
+class Mat;
+} // namespace cv
 
 namespace fs = std::filesystem;
 
@@ -33,13 +33,14 @@ struct StarDetectionConfig {
   fs::path detected_stars_save_path; ///< Path to save detected stars.
   bool visualize = true;             ///< Flag to visualize detected stars.
   fs::path visualization_save_path;  ///< Path to save visualization.
-  int local_region_size = 32;     ///< Size of local region for metrics calculation
-  bool calculate_metrics = true;   ///< Whether to calculate FWHM and HFR
-  bool use_gaussian_fit = true;     ///< 是否使用高斯拟合进行星点分析
-  double fit_convergence = 1e-6;    ///< 高斯拟合收敛阈值
-  int fit_max_iterations = 100;     ///< 高斯拟合最大迭代次数
-  bool parallel_processing = true;   ///< 是否启用并行处理
-  int block_size = 16;              ///< 并行处理块大小
+  int local_region_size = 32; ///< Size of local region for metrics calculation.
+  bool calculate_metrics = true; ///< Whether to calculate FWHM and HFR.
+  bool use_gaussian_fit =
+      true; ///< Whether to use Gaussian fit for star analysis.
+  double fit_convergence = 1e-6;   ///< Convergence threshold for Gaussian fit.
+  int fit_max_iterations = 100;    ///< Maximum iterations for Gaussian fit.
+  bool parallel_processing = true; ///< Whether to enable parallel processing.
+  int block_size = 16;             ///< Block size for parallel processing.
 };
 
 /**
@@ -62,45 +63,47 @@ public:
   std::vector<cv::Point> multiscale_detect_stars(const cv::Mat &input_image);
 
   /**
-   * @brief Calculates metrics (FWHM & HFR) for a star at specific location
-   * @param image Input image
-   * @param center Star center position
-   * @param region_size Size of the region around the star
-   * @return Pair of FWHM and HFR values
+   * @brief Calculates metrics (FWHM & HFR) for a star at a specific location.
+   * @param image The input image.
+   * @param center The star center position.
+   * @param region_size The size of the region around the star.
+   * @return A pair of FWHM and HFR values.
    */
-  std::pair<double, double> calculate_star_metrics(const cv::Mat& image, 
-                                                   const cv::Point& center,
+  std::pair<double, double> calculate_star_metrics(const cv::Mat &image,
+                                                   const cv::Point &center,
                                                    int region_size) const;
 
   /**
-   * @brief Batch calculates metrics for multiple stars
-   * @param image Input image
-   * @param centers Vector of star centers
-   * @param region_size Size of the region around each star
-   * @return Vector of FWHM and HFR pairs
+   * @brief Batch calculates metrics for multiple stars.
+   * @param image The input image.
+   * @param centers A vector of star centers.
+   * @param region_size The size of the region around each star.
+   * @return A vector of FWHM and HFR pairs.
    */
-  std::vector<std::pair<double, double>> calculate_batch_metrics(
-      const cv::Mat& image,
-      const std::vector<cv::Point>& centers,
-      int region_size) const;
+  std::vector<std::pair<double, double>>
+  calculate_batch_metrics(const cv::Mat &image,
+                          const std::vector<cv::Point> &centers,
+                          int region_size) const;
 
   /**
-   * @brief 计算星点的综合质量指标
-   * @param image 输入图像
-   * @param center 星点中心
-   * @param region_size 区域大小
-   * @return 包含FWHM、HFR和高斯拟合参数的结构
+   * @brief Calculates the comprehensive quality metrics for a star.
+   * @param image The input image.
+   * @param center The star center position.
+   * @param region_size The size of the region around the star.
+   * @return A structure containing FWHM, HFR, Gaussian fit parameters, and
+   * quality score.
    */
   struct StarMetrics {
-    double fwhm;
-    double hfr;
-    std::optional<GaussianFit::GaussianParams> gaussian_params;
-    double quality_score;
+    double fwhm; ///< Full Width at Half Maximum.
+    double hfr;  ///< Half-Flux Radius.
+    std::optional<GaussianFit::GaussianParams>
+        gaussian_params;  ///< Gaussian fit parameters.
+    double quality_score; ///< Quality score of the star.
   };
 
-  StarMetrics calculate_star_quality(const cv::Mat& image,
-                                    const cv::Point& center,
-                                    int region_size) const;
+  StarMetrics calculate_star_quality(const cv::Mat &image,
+                                     const cv::Point &center,
+                                     int region_size) const;
 
 private:
   StarDetectionConfig config_; ///< Configuration for star detection.
@@ -194,25 +197,29 @@ private:
                        const std::vector<cv::Point> &stars) const;
 
   /**
-   * @brief Extracts region of interest around a star
-   * @param image Input image
-   * @param center Star center
-   * @param size Region size
-   * @return ROI as Mat
+   * @brief Extracts the region of interest around a star.
+   * @param image The input image.
+   * @param center The star center position.
+   * @param size The size of the region.
+   * @return The region of interest as a Mat.
    */
-  cv::Mat extract_star_region(const cv::Mat& image, 
-                              const cv::Point& center,
+  cv::Mat extract_star_region(const cv::Mat &image, const cv::Point &center,
                               int size) const;
 
   /**
-   * @brief 计算星点质量的综合得分
+   * @brief Calculates the comprehensive quality score of a star.
+   * @param metrics The star metrics.
+   * @return The quality score.
    */
-  double calculate_quality_score(const StarMetrics& metrics) const;
-  
+  double calculate_quality_score(const StarMetrics &metrics) const;
+
   /**
-   * @brief 使用高斯拟合优化星点检测
+   * @brief Refines star positions using Gaussian fit.
+   * @param image The input image.
+   * @param initial_positions The initial star positions.
+   * @return A vector of refined star positions.
    */
-  std::vector<cv::Point> refine_star_positions(
-      const cv::Mat& image,
-      const std::vector<cv::Point>& initial_positions) const;
+  std::vector<cv::Point>
+  refine_star_positions(const cv::Mat &image,
+                        const std::vector<cv::Point> &initial_positions) const;
 };

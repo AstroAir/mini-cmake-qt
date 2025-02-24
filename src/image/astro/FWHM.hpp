@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ParallelConfig.hpp"
 #include <cmath>
 #include <optional>
 #include <span>
@@ -108,30 +109,41 @@ private:
 };
 
 /**
- * @brief 批量处理多个数据集的高斯拟合
+ * @brief Batch processes multiple datasets for Gaussian fitting.
+ * @param data_sets The datasets to fit the Gaussian function to.
+ * @param use_parallel Whether to use parallel processing.
+ * @param epsilon The convergence threshold for the fitting algorithm.
+ * @param max_iterations The maximum number of iterations for the fitting
+ * algorithm.
+ * @return A vector of optional GaussianParams structures representing the
+ * fitted parameters for each dataset.
  */
-std::vector<std::optional<GaussianParams>> batch_fit(
-    const std::vector<std::span<const DataPoint>>& data_sets,
-    bool use_parallel = true,
-    double epsilon = 1e-6,
-    int max_iterations = 100);
+std::vector<std::optional<GaussianParams>>
+batch_fit(const std::vector<std::span<const DataPoint>> &data_sets,
+          bool use_parallel = true, double epsilon = 1e-6,
+          int max_iterations = 100);
 
 /**
- * @brief 评估拟合质量
+ * @struct FitQuality
+ * @brief Structure representing the quality of a Gaussian fit.
  */
 struct FitQuality {
-    double r_squared;          // R方值
-    double residual_std;       // 残差标准差
-    double peak_to_noise;      // 信噪比
+  double r_squared;     ///< R-squared value.
+  double residual_std;  ///< Residual standard deviation.
+  double peak_to_noise; ///< Peak-to-noise ratio.
 };
 
-FitQuality assess_fit_quality(
-    std::span<const DataPoint> points,
-    const GaussianParams& params);
+/**
+ * @brief Assesses the quality of a Gaussian fit.
+ * @param points The data points.
+ * @param params The parameters of the Gaussian function.
+ * @return A FitQuality structure representing the quality of the fit.
+ */
+FitQuality assess_fit_quality(std::span<const DataPoint> points,
+                              const GaussianParams &params);
 
-// 添加性能优化相关常量
-constexpr int PARALLEL_THRESHOLD = 1000; // 并行处理的最小数据量阈值
-constexpr int SIMD_ALIGNMENT = 32; // AVX-256 对齐要求
-constexpr int BLOCK_SIZE = 16; // 缓存友好的块大小
+constexpr int PARALLEL_THRESHOLD = parallel_config::MIN_PARALLEL_SIZE;
+constexpr int BLOCK_SIZE = parallel_config::DEFAULT_BLOCK_SIZE;
+constexpr int SIMD_ALIGNMENT = 32; ///< AVX-256 alignment requirement
 
 } // namespace GaussianFit

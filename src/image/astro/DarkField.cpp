@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream> // 添加 fstream
+#include <future>
 #include <memory>
 #include <opencv2/opencv.hpp>
 #include <spdlog/spdlog.h>
@@ -134,24 +135,14 @@ cv::Mat DefectPixelMapper::correct_image(const cv::Mat &raw_image,
           ? apply_temperature_compensation(raw_image, current_temp)
           : raw_image.clone();
 
-#if USE_CUDA_ACCELERATION
-  spdlog::info("Using CUDA acceleration for image correction");
-  correct_image_cuda(corrected, defect_map_);
-#elif USE_OMP_ACCELERATION
-  spdlog::info("Using OpenMP acceleration for image correction");
-#pragma omp parallel for collapse(2)
-  for (int y = 0; y < corrected.rows; ++y) {
-    for (int x = 0; x < corrected.cols; ++x) {
-      if (defect_map_.at<uint8_t>(y, x) != 0) {
-        corrected.at<float>(y, x) = interpolate_pixel(x, y, corrected);
-      }
-    }
+  if (config_.use_gpu && check_gpu_available()) {
+    process_image_gpu(corrected, corrected);
+  } else if (config_.use_parallel) {
+    process_image_parallel(corrected, corrected);
+  } else {
+    // 串行处理
+    process_block(corrected, corrected, 0, corrected.rows);
   }
-#else
-  spdlog::info("Using serial processing for image correction");
-  // 串行处理代码
-  // ...
-#endif
 
   spdlog::info("Image correction completed");
   return corrected;
@@ -492,4 +483,137 @@ cv::Mat DefectPixelMapper::apply_temperature_compensation(const cv::Mat &image,
       current_temp, compensation_factor);
 
   return compensated;
+}
+
+void DefectPixelMapper::process_block(const cv::Mat &frame, cv::Mat &result,
+                                      int start_row, int end_row) {
+  for (int y = start_row; y < end_row; ++y) {
+    for (int x = 0; x < frame.cols; ++x) {
+      if (defect_map_.at<uint8_t>(y, x) != 0) {
+        result.at<float>(y, x) = interpolate_pixel(x, y, frame);
+      } else {
+        result.at<float>(y, x) = frame.at<float>(y, x);
+      }
+    }
+  }
+}
+
+void DefectPixelMapper::process_image_parallel(const cv::Mat &frame,
+                                               cv::Mat &result) {
+  int num_blocks;
+  std::vector<std::pair<int, int>> blocks;
+  split_work_blocks(frame.rows, num_blocks, blocks);
+
+  std::vector<std::future<void>> futures;
+  futures.reserve(num_blocks);
+
+  for (const auto &[start, end] : blocks) {
+    futures.emplace_back(
+        std::async(std::launch::async, &DefectPixelMapper::process_block, this,
+                   std::ref(frame), std::ref(result), start, end));
+  }
+
+  for (auto &future : futures) {
+    future.wait();
+  }
+}
+
+void DefectPixelMapper::split_work_blocks(
+    int total_rows, int &num_blocks, std::vector<std::pair<int, int>> &blocks) {
+  const int min_rows_per_block = 32;
+  const int max_blocks = std::thread::hardware_concurrency();
+
+  num_blocks = std::min(total_rows / min_rows_per_block, max_blocks);
+  num_blocks = std::max(num_blocks, 1);
+
+  const int rows_per_block = total_rows / num_blocks;
+  blocks.clear();
+
+  for (int i = 0; i < num_blocks; ++i) {
+    int start = i * rows_per_block;
+    int end = (i == num_blocks - 1) ? total_rows : (i + 1) * rows_per_block;
+    blocks.emplace_back(start, end);
+  }
+}
+
+bool DefectPixelMapper::init_gpu_resources() {
+#ifdef USE_CUDA
+  try {
+    // 分配GPU内存
+    size_t frame_size = defect_map_.rows * defect_map_.cols * sizeof(float);
+    cudaMalloc(&gpu_res_.d_input, frame_size);
+    cudaMalloc(&gpu_res_.d_output, frame_size);
+    cudaMalloc(&gpu_res_.d_defect_map, frame_size);
+
+    // 将defect_map上传到GPU
+    cudaMemcpy(gpu_res_.d_defect_map, defect_map_.data, frame_size,
+               cudaMemcpyHostToDevice);
+
+    gpu_res_.initialized = true;
+    return true;
+  } catch (const std::exception &e) {
+    spdlog::error("GPU initialization failed: {}", e.what());
+    release_gpu_resources();
+    return false;
+  }
+#else
+  return false;
+#endif
+}
+
+void DefectPixelMapper::release_gpu_resources() {
+#ifdef USE_CUDA
+  if (gpu_res_.d_input)
+    cudaFree(gpu_res_.d_input);
+  if (gpu_res_.d_output)
+    cudaFree(gpu_res_.d_output);
+  if (gpu_res_.d_defect_map)
+    cudaFree(gpu_res_.d_defect_map);
+  gpu_res_.initialized = false;
+#endif
+}
+
+void DefectPixelMapper::process_image_gpu(const cv::Mat &frame,
+                                          cv::Mat &result) {
+#ifdef USE_CUDA
+  if (!gpu_res_.initialized && !init_gpu_resources()) {
+    spdlog::warn("GPU processing unavailable, falling back to CPU");
+    process_image_parallel(frame, result);
+    return;
+  }
+
+  size_t frame_size = frame.rows * frame.cols * sizeof(float);
+
+  // 上传数据到GPU
+  cudaMemcpy(gpu_res_.d_input, frame.data, frame_size, cudaMemcpyHostToDevice);
+
+  // 调用CUDA核函数处理图像
+  const dim3 block_size(16, 16);
+  const dim3 grid_size((frame.cols + block_size.x - 1) / block_size.x,
+                       (frame.rows + block_size.y - 1) / block_size.y);
+
+  // 假设我们有一个CUDA核函数：process_frame_kernel
+  process_frame_kernel<<<grid_size, block_size>>>(
+      gpu_res_.d_input, gpu_res_.d_output, gpu_res_.d_defect_map, frame.rows,
+      frame.cols);
+
+  // 下载结果
+  cudaMemcpy(result.data, gpu_res_.d_output, frame_size,
+             cudaMemcpyDeviceToHost);
+
+#else
+  spdlog::warn("CUDA support not compiled in, using CPU implementation");
+  process_image_parallel(frame, result);
+#endif
+}
+
+// 检查GPU是否可用
+bool DefectPixelMapper::check_gpu_available() const {
+#ifdef USE_CUDA
+  int device_count = 0;
+  cudaGetDeviceCount(&device_count);
+  return device_count > 0;
+#else
+  return false;
+#endif
 }

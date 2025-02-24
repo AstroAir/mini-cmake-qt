@@ -1,158 +1,5 @@
-/**
- * @file HFR.cpp
- * @brief Implements functions for star detection and half-flux radius (HFR)
- * calculation.
- *
- * This file contains implementations for image processing functions that detect
- * stars in an astronomical image and compute the HFR value associated with each
- * detected star. The processing pipeline includes image preprocessing, noise
- * removal, contour detection, and several shape validations based on the
- * geometric and brightness properties of star-like objects.
- *
- * Functions:
- *
- * - checkElongated(int width, int height)
- *   @brief Checks if a given rectangular region is elongated.
- *   @param width The width of the bounding rectangle.
- *   @param height The height of the bounding rectangle.
- *   @return true if the ratio between width and height exceeds a predefined
- * threshold.
- *
- * - defineNarrowRadius(int minArea, double maxArea, double area, double scale)
- *   @brief Determines the number of narrow radius checks and corresponding
- * parameters based on the area.
- *   @param minArea The minimum area threshold.
- *   @param maxArea The maximum area threshold.
- *   @param area The current contour area.
- *   @param scale The scaling factor based on image size.
- *   @return A tuple containing the number of checks, a list of radii (as
- * integers), and a list of corresponding threshold values.
- *
- * - checkWhitePixel(const cv::Mat &rect_contour, int xCoord, int yCoord)
- *   @brief Determines if a pixel located at given coordinates in the image
- * matrix is white.
- *   @param rect_contour The image matrix to be checked.
- *   @param xCoord The x-coordinate of the pixel.
- *   @param yCoord The y-coordinate of the pixel.
- *   @return An integer representing a boolean value (non-zero if white, zero
- * otherwise).
- *
- * - eightSymmetryCircleCheck(const cv::Mat &rect_contour, const cv::Point
- * &center, int xCoord, int yCoord)
- *   @brief Performs an eight-way symmetry check for circle pixels around a
- * center point.
- *   @param rect_contour The image region containing the contour.
- *   @param center The center point of the circle.
- *   @param xCoord The x offset from center for symmetry check.
- *   @param yCoord The y offset from center for symmetry check.
- *   @return The count of white pixels detected in symmetric positions.
- *
- * - fourSymmetryCircleCheck(const cv::Mat &rect_contour, const cv::Point
- * &center, float radius)
- *   @brief Checks four cardinal symmetry positions on a circle boundary.
- *   @param rect_contour The image region containing the contour.
- *   @param center The center point of the circle.
- *   @param radius The radius at which to perform the check.
- *   @return The count of white pixels at the four symmetric positions.
- *
- * - checkBresenhamCircle(const cv::Mat &rect_contour, float radius, float
- * pixelRatio, bool ifDebug)
- *   @brief Uses Bresenham's circle algorithm to evaluate if the pixel ratio
- * within the circle meets a threshold.
- *   @param rect_contour The image region that represents the contour.
- *   @param radius The radius used for the circle check.
- *   @param pixelRatio The threshold ratio of white pixels.
- *   @param ifDebug Flag to indicate if debugging output should be generated.
- *   @return true if the ratio of white pixels exceeds pixelRatio, false
- * otherwise.
- *
- * - calcHfr(const cv::Mat &inImage, float radius)
- *   @brief Calculates the half-flux radius (HFR) by evaluating pixel brightness
- * weighted by their distance.
- *   @param inImage The input image (or its ROI) converted to 32F.
- *   @param radius The estimated radius of the star.
- *   @return The calculated HFR value.
- *
- * - caldim(const cv::Mat &img)
- *   @brief Checks if a given image region is dim by thresholding the grayscale
- * brightness.
- *   @param img The input image for which to evaluate brightness.
- *   @return true if the non-zero pixel ratio is below a predefined threshold,
- * false otherwise.
- *
- * - preprocessImage(const cv::Mat &img, cv::Mat &grayimg, cv::Mat &rgbImg,
- * cv::Mat &mark_img)
- *   @brief Preprocesses the input image by converting it to grayscale and RGB
- * formats as required.
- *   @param img The original input image.
- *   @param grayimg Output grayscale image.
- *   @param rgbImg Output RGB image.
- *   @param mark_img Image used for marking detected stars.
- *
- * - removeNoise(cv::Mat &map, bool if_removehotpixel, bool if_noiseremoval)
- *   @brief Performs noise removal on the image using median filtering and
- * Gaussian smoothing.
- *   @param map The image to be processed for noise reduction.
- *   @param if_removehotpixel Flag indicating whether hot pixels should be
- * removed.
- *   @param if_noiseremoval Flag indicating whether additional noise removal
- * should be applied.
- *
- * - calculateMeanAndStd(const cv::Mat &map, bool down_sample_mean_std, double
- * &medianVal, double &stdDev)
- *   @brief Computes the mean and standard deviation of image brightness with an
- * option for downsampling.
- *   @param map The input image (or noise-reduced map).
- *   @param down_sample_mean_std Flag indicating whether to downsample for
- * faster computation.
- *   @param medianVal Output value representing the mean (or median) brightness.
- *   @param stdDev Output standard deviation of the brightness.
- *
- * - processContours(const cv::Mat &grayimg, const cv::Mat &rgbImg, cv::Mat
- * &mark_img, const std::vector<std::vector<cv::Point>> &contours, double
- * threshold, bool do_star_mark)
- *   @brief Processes detected contours to filter potential stars and compute
- * HFR for valid regions. This includes checks for area, elongation, brightness
- * consistency (caldim), and Bresenham circle criteria.
- *   @param grayimg Grayscale image used for contour evaluation.
- *   @param rgbImg RGB image used for star marking.
- *   @param mark_img Image on which the detected stars and HFR are annotated.
- *   @param contours Vector of contours (each a vector of points) detected in
- * the binary image.
- *   @param threshold The threshold value used for binarization.
- *   @param do_star_mark Flag to indicate whether to annotate the stars on
- * mark_img.
- *   @return A tuple containing:
- *           - The number of valid star contours detected.
- *           - The average HFR over all detected stars.
- *           - A vector of HFR values for each star.
- *           - A vector of area measurements for each star.
- *
- * - starDetectAndHfr(const cv::Mat &img, bool if_removehotpixel, bool
- * if_noiseremoval, bool do_star_mark, bool down_sample_mean_std, cv::Mat
- * mark_img)
- *   @brief Main function to perform star detection and HFR calculation.
- *   The image is preprocessed, noise is removed, and contours are extracted
- * from a thresholded map. Each contour is validated, its HFR computed, and
- * optionally annotated.
- *   @param img The input astronomical image.
- *   @param if_removehotpixel Flag indicating whether hot pixel removal should
- * be applied.
- *   @param if_noiseremoval Flag indicating whether Gaussian noise removal
- * should be applied.
- *   @param do_star_mark Flag to annotate detected stars on the output image.
- *   @param down_sample_mean_std Flag to control downsampling during mean and
- * std calculation.
- *   @param mark_img Image used for marking the detected stars (updated within
- * the function).
- *   @return A tuple containing:
- *           - The image with marked stars (if do_star_mark is true).
- *           - The number of stars detected.
- *           - The average HFR computed.
- *           - A JSON object with additional area statistics (max, min,
- * average).
- */
 #include "HFR.hpp"
+#include "ParallelConfig.hpp"
 
 #include "spdlog/sinks/basic_file_sink.h"
 
@@ -346,30 +193,66 @@ auto calcHfr(const cv::Mat &inImage, float radius) -> double {
     constexpr double K_MAGIC_NUMBER = 1.2;
     const float max_radius = radius * K_MAGIC_NUMBER;
 
+    // 只在数据量足够大时使用并行
+    const bool useParallel =
+        img.rows * img.cols >= parallel_config::MIN_PARALLEL_SIZE;
+
     // 预计算半径查找表以避免重复计算
     std::vector<float> radius_lut(img.rows * img.cols);
+
+#ifdef USE_OPENMP
+    if (useParallel) {
+      omp_set_num_threads(parallel_config::DEFAULT_THREAD_COUNT);
 #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < img.rows; ++i) {
-      for (int j = 0; j < img.cols; ++j) {
-        radius_lut[i * img.cols + j] = std::sqrt((i - centerY) * (i - centerY) +
-                                                 (j - centerX) * (j - centerX));
+      for (int i = 0; i < img.rows; ++i) {
+        for (int j = 0; j < img.cols; ++j) {
+          radius_lut[i * img.cols + j] = std::sqrt(
+              (i - centerY) * (i - centerY) + (j - centerX) * (j - centerX));
+        }
       }
+    } else {
+#endif
+      for (int i = 0; i < img.rows; ++i) {
+        for (int j = 0; j < img.cols; ++j) {
+          radius_lut[i * img.cols + j] = std::sqrt(
+              (i - centerY) * (i - centerY) + (j - centerX) * (j - centerX));
+        }
+      }
+#ifdef USE_OPENMP
     }
+#endif
 
     double sum = 0.0;
     double sumDist = 0.0;
 
     // 使用 OpenCV 优化的访问方式
     const float *img_data = img.ptr<float>();
+
+#ifdef USE_OPENMP
+    if (useParallel) {
+      omp_set_num_threads(parallel_config::DEFAULT_THREAD_COUNT);
 #pragma omp parallel for reduction(+ : sum, sumDist) schedule(static)
-    for (int idx = 0; idx < img.rows * img.cols; ++idx) {
-      const float dist = radius_lut[idx];
-      if (dist <= max_radius) {
-        const float val = img_data[idx];
-        sum += val;
-        sumDist += val * dist;
+      for (int idx = 0; idx < img.rows * img.cols; ++idx) {
+        const float dist = radius_lut[idx];
+        if (dist <= max_radius) {
+          const float val = img_data[idx];
+          sum += val;
+          sumDist += val * dist;
+        }
       }
+    } else {
+#endif
+      for (int idx = 0; idx < img.rows * img.cols; ++idx) {
+        const float dist = radius_lut[idx];
+        if (dist <= max_radius) {
+          const float val = img_data[idx];
+          sum += val;
+          sumDist += val * dist;
+        }
+      }
+#ifdef USE_OPENMP
     }
+#endif
 
     return sum <= 0 ? std::sqrt(2.0) * max_radius : sumDist / sum;
   } catch (const std::exception &e) {
@@ -439,13 +322,25 @@ auto preprocessImage(const Mat &img, Mat &grayimg, Mat &rgbImg, Mat &mark_img)
 auto removeNoise(Mat &map, bool if_removehotpixel, bool if_noiseremoval)
     -> void {
   try {
+    const bool useParallel =
+        map.rows * map.cols >= parallel_config::MIN_PARALLEL_SIZE;
+
     if (if_removehotpixel) {
-      cv::parallel_for_(cv::Range(0, map.rows), [&](const cv::Range &range) {
-        for (int i = range.start; i < range.end; i++) {
-          // 实现并行中值滤波
+#ifdef USE_OPENMP
+      if (useParallel) {
+        omp_set_num_threads(parallel_config::DEFAULT_THREAD_COUNT);
+#pragma omp parallel for schedule(static)
+        for (int i = 0; i < map.rows; i++) {
           medianBlur(map.row(i), map.row(i), 3);
         }
-      });
+      } else {
+#endif
+        for (int i = 0; i < map.rows; i++) {
+          medianBlur(map.row(i), map.row(i), 3);
+        }
+#ifdef USE_OPENMP
+      }
+#endif
     }
 
     if (if_noiseremoval) {
@@ -495,11 +390,28 @@ auto calculateMeanAndStd(const Mat &map, bool down_sample_mean_std,
       medianVal = std::accumulate(sampleValue.begin(), sampleValue.end(), 0.0) /
                   sampleValue.size();
       double sum = 0;
+
+      const bool useParallel =
+          sampleValue.size() >= parallel_config::MIN_PARALLEL_SIZE;
+
+#ifdef USE_OPENMP
+      if (useParallel) {
+        omp_set_num_threads(parallel_config::DEFAULT_THREAD_COUNT);
 #pragma omp parallel for reduction(+ : sum)
-      for (size_t i = 0; i < sampleValue.size(); ++i) {
-        double diff = sampleValue[i] - medianVal;
-        sum += diff * diff;
+        for (size_t i = 0; i < sampleValue.size(); ++i) {
+          double diff = sampleValue[i] - medianVal;
+          sum += diff * diff;
+        }
+      } else {
+#endif
+        for (size_t i = 0; i < sampleValue.size(); ++i) {
+          double diff = sampleValue[i] - medianVal;
+          sum += diff * diff;
+        }
+#ifdef USE_OPENMP
       }
+#endif
+
       stdDev = sqrt(sum / sampleValue.size());
       hfrLogger->info("Calculated downsampled mean: {} and std: {}", medianVal,
                       stdDev);

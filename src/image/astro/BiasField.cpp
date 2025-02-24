@@ -1,4 +1,5 @@
 #include "BiasField.hpp"
+#include "ParallelConfig.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -114,14 +115,37 @@ void BiasProcessor::process_blocks(const std::vector<cv::Mat> &frames,
   const int block_size = config_.block_size;
   std::vector<float> pixel_buffer;
 
+  const int total_pixels = master.rows * master.cols;
+  if (total_pixels < parallel_config::MIN_PARALLEL_SIZE) {
+    // 数据量较小时使用单线程处理
+    for (int y = 0; y < master.rows; y += block_size) {
+      for (int x = 0; x < master.cols; x += block_size) {
+        process_block(frames, master, x, y, block_size, pixel_buffer);
+      }
+    }
+    return;
+  }
+
 #ifdef USE_OPENMP
-#pragma omp parallel for collapse(2) private(pixel_buffer)
-#endif
+#pragma omp parallel num_threads(                                              \
+        parallel_config::DEFAULT_THREAD_COUNT) private(pixel_buffer)
+  {
+#pragma omp for collapse(2)
+    for (int y = 0; y < master.rows; y += block_size) {
+      for (int x = 0; x < master.cols; x += block_size) {
+        process_block(frames, master, x, y, block_size, pixel_buffer);
+      }
+    }
+  }
+#else
+  // 单线程处理
   for (int y = 0; y < master.rows; y += block_size) {
     for (int x = 0; x < master.cols; x += block_size) {
       process_block(frames, master, x, y, block_size, pixel_buffer);
     }
   }
+#endif
+
   spdlog::info("并行分块处理完成");
 }
 
@@ -236,20 +260,39 @@ void BiasProcessor::compute_statistics(const std::vector<cv::Mat> &frames,
 
   cv::Mat sum_sq_diff = cv::Mat::zeros(master.size(), CV_32F);
 
-#ifdef USE_OPENMP
-#pragma omp parallel for if (config_.use_simd)
-#endif
-  for (size_t i = 0; i < frames.size(); ++i) {
-    cv::Mat diff;
-    cv::subtract(frames[i], master, diff);
-    cv::multiply(diff, diff, diff);
-
-#ifdef USE_OPENMP
-#pragma omp critical
-#endif
-    {
+  const int total_pixels = master.rows * master.cols;
+  if (total_pixels < parallel_config::MIN_PARALLEL_SIZE) {
+    // 数据量较小时使用单线程处理
+    for (size_t i = 0; i < frames.size(); ++i) {
+      cv::Mat diff;
+      cv::subtract(frames[i], master, diff);
+      cv::multiply(diff, diff, diff);
       cv::add(sum_sq_diff, diff, sum_sq_diff);
     }
+  } else {
+#ifdef USE_OPENMP
+#pragma omp parallel num_threads(parallel_config::DEFAULT_THREAD_COUNT)
+    {
+#pragma omp for
+      for (size_t i = 0; i < frames.size(); ++i) {
+        cv::Mat diff;
+        cv::subtract(frames[i], master, diff);
+        cv::multiply(diff, diff, diff);
+#pragma omp critical
+        {
+          cv::add(sum_sq_diff, diff, sum_sq_diff);
+        }
+      }
+    }
+#else
+    // 单线程处理
+    for (size_t i = 0; i < frames.size(); ++i) {
+      cv::Mat diff;
+      cv::subtract(frames[i], master, diff);
+      cv::multiply(diff, diff, diff);
+      cv::add(sum_sq_diff, diff, sum_sq_diff);
+    }
+#endif
   }
 
   cv::divide(sum_sq_diff, frames.size() - 1, variance);

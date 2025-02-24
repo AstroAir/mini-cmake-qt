@@ -7,7 +7,6 @@
 #include <spdlog/spdlog.h>
 #include <sstream>
 
-
 namespace {
 std::shared_ptr<spdlog::logger> marker_logger;
 
@@ -44,52 +43,57 @@ cv::Mat StarMarker::mark_stars(const cv::Mat &image,
 #ifdef USE_CUDA
     if (config_.use_gpu_acceleration && check_cuda_device()) {
       marked_image = mark_stars_cuda(image, stars);
+      if (marked_image.empty() && parallel_config::ENABLE_GPU_FALLBACK) {
+        marker_logger->warn("GPU processing failed, falling back to CPU");
+        goto cpu_processing;
+      }
+      return marked_image;
+    }
+#endif
+
+  cpu_processing:
+    if (image.channels() == 1) {
+      cv::cvtColor(image, marked_image, cv::COLOR_GRAY2BGR);
+    } else {
+      marked_image = image.clone();
+    }
+
+    std::vector<StarInfo> filtered_stars;
+    filtered_stars.reserve(stars.size());
+    marker_logger->debug("Filtering stars...");
+    for (const auto &star : stars) {
+      if (should_mark_star(star)) {
+        filtered_stars.push_back(star);
+      }
+    }
+    marker_logger->debug("Filtered {} stars", filtered_stars.size());
+
+    if (config_.prevent_label_overlap) {
+      optimize_label_positions(marked_image, filtered_stars);
+    }
+
+#ifdef USE_OPENMP
+    if (config_.use_parallel_processing &&
+        filtered_stars.size() >= parallel_config::MIN_PARALLEL_SIZE) {
+      marker_logger->debug("Using OpenMP parallel processing");
+      int num_threads =
+          std::min(config_.thread_count, parallel_config::DEFAULT_THREAD_COUNT);
+#pragma omp parallel for num_threads(num_threads) schedule(dynamic)
+      for (int i = 0; i < filtered_stars.size(); ++i) {
+        const auto &star = filtered_stars[i];
+        cv::Mat layer = marked_image.clone();
+        mark_single_star(layer, star);
+#pragma omp critical
+        {
+          marked_image = layer;
+        }
+      }
     } else
 #endif
     {
-      if (image.channels() == 1) {
-        cv::cvtColor(image, marked_image, cv::COLOR_GRAY2BGR);
-      } else {
-        marked_image = image.clone();
-      }
-
-      // 优化标签位置
-      std::vector<StarInfo> filtered_stars;
-      filtered_stars.reserve(stars.size());
-      marker_logger->debug("Filtering stars...");
-      for (const auto &star : stars) {
-        if (should_mark_star(star)) {
-          filtered_stars.push_back(star);
-        }
-      }
-      marker_logger->debug("Filtered {} stars", filtered_stars.size());
-
-      if (config_.prevent_label_overlap) {
-        optimize_label_positions(marked_image, filtered_stars);
-      }
-
-// 并行处理标注
-#ifdef USE_OPENMP
-      if (config_.use_parallel_processing &&
-          filtered_stars.size() >= parallel_config::MIN_PARALLEL_SIZE) {
-        marker_logger->debug("Using OpenMP parallel processing");
-#pragma omp parallel for num_threads(config_.thread_count) schedule(dynamic)
-        for (int i = 0; i < filtered_stars.size(); ++i) {
-          const auto &star = filtered_stars[i];
-          cv::Mat layer = marked_image.clone();
-          mark_single_star(layer, star);
-#pragma omp critical
-          {
-            marked_image = layer;
-          }
-        }
-      } else
-#endif
-      {
-        marker_logger->debug("Using sequential processing");
-        for (const auto &star : filtered_stars) {
-          mark_single_star(marked_image, star);
-        }
+      marker_logger->debug("Using sequential processing");
+      for (const auto &star : filtered_stars) {
+        mark_single_star(marked_image, star);
       }
     }
 
