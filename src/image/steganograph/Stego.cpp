@@ -638,3 +638,60 @@ double estimate_compression_ratio(const Mat &image, const StegoConfig &config) {
 
   return static_cast<double>(buffer.size()) / original_size;
 }
+
+double calculateSimilarity(const cv::Mat &img1, const cv::Mat &img2, 
+                         std::vector<double> *metrics) {
+    if (img1.empty() || img2.empty() || img1.size() != img2.size()) {
+        throw std::runtime_error("Invalid images for similarity calculation");
+    }
+
+    // 计算MSE (Mean Square Error)
+    cv::Mat diff;
+    cv::absdiff(img1, img2, diff);
+    diff = diff.mul(diff);
+    cv::Scalar mse = cv::mean(diff);
+    double mseScore = 1.0 - std::min(1.0, (mse[0] + mse[1] + mse[2]) / (3 * 255 * 255));
+
+    // 计算PSNR (Peak Signal-to-Noise Ratio)
+    double psnr = cv::PSNR(img1, img2);
+    double psnrScore = std::min(1.0, psnr / 50.0); // 归一化到0-1范围
+
+    // 计算SSIM (Structural Similarity Index)
+    cv::Scalar ssimScalar = MSSIM(img1, img2);
+    double ssimScore = ssimScalar[0];
+
+    // 计算直方图相似度
+    std::vector<cv::Mat> hist1, hist2;
+    cv::split(img1, hist1);
+    cv::split(img2, hist2);
+    double histScore = 0.0;
+    for (int i = 0; i < 3; i++) {
+        cv::Mat h1, h2;
+        int histSize = 256;
+        float range[] = {0, 256};
+        const float* histRange = {range};
+        cv::calcHist(&hist1[i], 1, 0, cv::Mat(), h1, 1, &histSize, &histRange);
+        cv::calcHist(&hist2[i], 1, 0, cv::Mat(), h2, 1, &histSize, &histRange);
+        cv::normalize(h1, h1, 0, 1, cv::NORM_MINMAX);
+        cv::normalize(h2, h2, 0, 1, cv::NORM_MINMAX);
+        histScore += cv::compareHist(h1, h2, cv::HISTCMP_CORREL);
+    }
+    histScore /= 3.0;
+
+    // 如果需要返回各指标分数
+    if (metrics) {
+        metrics->clear();
+        metrics->push_back(mseScore);
+        metrics->push_back(psnrScore);
+        metrics->push_back(ssimScore);
+        metrics->push_back(histScore);
+    }
+
+    // 计算加权平均得分
+    constexpr double w1 = 0.25; // MSE权重
+    constexpr double w2 = 0.25; // PSNR权重
+    constexpr double w3 = 0.30; // SSIM权重
+    constexpr double w4 = 0.20; // Histogram权重
+
+    return w1 * mseScore + w2 * psnrScore + w3 * ssimScore + w4 * histScore;
+}

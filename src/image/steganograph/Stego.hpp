@@ -119,3 +119,13 @@ bool test_robustness(const cv::Mat &stego, const std::string &message,
  * @return The MSSIM value as a cv::Scalar.
  */
 cv::Scalar MSSIM(const cv::Mat &i1, const cv::Mat &i2);
+
+/**
+ * @brief Calculates similarity score between two images using multiple metrics
+ * @param img1 First input image
+ * @param img2 Second input image
+ * @param metrics Optional vector to store individual metric scores
+ * @return Overall similarity score between 0.0 and 1.0
+ */
+double calculateSimilarity(const cv::Mat &img1, const cv::Mat &img2, 
+                         std::vector<double> *metrics = nullptr);

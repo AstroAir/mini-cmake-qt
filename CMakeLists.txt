@@ -111,6 +111,27 @@ target_link_libraries(${PROJECT_NAME}
     ElaWidgetTools
     ${CFITSIO_LIBRARIES})
 
+# 添加更新系统相关文件
+target_sources(${PROJECT_NAME} PRIVATE
+    src/utils/AppUpdater.h
+    src/utils/AppUpdater.cpp
+    src/ui/UpdateCheck.h
+    src/ui/UpdateCheck.cpp
+    src/ui/UpdateDialog.h
+    src/ui/UpdateDialog.cpp
+)
+
+# 添加用于版本比较的semver库
+# 可以使用FetchContent或find_package
+include(FetchContent)
+FetchContent_Declare(
+    semver
+    GIT_REPOSITORY https://github.com/Neargye/semver.git
+    GIT_TAG v0.3.0
+)
+FetchContent_MakeAvailable(semver)
+target_include_directories(${PROJECT_NAME} PRIVATE ${semver_SOURCE_DIR}/include)
+
 if (WIN32)
 target_link_libraries(${PROJECT_NAME} dbghelp)
 endif()

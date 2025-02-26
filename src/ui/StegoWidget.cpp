@@ -437,41 +437,203 @@ QWidget *StegoWindow::createMSBPanel() {
   return panel;
 }
 
-// 实现文件操作和处理逻辑
-void StegoWindow::loadImage() {
-  QString fileName = QFileDialog::getOpenFileName(
-      this, tr("打开图像"), QString(), tr("Images (*.png *.jpg *.bmp)"));
-  if (fileName.isEmpty())
-    return;
+QGroupBox *StegoWindow::createAnalysisPanel() {
+  QGroupBox *group = new QGroupBox(tr("隐写分析"));
+  QVBoxLayout *layout = new QVBoxLayout(group);
 
-  originalImage = cv::imread(fileName.toStdString(), cv::IMREAD_UNCHANGED);
-  if (originalImage.empty()) {
-    showError(tr("无法加载图像"));
-    return;
-  }
+  // 分析方法选择
+  analysisMethodBox = new ElaComboBox;
+  analysisMethodBox->addItems({tr("直方图分析"), tr("相关性分析"),
+                               tr("深度学习检测"), tr("统计特征分析")});
 
-  processedImage = originalImage.clone();
-  saveImageButton->setEnabled(true);
-  updatePreview();
-  emit onImageLoaded(); // 添加这一行，发射信号
+  // 直方图矩阵显示
+  histogramMatrixLabel = new QLabel;
+  histogramMatrixLabel->setMinimumSize(200, 200);
+
+  // 相关性矩阵显示
+  correlationMatrixLabel = new QLabel;
+  correlationMatrixLabel->setMinimumSize(200, 200);
+
+  layout->addWidget(analysisMethodBox);
+  layout->addWidget(histogramMatrixLabel);
+  layout->addWidget(correlationMatrixLabel);
+
+  connect(analysisMethodBox,
+          QOverload<int>::of(&ElaComboBox::currentIndexChanged), this,
+          &StegoWindow::analyzeStegDetection);
+
+  return group;
 }
 
-void StegoWindow::saveImage() {
-  if (processedImage.empty()) {
-    showError(tr("没有可保存的图像"));
+QGroupBox *StegoWindow::createAttackSimulationPanel() {
+  QGroupBox *group = new QGroupBox(tr("鲁棒性测试"));
+  QGridLayout *layout = new QGridLayout(group);
+
+  attackTypeBox = new ElaComboBox;
+  attackTypeBox->addItems({tr("高斯噪声"), tr("JPEG压缩"), tr("图像旋转"),
+                           tr("裁剪攻击"), tr("滤波攻击")});
+
+  attackIntensityBox = new ElaDoubleSpinBox;
+  attackIntensityBox->setRange(0.1, 1.0);
+  attackIntensityBox->setValue(0.5);
+  attackIntensityBox->setSingleStep(0.1);
+
+  simulateAttackButton = new ElaPushButton(tr("模拟攻击"));
+
+  layout->addWidget(new QLabel(tr("攻击类型:")), 0, 0);
+  layout->addWidget(attackTypeBox, 0, 1);
+  layout->addWidget(new QLabel(tr("攻击强度:")), 1, 0);
+  layout->addWidget(attackIntensityBox, 1, 1);
+  layout->addWidget(simulateAttackButton, 2, 0, 1, 2);
+
+  connect(simulateAttackButton, &ElaPushButton::clicked, this,
+          &StegoWindow::simulateAttack);
+
+  return group;
+}
+
+void StegoWindow::optimizeEmbeddingStrategy() {
+  if (originalImage.empty())
     return;
+
+  // 分析图像特征
+  std::vector<cv::Mat> channels;
+  cv::split(originalImage, channels);
+  std::vector<ChannelQuality> qualities;
+
+  for (const auto &channel : channels) {
+    qualities.push_back(steganograph::analyze_channel_quality(channel));
   }
 
-  QString fileName = QFileDialog::getSaveFileName(this, tr("保存图像"),
-                                                  QString(), tr("PNG (*.png)"));
-  if (fileName.isEmpty())
+  // 自适应选择最佳通道
+  channelConfig.useBlue = qualities[0].entropy > 6.5;
+  channelConfig.useGreen = qualities[1].entropy > 6.5;
+  channelConfig.useRed = qualities[2].entropy > 6.5;
+
+  // 根据图像特征调整参数
+  if (channelConfig.embedMode == ChannelConfig::EmbedMode::ADAPTIVE_LSB) {
+    double avgEntropy = 0;
+    for (const auto &quality : qualities) {
+      avgEntropy += quality.entropy;
+    }
+    avgEntropy /= qualities.size();
+
+    // 根据熵值调整嵌入强度
+    channelConfig.bitsPerChannel = avgEntropy > 7.0 ? 2 : 1;
+  }
+}
+
+double StegoWindow::compareTextSimilarity(const std::string &text1,
+                                          const std::string &text2) {
+  if (text1.empty() && text2.empty())
+    return 1.0;
+  if (text1.empty() || text2.empty())
+    return 0.0;
+
+  // 计算Levenshtein距离
+  std::vector<std::vector<int>> dp(text1.length() + 1,
+                                   std::vector<int>(text2.length() + 1));
+
+  for (int i = 0; i <= text1.length(); i++)
+    dp[i][0] = i;
+  for (int j = 0; j <= text2.length(); j++)
+    dp[0][j] = j;
+
+  for (int i = 1; i <= text1.length(); i++) {
+    for (int j = 1; j <= text2.length(); j++) {
+      if (text1[i - 1] == text2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] = 1 + std::min({dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]});
+      }
+    }
+  }
+
+  double maxLen = std::max(text1.length(), text2.length());
+  return maxLen > 0 ? 1.0 - (dp[text1.length()][text2.length()] / maxLen) : 1.0;
+}
+
+void StegoWindow::simulateAttack() {
+  if (processedImage.empty())
     return;
 
-  if (cv::imwrite(fileName.toStdString(), processedImage)) {
-    showSuccess(tr("图像保存成功"));
-  } else {
-    showError(tr("图像保存失败"));
+  cv::Mat attackedImage;
+  QString attackType;
+  double intensity = attackIntensityBox->value();
+
+  switch (attackTypeBox->currentIndex()) {
+  case 0: // 高斯噪声
+    attackedImage = applyAttack(processedImage, "noise", intensity);
+    attackType = tr("高斯噪声");
+    break;
+  case 1: // JPEG压缩
+    attackedImage = applyAttack(processedImage, "compression", intensity);
+    attackType = tr("JPEG压缩");
+    break;
+  case 2: // 旋转
+    attackedImage = applyAttack(processedImage, "rotation", intensity);
+    attackType = tr("旋转");
+    break;
+  case 3: // 裁剪攻击
+    attackedImage = applyAttack(processedImage, "crop", intensity);
+    attackType = tr("裁剪");
+    break;
+  case 4: // 滤波攻击
+    attackedImage = applyAttack(processedImage, "filter", intensity);
+    attackType = tr("滤波");
+    break;
   }
+
+  // 提取攻击后的信息并比较
+  try {
+    std::string extractedMsg = extractLSB(attackedImage);
+    double similarity = compareTextSimilarity(
+        lsbMessageEdit->toPlainText().toStdString(), extractedMsg);
+
+    // 更新鲁棒性评分
+    currentMetrics.robustness = similarity;
+    updateQualityMetrics();
+
+    showSuccess(tr("攻击模拟完成\n鲁棒性得分: %1").arg(similarity));
+  } catch (const std::exception &e) {
+    showError(tr("信息提取失败: %1").arg(e.what()));
+  }
+}
+
+void StegoWindow::analyzeStegDetection() {
+  if (processedImage.empty())
+    return;
+
+  cv::Mat analysisResult;
+  double confidence;
+
+  switch (analysisMethodBox->currentIndex()) {
+  case 0: // 直方图分析
+    generateHistogramMatrix();
+    break;
+  case 1: // 相关性分析
+    generateCorrelationMatrix();
+    break;
+  case 2: // 深度学习检测
+    if (stegAnalysisConfig.useDeepLearning) {
+      // 实现深度学习检测
+      // ...
+    }
+    break;
+  case 3: // 统计特征分析
+    if (stegAnalysisConfig.useStatisticalAnalysis) {
+      // 实现统计分析
+      // ...
+    }
+    break;
+  }
+
+  // 更新检测结果显示
+  bool detected =
+      steganograph::detect_steganography(processedImage, &confidence);
+  detectionLabel->setText(tr("隐写检测: %1 (置信度: %2%)")
+                              .arg(detected ? tr("已检测") : tr("未检测"))
+                              .arg(confidence * 100, 0, 'f', 2));
 }
 
 void StegoWindow::embedMessage() {
@@ -480,6 +642,9 @@ void StegoWindow::embedMessage() {
 
   try {
     startOperation(tr("消息嵌入"));
+
+    // 优化嵌入策略
+    optimizeEmbeddingStrategy();
 
     // 应用预处理
     if (isPreprocessingEnabled) {
@@ -500,6 +665,7 @@ void StegoWindow::embedMessage() {
     // 更新质量监测
     updateQualityMonitor(originalImage, processedImage);
     updateChannelAnalysis();
+    analyzeStegDetection();
     updatePreview();
 
     finishOperation(true);
@@ -981,6 +1147,14 @@ void StegoWindow::setupTabbedPanel() {
   // 添加MSB压缩标签页
   QWidget *msbPanel = createMSBPanel();
   tabWidget->addTab(msbPanel, tr("MSB压缩"));
+
+  // 添加隐写分析标签页
+  QGroupBox *analysisPanel = createAnalysisPanel();
+  tabWidget->addTab(analysisPanel, tr("隐写分析"));
+
+  // 添加鲁棒性测试标签页
+  QGroupBox *attackSimulationPanel = createAttackSimulationPanel();
+  tabWidget->addTab(attackSimulationPanel, tr("鲁棒性测试"));
 
   // 连接标签页切换信号
   connect(tabWidget, &QTabWidget::currentChanged, [this](int index) {

@@ -18,7 +18,10 @@ class HistogramDialog : public QDialog {
   Q_OBJECT
 public:
   explicit HistogramDialog(QWidget *parent = nullptr);
+  ~HistogramDialog() = default;
   void showHistogram(const cv::Mat &image, const HistogramConfig &config = {});
+  void setTitle(const QString& title);
+  void setOptions(bool showRGB, bool showGray, bool logScale);
   void showChannelHistograms();
   void exportHistogramData();
   void compareHistograms(const cv::Mat &image1, const cv::Mat &image2);
@@ -37,6 +40,11 @@ private slots:
   void exportToFormat();
   void removeSelectedSeries();
   void showHistogramAnalysis();
+  void onChannelChanged(int index);
+  void onBinsChanged(int bins);
+  void onLogScaleToggled(bool checked);
+  void onSaveClicked();
+  void onCopyClicked();
 
 private:
   QVBoxLayout layout;

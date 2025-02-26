@@ -1,18 +1,35 @@
 #include "CropWidget.h"
-#include "HistogramDialog.hpp"
 #include "CropPreviewWidget.h"
+#include "HistogramDialog.hpp"
 
+#include <QAction>
+#include <QApplication>
+#include <QClipboard>
+#include <QComboBox>
+#include <QDragEnterEvent>
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
+#include <QProgressBar>
+#include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStackedWidget>
 #include <QTimer>
+#include <QToolBar>
+#include <QToolTip>
 #include <QVBoxLayout>
 
 #include "ElaCheckBox.h"
@@ -25,78 +42,207 @@
 #include "ElaToolButton.h"
 
 CropWidget::CropWidget(QWidget *parent)
-    : QWidget(parent), cropper(std::make_unique<ImageCropper>()) {
+    : QWidget(parent), cropper(std::make_unique<ImageCropper>()),
+      isProcessing(false), isDownscaled(false), isAutosaveEnabled(true),
+      optimizedSize(1920, 1080) {
+
+  // 添加对拖放的支持
+  setAcceptDrops(true);
+
+  // 设置对象名称便于样式表
+  setObjectName("CropWidget");
+
   setupUi();
   connectSignals();
   setupShortcuts();
+
+  // 创建自动保存定时器
+  autosaveTimer = new QTimer(this);
+  autosaveTimer->setInterval(60000); // 1分钟
+  connect(autosaveTimer, &QTimer::timeout, this, &CropWidget::saveSessionState);
+  autosaveTimer->start();
+
+  // 加载上次会话状态
+  loadSessionState();
+
+  // 创建上下文菜单
+  createContextMenu();
+
+  // 初始化状态
+  setState(CropState::Ready);
 }
 
 void CropWidget::setupUi() {
+  // 基本UI设置
   setupLayout();
   createActions();
+  setupTheme();
+  createNotifications();
+
+  // 创建工具栏
+  mainToolBar = new QToolBar(this);
+  mainToolBar->setObjectName("mainToolBar");
+  mainToolBar->setMovable(false);
+  mainToolBar->setIconSize(QSize(24, 24));
+  mainToolBar->addAction(actions.undo);
+  mainToolBar->addAction(actions.redo);
+  mainToolBar->addSeparator();
+  mainToolBar->addAction(actions.reset);
+  mainToolBar->addSeparator();
+  mainToolBar->addAction(actions.copyToClipboard);
+  mainToolBar->addAction(actions.pasteFromClipboard);
+  mainToolBar->addSeparator();
+  mainToolBar->addAction(actions.showGrid);
+  mainToolBar->addAction(actions.lockAspectRatio);
+  mainToolBar->addAction(actions.toggleAdvanced);
+  mainToolBar->addSeparator();
+  mainToolBar->addAction(actions.help);
+
+  // 设置状态栏
+  statusBar = new ElaStatusBar;
+  statusBar->setSizeGripEnabled(false);
+
+  // 创建进度条
+  progressBar = new QProgressBar;
+  progressBar->setTextVisible(true);
+  progressBar->setAlignment(Qt::AlignCenter);
+  progressBar->setMaximumHeight(15);
+  progressBar->hide();
+
+  // 添加状态栏小部件
+  statusBar->addPermanentWidget(progressBar);
 }
 
 void CropWidget::setupLayout() {
+  // 创建主布局
   auto mainLayout = new QVBoxLayout(this);
   mainLayout->setSpacing(5);
   mainLayout->setContentsMargins(5, 5, 5, 5);
 
-  // 工具栏区域
-  auto toolbarArea = new QWidget;
-  auto toolbarLayout = new QHBoxLayout(toolbarArea);
-  toolbarLayout->setSpacing(2);
-  toolbarLayout->setContentsMargins(0, 0, 0, 0);
-  setupToolbar();
-  mainLayout->addWidget(toolbarArea);
+  // 添加工具栏
+  mainLayout->addWidget(mainToolBar);
 
-  // 创建新的主布局
-  auto mainSplitter = new QSplitter(Qt::Horizontal);
+  // 创建主分隔器
+  mainSplitter = new QSplitter(Qt::Horizontal);
+  mainSplitter->setObjectName("mainSplitter");
+  mainSplitter->setHandleWidth(4);
+  mainSplitter->setChildrenCollapsible(false);
 
-  // 左侧工具面板使用滚动区域
+  // 创建左侧工具区
   auto toolScroll = new QScrollArea;
+  toolScroll->setObjectName("toolPanel");
   toolScroll->setWidget(createToolPanel());
   toolScroll->setWidgetResizable(true);
-  toolScroll->setFixedWidth(280);
+  toolScroll->setMinimumWidth(250);
+  toolScroll->setMaximumWidth(300);
 
-  // 中间预览区域
+  // 创建中间预览区
   auto previewContainer = new QWidget;
+  previewContainer->setObjectName("previewContainer");
   auto previewLayout = new QVBoxLayout(previewContainer);
-  previewWidget = new CropPreviewWidget(this);
-  previewLayout->addWidget(previewWidget);
+  previewLayout->setContentsMargins(0, 0, 0, 0);
+
+  // 创建预览工具栏
+  auto previewTools = new QHBoxLayout;
+
+  // 添加工具按钮
+  rotateLeftBtn = new ElaToolButton(this);
+  rotateRightBtn = new ElaToolButton(this);
+  zoomInBtn = new ElaToolButton(this);
+  zoomOutBtn = new ElaToolButton(this);
+  fitViewBtn = new ElaToolButton(this);
+  resetBtn = new ElaToolButton(this);
+  autoDetectBtn = new ElaToolButton(this);
+  centerBtn = new ElaToolButton(this);
+  clipboardBtn = new ElaToolButton(this);
+
+  rotateLeftBtn->setIcon(QIcon::fromTheme("object-rotate-left"));
+  rotateRightBtn->setIcon(QIcon::fromTheme("object-rotate-right"));
+  zoomInBtn->setIcon(QIcon::fromTheme("zoom-in"));
+  zoomOutBtn->setIcon(QIcon::fromTheme("zoom-out"));
+  fitViewBtn->setIcon(QIcon::fromTheme("zoom-fit-best"));
+  resetBtn->setIcon(QIcon::fromTheme("edit-undo"));
+  autoDetectBtn->setIcon(QIcon::fromTheme("edit-find"));
+  centerBtn->setIcon(QIcon::fromTheme("insert-image"));
+  clipboardBtn->setIcon(QIcon::fromTheme("edit-copy"));
+
+  // 添加工具提示
+  rotateLeftBtn->setToolTip(tr("向左旋转 (Ctrl+L)"));
+  rotateRightBtn->setToolTip(tr("向右旋转 (Ctrl+R)"));
+  zoomInBtn->setToolTip(tr("放大 (+)"));
+  zoomOutBtn->setToolTip(tr("缩小 (-)"));
+  fitViewBtn->setToolTip(tr("适应视图 (F)"));
+  resetBtn->setToolTip(tr("重置裁剪 (Esc)"));
+  autoDetectBtn->setToolTip(tr("自动检测 (A)"));
+  centerBtn->setToolTip(tr("中心裁剪 (C)"));
+  clipboardBtn->setToolTip(tr("复制到剪贴板 (Ctrl+C)"));
+
+  previewTools->addWidget(rotateLeftBtn);
+  previewTools->addWidget(rotateRightBtn);
+  previewTools->addWidget(zoomInBtn);
+  previewTools->addWidget(zoomOutBtn);
+  previewTools->addWidget(fitViewBtn);
+  previewTools->addWidget(centerBtn);
+  previewTools->addWidget(autoDetectBtn);
+  previewTools->addWidget(resetBtn);
+  previewTools->addWidget(clipboardBtn);
+  previewTools->addStretch();
 
   // 添加显示直方图的按钮
   auto histogramBtn = new ElaPushButton(tr("显示直方图"), this);
-  previewLayout->addWidget(histogramBtn);
-  connect(histogramBtn, &ElaPushButton::clicked, this,
-          &CropWidget::showHistogram);
+  histogramBtn->setToolTip(tr("显示图像直方图 (H)"));
+  previewTools->addWidget(histogramBtn);
 
-  // 右侧高级面板
+  previewLayout->addLayout(previewTools);
+
+  // 创建预览控件
+  previewWidget = new CropPreviewWidget(this);
+  previewWidget->setObjectName("previewWidget");
+  previewWidget->setContextMenuPolicy(Qt::CustomContextMenu);
+  previewLayout->addWidget(previewWidget, 1); // 添加伸展因子
+
+  // 添加宽高比和网格显示控件
+  auto viewOptionsLayout = new QHBoxLayout;
+  gridCheckBox = new ElaCheckBox(tr("显示网格"));
+  aspectLockCheckBox = new ElaCheckBox(tr("锁定比例"));
+
+  // 添加宽高比输入框
+  auto aspectRatioWidget = createAspectRatioPanel();
+
+  viewOptionsLayout->addWidget(gridCheckBox);
+  viewOptionsLayout->addWidget(aspectLockCheckBox);
+  viewOptionsLayout->addWidget(aspectRatioWidget);
+  viewOptionsLayout->addStretch();
+
+  previewLayout->addLayout(viewOptionsLayout);
+
+  // 创建高级面板（默认隐藏）
   advancedPanel = createAdvancedPanel();
   advancedPanel->setVisible(false);
 
+  // 添加面板到分隔器
   mainSplitter->addWidget(toolScroll);
   mainSplitter->addWidget(previewContainer);
   mainSplitter->addWidget(advancedPanel);
 
-  mainLayout->addWidget(mainSplitter);
+  // 设置默认分隔器比例
+  mainSplitter->setStretchFactor(0, 0); // 工具面板
+  mainSplitter->setStretchFactor(1, 1); // 预览区域
+  mainSplitter->setStretchFactor(2, 0); // 高级面板
 
-  // 添加网格显示
-  gridCheckBox = new ElaCheckBox(tr("显示网格"));
-  aspectLockCheckBox = new ElaCheckBox(tr("锁定比例"));
+  mainLayout->addWidget(mainSplitter, 1);
 
-  auto viewOptionsLayout = new QHBoxLayout;
-  viewOptionsLayout->addWidget(gridCheckBox);
-  viewOptionsLayout->addWidget(aspectLockCheckBox);
-  viewOptionsLayout->addStretch();
-
-  mainLayout->addLayout(viewOptionsLayout);
-
-  // 底部状态栏和按钮区域
-  statusBar = new ElaStatusBar;
-  statusBar->setSizeGripEnabled(false);
+  // 添加状态栏
   mainLayout->addWidget(statusBar);
 
+  // 添加底部操作按钮
   auto buttonBox = new QHBoxLayout;
+  cropButton = new ElaPushButton(tr("裁剪"), this);
+  cancelButton = new ElaPushButton(tr("取消"), this);
+
+  cropButton->setObjectName("cropButton");
+  cancelButton->setObjectName("cancelButton");
+
   buttonBox->addStretch();
   buttonBox->addWidget(cropButton);
   buttonBox->addWidget(cancelButton);
@@ -107,24 +253,118 @@ void CropWidget::setupLayout() {
   statusTimer->setSingleShot(true);
   connect(statusTimer, &QTimer::timeout, this,
           [this]() { statusBar->clearMessage(); });
+
+  // 连接显示直方图的按钮
+  connect(histogramBtn, &ElaPushButton::clicked, this,
+          &CropWidget::showHistogram);
+}
+
+QWidget *CropWidget::createAspectRatioPanel() {
+  auto widget = new QWidget;
+  auto layout = new QHBoxLayout(widget);
+  layout->setContentsMargins(0, 0, 0, 0);
+
+  customRatioWidth = new ElaDoubleSpinBox;
+  customRatioHeight = new ElaDoubleSpinBox;
+
+  customRatioWidth->setRange(0.1, 100);
+  customRatioHeight->setRange(0.1, 100);
+  customRatioWidth->setValue(16);
+  customRatioHeight->setValue(9);
+  customRatioWidth->setSingleStep(0.1);
+  customRatioHeight->setSingleStep(0.1);
+
+  customRatioWidth->setMaximumWidth(50);
+  customRatioHeight->setMaximumWidth(50);
+
+  layout->addWidget(new QLabel(tr("比例:")));
+  layout->addWidget(customRatioWidth);
+  layout->addWidget(new QLabel(":"));
+  layout->addWidget(customRatioHeight);
+
+  return widget;
 }
 
 void CropWidget::createActions() {
-  actions.undo = new QAction(tr("撤销"), this);
+  // 创建基本操作
+  actions.undo = new QAction(QIcon::fromTheme("edit-undo"), tr("撤销"), this);
   actions.undo->setShortcut(QKeySequence::Undo);
+  actions.undo->setToolTip(tr("撤销上一步操作 (Ctrl+Z)"));
   actions.undo->setEnabled(false);
 
-  actions.redo = new QAction(tr("重做"), this);
+  actions.redo = new QAction(QIcon::fromTheme("edit-redo"), tr("重做"), this);
   actions.redo->setShortcut(QKeySequence::Redo);
+  actions.redo->setToolTip(tr("重做操作 (Ctrl+Y)"));
   actions.redo->setEnabled(false);
 
-  actions.reset = new QAction(tr("重置"), this);
-  actions.reset->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_R));
+  actions.reset = new QAction(QIcon::fromTheme("edit-clear"), tr("重置"), this);
+  actions.reset->setShortcut(QKeySequence("Ctrl+R"));
+  actions.reset->setToolTip(tr("重置所有修改 (Ctrl+R)"));
 
-  actions.help = new QAction(tr("帮助"), this);
+  actions.help = new QAction(QIcon::fromTheme("help-about"), tr("帮助"), this);
   actions.help->setShortcut(QKeySequence::HelpContents);
+  actions.help->setToolTip(tr("显示帮助 (F1)"));
 
-  // 撤销动作
+  // 新增操作
+  actions.copyToClipboard =
+      new QAction(QIcon::fromTheme("edit-copy"), tr("复制到剪贴板"), this);
+  actions.copyToClipboard->setShortcut(QKeySequence::Copy);
+  actions.copyToClipboard->setToolTip(tr("复制当前结果到剪贴板 (Ctrl+C)"));
+
+  actions.pasteFromClipboard =
+      new QAction(QIcon::fromTheme("edit-paste"), tr("从剪贴板粘贴"), this);
+  actions.pasteFromClipboard->setShortcut(QKeySequence::Paste);
+  actions.pasteFromClipboard->setToolTip(tr("从剪贴板粘贴图像 (Ctrl+V)"));
+
+  actions.centerCrop =
+      new QAction(QIcon::fromTheme("object-center"), tr("中心裁剪"), this);
+  actions.centerCrop->setShortcut(QKeySequence("C"));
+  actions.centerCrop->setToolTip(tr("使用中心点裁剪 (C)"));
+
+  actions.fitToBounds =
+      new QAction(QIcon::fromTheme("zoom-original"), tr("适应边界"), this);
+  actions.fitToBounds->setShortcut(QKeySequence("B"));
+  actions.fitToBounds->setToolTip(tr("裁剪区域适应图像边界 (B)"));
+
+  // 主题相关
+  actions.darkTheme = new QAction(tr("深色主题"), this);
+  actions.lightTheme = new QAction(tr("浅色主题"), this);
+  actions.systemTheme = new QAction(tr("系统主题"), this);
+  actions.customTheme = new QAction(tr("自定义主题"), this);
+
+  // 可选中的操作
+  actions.darkTheme->setCheckable(true);
+  actions.lightTheme->setCheckable(true);
+  actions.systemTheme->setCheckable(true);
+  actions.customTheme->setCheckable(true);
+
+  // 视图选项
+  actions.showGrid =
+      new QAction(QIcon::fromTheme("show-grid"), tr("显示网格"), this);
+  actions.showGrid->setCheckable(true);
+  actions.showGrid->setToolTip(tr("显示/隐藏网格线 (G)"));
+  actions.showGrid->setShortcut(QKeySequence("G"));
+
+  actions.lockAspectRatio =
+      new QAction(QIcon::fromTheme("object-locked"), tr("锁定比例"), this);
+  actions.lockAspectRatio->setCheckable(true);
+  actions.lockAspectRatio->setToolTip(tr("锁定/解锁宽高比 (L)"));
+  actions.lockAspectRatio->setShortcut(QKeySequence("L"));
+
+  actions.toggleAdvanced =
+      new QAction(QIcon::fromTheme("preferences-system"), tr("高级模式"), this);
+  actions.toggleAdvanced->setCheckable(true);
+  actions.toggleAdvanced->setToolTip(tr("切换高级模式 (A)"));
+  actions.toggleAdvanced->setShortcut(QKeySequence("A"));
+
+  // 主题选项按钮组
+  auto themeGroup = new QActionGroup(this);
+  themeGroup->addAction(actions.darkTheme);
+  themeGroup->addAction(actions.lightTheme);
+  themeGroup->addAction(actions.systemTheme);
+  themeGroup->addAction(actions.customTheme);
+
+  // 连接撤销/重做操作
   connect(actions.undo, &QAction::triggered, this, [this]() {
     if (!undoStack.empty()) {
       redoStack.push_back(getCurrentStrategy());
@@ -135,7 +375,6 @@ void CropWidget::createActions() {
     }
   });
 
-  // 重做动作
   connect(actions.redo, &QAction::triggered, this, [this]() {
     if (!redoStack.empty()) {
       undoStack.push_back(getCurrentStrategy());
@@ -146,7 +385,7 @@ void CropWidget::createActions() {
     }
   });
 
-  // 重置动作
+  // 连接重置操作
   connect(actions.reset, &QAction::triggered, this, [this]() {
     if (confirmOperation()) {
       undoStack.clear();
@@ -156,17 +395,64 @@ void CropWidget::createActions() {
     }
   });
 
-  // 帮助动作
+  // 连接帮助操作
   connect(actions.help, &QAction::triggered, this, [this]() {
-    QMessageBox::information(this, tr("帮助"),
-                             tr("快捷键说明:\n"
-                                "Ctrl+Z: 撤销\n"
-                                "Ctrl+Y: 重做\n"
-                                "Ctrl+R: 重置\n"
-                                "Ctrl+L: 向左旋转\n"
-                                "Ctrl+R: 向右旋转\n"
-                                "+/-: 缩放\n"
-                                "空格: 适应视图"));
+    QMessageBox::information(
+        this, tr("帮助"),
+        tr("图像裁剪工具快捷键:\n\n"
+           "Ctrl+Z: 撤销\n"
+           "Ctrl+Y: 重做\n"
+           "Ctrl+R: 重置\n"
+           "Ctrl+L/Ctrl+Right: 向左/右旋转\n"
+           "+/-: 放大/缩小\n"
+           "F: 适应视图\n"
+           "C: 中心裁剪\n"
+           "A: 自动检测\n"
+           "G: 显示/隐藏网格\n"
+           "L: 锁定/解锁比例\n"
+           "H: 显示直方图\n"
+           "Esc: 重置裁剪\n"
+           "空格: 适应视图\n\n"
+           "拖动鼠标可以调整裁剪区域，按住Ctrl键可以进行精细调整。"));
+  });
+
+  // 连接新增操作
+  connect(actions.copyToClipboard, &QAction::triggered, this,
+          &CropWidget::onSaveToClipboard);
+  connect(actions.pasteFromClipboard, &QAction::triggered, this,
+          &CropWidget::onPreviewClipboardImage);
+  connect(actions.centerCrop, &QAction::triggered, this,
+          &CropWidget::onCenterCrop);
+  connect(actions.fitToBounds, &QAction::triggered, this,
+          &CropWidget::onFitToBounds);
+
+  // 连接主题操作
+  connect(actions.darkTheme, &QAction::triggered, this,
+          [this]() { setTheme("dark"); });
+  connect(actions.lightTheme, &QAction::triggered, this,
+          [this]() { setTheme("light"); });
+  connect(actions.systemTheme, &QAction::triggered, this,
+          [this]() { setTheme("system"); });
+  connect(actions.customTheme, &QAction::triggered, this, [this]() {
+    // 实现自定义主题对话框
+    QString themePath =
+        QFileDialog::getOpenFileName(this, tr("选择主题文件"), QDir::homePath(),
+                                     tr("主题文件 (*.qss *.css)"));
+
+    if (!themePath.isEmpty()) {
+      QFile file(themePath);
+      if (file.open(QFile::ReadOnly | QFile::Text)) {
+        setStyleSheet(file.readAll());
+        file.close();
+        currentTheme = "custom";
+      }
+    }
+  });
+
+  // 连接显示操作
+  connect(actions.showGrid, &QAction::triggered, this, [this](bool checked) {
+    gridCheckBox->setChecked(checked);
+    onGridToggled(checked);
   });
 }
 
@@ -180,6 +466,10 @@ void CropWidget::setState(CropState state) {
   case CropState::Processing:
     cropButton->setEnabled(false);
     statusBar->showMessage(tr("处理中..."));
+    break;
+  case CropState::Success:
+    cropButton->setEnabled(true);
+    statusBar->showMessage(tr("操作成功"), 3000);
     break;
   case CropState::Error:
     cropButton->setEnabled(true);
@@ -325,6 +615,45 @@ void CropWidget::connectSignals() {
   // 添加异常处理
   connect(previewWidget, &CropPreviewWidget::errorOccurred, this,
           [this](const QString &error) { showError(error); });
+
+  connect(actions.lockAspectRatio, &QAction::triggered, this,
+          [this](bool checked) {
+            aspectLockCheckBox->setChecked(checked);
+            onAspectRatioLocked(checked);
+          });
+
+  connect(actions.toggleAdvanced, &QAction::triggered, this,
+          [this](bool checked) { enableAdvancedMode(checked); });
+
+  // 连接自定义比例控件
+  connect(customRatioWidth,
+          QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          &CropWidget::onCustomRatioChanged);
+  connect(customRatioHeight,
+          QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          &CropWidget::onCustomRatioChanged);
+
+  // 连接复选框
+  connect(gridCheckBox, &QCheckBox::toggled, this, &CropWidget::onGridToggled);
+  connect(aspectLockCheckBox, &QCheckBox::toggled, this,
+          &CropWidget::onAspectRatioLocked);
+
+  // 连接分隔器移动信号
+  connect(mainSplitter, &QSplitter::splitterMoved, this,
+          &CropWidget::onSplitterMoved);
+
+  // 连接预览控件的上下文菜单请求
+  connect(previewWidget, &QWidget::customContextMenuRequested, this,
+          &CropWidget::onShowContextMenu);
+
+  // 连接新增的工具按钮
+  connect(centerBtn, &QToolButton::clicked, this, &CropWidget::onCenterCrop);
+  connect(clipboardBtn, &QToolButton::clicked, this,
+          &CropWidget::onSaveToClipboard);
+
+  // 添加缩放级别信号连接
+  connect(previewWidget, &CropPreviewWidget::zoomChanged, this,
+          &CropWidget::zoomLevelChanged);
 }
 
 void CropWidget::setImage(const cv::Mat &image) {
@@ -477,7 +806,7 @@ void CropWidget::savePreset(const QString &name) {
 void CropWidget::loadPreset(const QString &name) {
   auto it = presets.find(name);
   if (it != presets.end()) {
-    previewWidget->setStrategy(it->second);
+    previewWidget->setStrategy(it.value());
     updatePreview();
   }
 }
@@ -667,143 +996,856 @@ void CropWidget::showHistogram() {
 }
 
 void CropWidget::createThemeMenu() {
-    // 创建主题相关的 Actions
-    actions.darkTheme = new QAction(tr("深色主题"), this);
-    actions.lightTheme = new QAction(tr("浅色主题"), this);
-    actions.systemTheme = new QAction(tr("系统主题"), this);
-    actions.customTheme = new QAction(tr("自定义主题"), this);
+  // 创建主题相关的 Actions
+  actions.darkTheme = new QAction(tr("深色主题"), this);
+  actions.lightTheme = new QAction(tr("浅色主题"), this);
+  actions.systemTheme = new QAction(tr("系统主题"), this);
+  actions.customTheme = new QAction(tr("自定义主题"), this);
 
-    // 设置这些 actions 为可选中的
-    actions.darkTheme->setCheckable(true);
-    actions.lightTheme->setCheckable(true);
-    actions.systemTheme->setCheckable(true);
-    actions.customTheme->setCheckable(true);
+  // 设置这些 actions 为可选中的
+  actions.darkTheme->setCheckable(true);
+  actions.lightTheme->setCheckable(true);
+  actions.systemTheme->setCheckable(true);
+  actions.customTheme->setCheckable(true);
 
-    // 将这些 actions 加入到一个 action group 中
-    auto themeGroup = new QActionGroup(this);
-    themeGroup->addAction(actions.darkTheme);
-    themeGroup->addAction(actions.lightTheme);
-    themeGroup->addAction(actions.systemTheme);
-    themeGroup->addAction(actions.customTheme);
+  // 将这些 actions 加入到一个 action group 中
+  auto themeGroup = new QActionGroup(this);
+  themeGroup->addAction(actions.darkTheme);
+  themeGroup->addAction(actions.lightTheme);
+  themeGroup->addAction(actions.systemTheme);
+  themeGroup->addAction(actions.customTheme);
 
-    // 连接信号槽
-    connect(actions.darkTheme, &QAction::triggered, this, [this]() { setTheme("dark"); });
-    connect(actions.lightTheme, &QAction::triggered, this, [this]() { setTheme("light"); });
-    connect(actions.systemTheme, &QAction::triggered, this, [this]() { setTheme("system"); });
-    connect(actions.customTheme, &QAction::triggered, this, [this]() {
-        // 实现自定义主题对话框
-        // TODO: 添加自定义主题功能
-    });
+  // 连接信号槽
+  connect(actions.darkTheme, &QAction::triggered, this,
+          [this]() { setTheme("dark"); });
+  connect(actions.lightTheme, &QAction::triggered, this,
+          [this]() { setTheme("light"); });
+  connect(actions.systemTheme, &QAction::triggered, this,
+          [this]() { setTheme("system"); });
+  connect(actions.customTheme, &QAction::triggered, this, [this]() {
+    // 实现自定义主题对话框
+    // TODO: 添加自定义主题功能
+  });
 }
 
 void CropWidget::enableAdvancedMode(bool enable) {
-    isAdvancedMode = enable;
-    if (advancedPanel) {
-        advancedPanel->setVisible(enable);
-    }
-    
-    // 更新UI元素的可见性
-    if (customRatioWidth) customRatioWidth->setEnabled(enable);
-    if (customRatioHeight) customRatioHeight->setEnabled(enable);
-    
-    emit onAdvancedModeToggled(enable);
+  isAdvancedMode = enable;
+  if (advancedPanel) {
+    advancedPanel->setVisible(enable);
+  }
+
+  // 更新UI元素的可见性
+  if (customRatioWidth)
+    customRatioWidth->setEnabled(enable);
+  if (customRatioHeight)
+    customRatioHeight->setEnabled(enable);
+
+  emit onAdvancedModeToggled(enable);
 }
 
-void CropWidget::setPresets(const QMap<QString, CropStrategy>& newPresets) {
-    presets.clear();
-    presetCombo->clear();
-    
-    for (auto it = newPresets.begin(); it != newPresets.end(); ++it) {
-        presets[it.key()] = it.value();
-        presetCombo->addItem(it.key());
-    }
+void CropWidget::setPresets(const QMap<QString, CropStrategy> &newPresets) {
+  presets.clear();
+  presetCombo->clear();
+
+  for (auto it = newPresets.begin(); it != newPresets.end(); ++it) {
+    presets[it.key()] = it.value();
+    presetCombo->addItem(it.key());
+  }
 }
 
 void CropWidget::onAdvancedModeToggled(bool enabled) {
-    // 更新高级模式相关的UI元素
-    if (advancedPanel) {
-        advancedPanel->setVisible(enabled);
-    }
-    
-    // 更新自定义比例控件的状态
-    if (customRatioWidth && customRatioHeight) {
-        customRatioWidth->setEnabled(enabled);
-        customRatioHeight->setEnabled(enabled);
-    }
+  // 更新高级模式相关的UI元素
+  if (advancedPanel) {
+    advancedPanel->setVisible(enabled);
+  }
+
+  // 更新自定义比例控件的状态
+  if (customRatioWidth && customRatioHeight) {
+    customRatioWidth->setEnabled(enabled);
+    customRatioHeight->setEnabled(enabled);
+  }
 }
 
 void CropWidget::onHistogramUpdate() {
-    if (histogramDialog && histogramDialog->isVisible()) {
-        histogramDialog->showHistogram(sourceImage);
-    }
+  if (histogramDialog && histogramDialog->isVisible()) {
+    histogramDialog->showHistogram(sourceImage);
+  }
 }
 
 void CropWidget::onGridToggled(bool show) {
-    isGridVisible = show;
-    if (previewWidget) {
-        previewWidget->setGridVisible(show);
-    }
+  isGridVisible = show;
+  if (previewWidget) {
+    previewWidget->setGridVisible(show);
+  }
 }
 
 void CropWidget::onAspectRatioLocked(bool locked) {
-    isAspectRatioLocked = locked;
-    if (previewWidget) {
-        previewWidget->setAspectRatioLocked(locked);
-    }
+  isAspectRatioLocked = locked;
+  if (previewWidget) {
+    previewWidget->setAspectRatioLocked(locked);
+  }
 }
 
 void CropWidget::onCustomRatioChanged() {
-    if (!customRatioWidth || !customRatioHeight) return;
-    
-    double width = customRatioWidth->value();
-    double height = customRatioHeight->value();
-    double ratio = width / height;
-    
-    if (isAspectRatioLocked && previewWidget) {
-        previewWidget->setAspectRatio(ratio);
-    }
+  if (!customRatioWidth || !customRatioHeight)
+    return;
+
+  double width = customRatioWidth->value();
+  double height = customRatioHeight->value();
+  double ratio = width / height;
+
+  if (isAspectRatioLocked && previewWidget) {
+    previewWidget->setAspectRatio(ratio);
+  }
 }
 
 void CropWidget::onThemeChanged() {
-    // 根据当前主题更新UI元素的样式
-    setupTheme();
-    
-    // 更新所有子控件的主题
-    if (previewWidget) previewWidget->update();
-    if (histogramDialog) histogramDialog->update();
-    
-    // 触发重绘
-    update();
+  // 根据当前主题更新UI元素的样式
+  setupTheme();
+
+  // 更新所有子控件的主题
+  if (previewWidget)
+    previewWidget->update();
+  if (histogramDialog)
+    histogramDialog->update();
+
+  // 触发重绘
+  update();
 }
 
 void CropWidget::createMenus() {
-    // 创建主菜单
-    auto menuBar = new QMenuBar(this);
-    
-    // 文件菜单
-    auto fileMenu = menuBar->addMenu(tr("文件"));
-    fileMenu->addAction(actions.reset);
-    
-    // 编辑菜单
-    auto editMenu = menuBar->addMenu(tr("编辑"));
-    editMenu->addAction(actions.undo);
-    editMenu->addAction(actions.redo);
-    
-    // 视图菜单
-    auto viewMenu = menuBar->addMenu(tr("视图"));
-    viewMenu->addAction(actions.toggleAdvanced);
-    viewMenu->addAction(actions.showGrid);
-    
-    // 主题菜单
-    auto themeMenu = menuBar->addMenu(tr("主题"));
-    themeMenu->addAction(actions.darkTheme);
-    themeMenu->addAction(actions.lightTheme);
-    themeMenu->addAction(actions.systemTheme);
-    themeMenu->addAction(actions.customTheme);
-    
-    // 帮助菜单
-    auto helpMenu = menuBar->addMenu(tr("帮助"));
-    helpMenu->addAction(actions.help);
+  // 创建主菜单
+  auto menuBar = new QMenuBar(this);
+
+  // 文件菜单
+  auto fileMenu = menuBar->addMenu(tr("文件"));
+  fileMenu->addAction(actions.reset);
+
+  // 编辑菜单
+  auto editMenu = menuBar->addMenu(tr("编辑"));
+  editMenu->addAction(actions.undo);
+  editMenu->addAction(actions.redo);
+
+  // 视图菜单
+  auto viewMenu = menuBar->addMenu(tr("视图"));
+  viewMenu->addAction(actions.toggleAdvanced);
+  viewMenu->addAction(actions.showGrid);
+
+  // 主题菜单
+  auto themeMenu = menuBar->addMenu(tr("主题"));
+  themeMenu->addAction(actions.darkTheme);
+  themeMenu->addAction(actions.lightTheme);
+  themeMenu->addAction(actions.systemTheme);
+  themeMenu->addAction(actions.customTheme);
+
+  // 帮助菜单
+  auto helpMenu = menuBar->addMenu(tr("帮助"));
+  helpMenu->addAction(actions.help);
+}
+
+void CropWidget::onPreviewClipboardImage() {
+  QClipboard *clipboard = QApplication::clipboard();
+  const QImage image = clipboard->image();
+
+  if (image.isNull()) {
+    QMessageBox::warning(this, tr("警告"), tr("剪贴板中没有可用的图像"));
+    return;
+  }
+
+  try {
+    // 将QImage转换为cv::Mat
+    cv::Mat cvImage;
+    QImage rgbImage = image.convertToFormat(QImage::Format_RGB888);
+    cvImage =
+        cv::Mat(rgbImage.height(), rgbImage.width(), CV_8UC3,
+                const_cast<uchar *>(rgbImage.bits()), rgbImage.bytesPerLine());
+    cv::cvtColor(cvImage, cvImage, cv::COLOR_RGB2BGR);
+
+    // 检查图像大小，可能需要缩放以提高性能
+    if (checkImageSize(cvImage)) {
+      // 保存原始图像
+      originalImage = cvImage.clone();
+      isDownscaled = true;
+
+      // 缩放到优化尺寸
+      double ratio = std::min((double)optimizedSize.width() / cvImage.cols,
+                              (double)optimizedSize.height() / cvImage.rows);
+
+      if (ratio < 1.0) {
+        cv::resize(cvImage, sourceImage, cv::Size(), ratio, ratio,
+                   cv::INTER_AREA);
+      } else {
+        sourceImage = cvImage.clone();
+        isDownscaled = false;
+      }
+    } else {
+      sourceImage = cvImage.clone();
+      originalImage = cvImage.clone();
+      isDownscaled = false;
+    }
+
+    // 设置到预览控件
+    setImage(sourceImage);
+
+    // 更新状态提示
+    updateStatus(tr("已从剪贴板加载图像"));
+
+    // 发送图像变更信号
+    emit imageChanged();
+
+  } catch (const std::exception &e) {
+    handleException(e);
+  }
+}
+
+void CropWidget::onSaveToClipboard() {
+  if (sourceImage.empty()) {
+    QMessageBox::warning(this, tr("警告"), tr("没有可用的图像"));
+    return;
+  }
+
+  try {
+    // 获取当前裁剪结果
+    auto result =
+        cropper->crop(sourceImage, getCurrentStrategy(), getAdaptiveParams());
+    if (!result) {
+      showError(tr("无法获取裁剪结果"));
+      return;
+    }
+
+    // 转换为QImage
+    cv::Mat rgbImage;
+    cv::cvtColor(*result, rgbImage, cv::COLOR_BGR2RGB);
+    QImage qImage(rgbImage.data, rgbImage.cols, rgbImage.rows, rgbImage.step,
+                  QImage::Format_RGB888);
+
+    // 复制到剪贴板
+    QClipboard *clipboard = QApplication::clipboard();
+    clipboard->setImage(qImage.copy());
+
+    // 更新状态
+    updateStatus(tr("已复制到剪贴板"));
+
+  } catch (const std::exception &e) {
+    handleException(e);
+  }
+}
+
+void CropWidget::onCenterCrop() {
+  if (sourceImage.empty())
+    return;
+
+  int centerX = sourceImage.cols / 2;
+  int centerY = sourceImage.rows / 2;
+
+  // 根据当前裁剪策略和锁定比例设置中心裁剪
+  std::visit(
+      [&](auto &&arg) {
+        using T = std::decay_t<decltype(arg)>;
+
+        if constexpr (std::is_same_v<T, cv::Rect>) {
+          // 计算新的矩形，保持大小，移动到中心
+          int newX = centerX - arg.width / 2;
+          int newY = centerY - arg.height / 2;
+          cv::Rect newRect(newX, newY, arg.width, arg.height);
+
+          // 确保在图像范围内
+          if (newX < 0)
+            newRect.x = 0;
+          if (newY < 0)
+            newRect.y = 0;
+          if (newX + arg.width > sourceImage.cols)
+            newRect.x = sourceImage.cols - arg.width;
+          if (newY + arg.height > sourceImage.rows)
+            newRect.y = sourceImage.rows - arg.height;
+
+          previewWidget->setStrategy(newRect);
+        } else if constexpr (std::is_same_v<T, CircleCrop>) {
+          // 移动圆心到中心位置
+          CircleCrop newCircle = {cv::Point(centerX, centerY), arg.radius};
+          previewWidget->setStrategy(newCircle);
+        } else if constexpr (std::is_same_v<T, EllipseCrop>) {
+          // 移动椭圆中心到中心位置
+          EllipseCrop newEllipse = {cv::Point(centerX, centerY), arg.axes,
+                                    arg.angle};
+          previewWidget->setStrategy(newEllipse);
+        } else if constexpr (std::is_same_v<T, std::vector<cv::Point>>) {
+          // 计算多边形中心
+          cv::Point oldCenter(0, 0);
+          for (const auto &pt : arg) {
+            oldCenter += pt;
+          }
+          oldCenter.x /= arg.size();
+          oldCenter.y /= arg.size();
+
+          // 计算移动向量
+          cv::Point offset = cv::Point(centerX, centerY) - oldCenter;
+
+          // 创建新的多边形
+          std::vector<cv::Point> newPoints;
+          for (const auto &pt : arg) {
+            newPoints.push_back(pt + offset);
+          }
+
+          previewWidget->setStrategy(newPoints);
+        }
+      },
+      getCurrentStrategy());
+
+  updatePreview();
+}
+
+void CropWidget::onFitToBounds() {
+  if (sourceImage.empty())
+    return;
+
+  // 计算图像边界内最大的安全区域
+  int safeMargin = 10; // 安全边距
+  cv::Rect imageBounds(safeMargin, safeMargin,
+                       sourceImage.cols - 2 * safeMargin,
+                       sourceImage.rows - 2 * safeMargin);
+
+  // 根据当前锁定比例设置
+  if (isAspectRatioLocked && customRatioWidth && customRatioHeight) {
+    double ratio = customRatioWidth->value() / customRatioHeight->value();
+    int newWidth, newHeight;
+
+    // 计算适合比例的最大矩形
+    if (imageBounds.width / ratio <= imageBounds.height) {
+      // 宽度是限制因素
+      newWidth = imageBounds.width;
+      newHeight = static_cast<int>(newWidth / ratio);
+    } else {
+      // 高度是限制因素
+      newHeight = imageBounds.height;
+      newWidth = static_cast<int>(newHeight * ratio);
+    }
+
+    // 居中放置
+    int x = imageBounds.x + (imageBounds.width - newWidth) / 2;
+    int y = imageBounds.y + (imageBounds.height - newHeight) / 2;
+
+    previewWidget->setStrategy(cv::Rect(x, y, newWidth, newHeight));
+  } else {
+    // 直接使用整个边界
+    previewWidget->setStrategy(imageBounds);
+  }
+
+  updatePreview();
+}
+
+void CropWidget::onCropProgress(int percent) {
+  if (progressBar) {
+    progressBar->setValue(percent);
+    if (percent < 100) {
+      progressBar->show();
+    } else {
+      QTimer::singleShot(500, progressBar, &QProgressBar::hide);
+    }
+  }
+
+  emit processingProgress(percent);
+}
+
+void CropWidget::onShowContextMenu(const QPoint &pos) {
+  if (!contextMenu) {
+    createContextMenu();
+  }
+
+  if (contextMenu) {
+    contextMenu->popup(previewWidget->mapToGlobal(pos));
+  }
+}
+
+void CropWidget::createContextMenu() {
+  contextMenu = new QMenu(this);
+  contextMenu->addAction(actions.copyToClipboard);
+  contextMenu->addAction(actions.pasteFromClipboard);
+  contextMenu->addSeparator();
+  contextMenu->addAction(actions.reset);
+  contextMenu->addAction(actions.centerCrop);
+  contextMenu->addAction(actions.fitToBounds);
+  contextMenu->addSeparator();
+  contextMenu->addAction(actions.showGrid);
+  contextMenu->addAction(actions.lockAspectRatio);
+  contextMenu->addSeparator();
+  contextMenu->addAction(actions.toggleAdvanced);
+}
+
+void CropWidget::onSplitterMoved(int pos, int index) {
+  // 可以根据需要保存布局状态
+  QSettings settings;
+  settings.setValue("CropWidget/SplitterPosition", mainSplitter->saveState());
+}
+
+void CropWidget::onKeyPressed(QKeyEvent *event) {
+  switch (event->key()) {
+  case Qt::Key_Escape:
+    onResetCrop();
+    event->accept();
+    break;
+  case Qt::Key_Space:
+    onFitToView();
+    event->accept();
+    break;
+  case Qt::Key_C:
+    if (!(event->modifiers() & Qt::ControlModifier)) {
+      onCenterCrop();
+      event->accept();
+    }
+    break;
+  case Qt::Key_G:
+    actions.showGrid->toggle();
+    event->accept();
+    break;
+  case Qt::Key_L:
+    if (!(event->modifiers() & Qt::ControlModifier)) {
+      actions.lockAspectRatio->toggle();
+      event->accept();
+    }
+    break;
+  case Qt::Key_H:
+    showHistogram();
+    event->accept();
+    break;
+  case Qt::Key_F:
+    onFitToView();
+    event->accept();
+    break;
+  case Qt::Key_A:
+    if (!(event->modifiers() & Qt::ControlModifier)) {
+      onAutoDetect();
+      event->accept();
+    }
+    break;
+  case Qt::Key_B:
+    onFitToBounds();
+    event->accept();
+    break;
+  default:
+    event->ignore();
+  }
+}
+
+QWidget *CropWidget::createFilterGroup() {
+  auto group = new QGroupBox(tr("图像滤镜"));
+  auto layout = new QVBoxLayout(group);
+
+  filterCombo = new ElaComboBox;
+  filterCombo->addItem(tr("无"));
+  filterCombo->addItem(tr("灰度"));
+  filterCombo->addItem(tr("高斯模糊"));
+  filterCombo->addItem(tr("锐化"));
+  filterCombo->addItem(tr("边缘检测"));
+  filterCombo->addItem(tr("反色"));
+  filterCombo->addItem(tr("复古"));
+
+  auto applyBtn = new ElaPushButton(tr("应用"));
+
+  layout->addWidget(new QLabel(tr("选择滤镜:")));
+  layout->addWidget(filterCombo);
+  layout->addWidget(applyBtn);
+
+  connect(applyBtn, &QPushButton::clicked, this,
+          [this]() { onApplyFilter(filterCombo->currentIndex()); });
+
+  return group;
+}
+
+void CropWidget::onApplyFilter(int filterType) {
+  if (sourceImage.empty())
+    return;
+
+  try {
+    // 开始处理
+    startProgress("应用滤镜");
+
+    // 保存到撤销堆栈
+    if (sourceImage.data != originalImage.data) {
+      undoStack.push_back(getCurrentStrategy());
+      if (undoStack.size() > undoLimit) {
+        undoStack.erase(undoStack.begin());
+      }
+      redoStack.clear();
+      updateUndoRedoState();
+    }
+
+    // 获取基准图像
+    cv::Mat baseImage = originalImage.empty() ? sourceImage : originalImage;
+    cv::Mat result = applyFilter(baseImage, filterType);
+
+    // 更新图像
+    sourceImage = result;
+    setImage(sourceImage);
+
+    // 完成进度
+    finishProgress();
+    updateStatus(tr("滤镜应用成功"));
+
+  } catch (const std::exception &e) {
+    handleException(e);
+  }
+}
+
+cv::Mat CropWidget::applyFilter(const cv::Mat &image, int filterType) {
+  cv::Mat result;
+
+  // 更新进度
+  updateProgress(10);
+
+  switch (filterType) {
+  case 0: // 无
+    result = image.clone();
+    break;
+  case 1: // 灰度
+    cv::cvtColor(image, result, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(result, result, cv::COLOR_GRAY2BGR);
+    break;
+  case 2: // 高斯模糊
+    cv::GaussianBlur(image, result, cv::Size(5, 5), 0);
+    break;
+  case 3: // 锐化
+  {
+    cv::Mat kernel = (cv::Mat_<float>(3, 3) << 0, -1, 0, -1, 5, -1, 0, -1, 0);
+    cv::filter2D(image, result, image.depth(), kernel);
+  } break;
+  case 4: // 边缘检测
+  {
+    cv::Mat gray, edges;
+    cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    cv::Canny(gray, edges, 50, 150);
+    cv::cvtColor(edges, result, cv::COLOR_GRAY2BGR);
+  } break;
+  case 5: // 反色
+    cv::bitwise_not(image, result);
+    break;
+  case 6: // 复古
+  {
+    result = image.clone();
+    cv::Mat channels[3];
+    cv::split(result, channels);
+
+    // 调整各通道强度以获得复古效果
+    channels[0] *= 0.8; // 减弱蓝色
+    channels[1] *= 0.9; // 轻微减弱绿色
+    // 保留红色强度
+
+    cv::merge(channels, 3, result);
+
+    // 添加轻微褐色
+    cv::Mat overlay;
+    cv::cvtColor(result, overlay, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(overlay, overlay, cv::COLOR_GRAY2BGR);
+    cv::addWeighted(result, 0.9, overlay, 0.1, 0, result);
+  } break;
+  default:
+    result = image.clone();
+  }
+
+  // 更新进度
+  updateProgress(100);
+
+  return result;
+}
+
+bool CropWidget::checkImageSize(const cv::Mat &image) {
+  // 如果图像尺寸超过设定的优化尺寸，返回true表示需要优化
+  return (image.cols > optimizedSize.width() ||
+          image.rows > optimizedSize.height());
+}
+
+void CropWidget::startProgress(const QString &operationName) {
+  isProcessing = true;
+  currentOperation = operationName;
+  currentProgress = 0;
+
+  if (progressBar) {
+    progressBar->setValue(0);
+    progressBar->show();
+  }
+
+  setControlsEnabled(false);
+  updateStatus(tr("%1...").arg(operationName));
+}
+
+void CropWidget::updateProgress(int percent) {
+  currentProgress = percent;
+
+  if (progressBar) {
+    progressBar->setValue(percent);
+  }
+
+  emit processingProgress(percent);
+}
+
+void CropWidget::finishProgress() {
+  isProcessing = false;
+  currentProgress = 100;
+
+  if (progressBar) {
+    progressBar->setValue(100);
+    QTimer::singleShot(500, progressBar, &QProgressBar::hide);
+  }
+
+  setControlsEnabled(true);
+}
+
+void CropWidget::setControlsEnabled(bool enabled) {
+  cropButton->setEnabled(enabled);
+  cancelButton->setEnabled(enabled);
+  mainToolBar->setEnabled(enabled);
+}
+
+void CropWidget::createNotifications() {
+  // 可以根据需要添加通知UI组件
+}
+
+void CropWidget::showNotification(const QString &message, int durationMs) {
+  // 简单实现，使用状态栏
+  updateStatus(message);
+
+  // 高级实现可以添加弹出式通知
+}
+
+void CropWidget::saveSessionState() {
+  if (!isAutosaveEnabled || sourceImage.empty())
+    return;
+
+  QSettings settings;
+
+  // 保存当前裁剪策略
+  // 注意：这里只是一个简单实现，完整实现需要序列化裁剪策略
+  settings.setValue("CropWidget/LastUsedStrategy",
+                    strategyCombo->currentIndex());
+
+  // 保存界面设置
+  settings.setValue("CropWidget/GridVisible", isGridVisible);
+  settings.setValue("CropWidget/AspectRatioLocked", isAspectRatioLocked);
+  settings.setValue("CropWidget/AdvancedMode", isAdvancedMode);
+
+  // 保存分隔器位置
+  settings.setValue("CropWidget/SplitterPosition", mainSplitter->saveState());
+
+  // 保存比例设置
+  if (customRatioWidth && customRatioHeight) {
+    settings.setValue("CropWidget/RatioWidth", customRatioWidth->value());
+    settings.setValue("CropWidget/RatioHeight", customRatioHeight->value());
+  }
+}
+
+void CropWidget::loadSessionState() {
+  QSettings settings;
+
+  // 加载界面设置
+  bool gridVisible = settings.value("CropWidget/GridVisible", false).toBool();
+  bool aspectRatioLocked =
+      settings.value("CropWidget/AspectRatioLocked", false).toBool();
+  bool advancedMode = settings.value("CropWidget/AdvancedMode", false).toBool();
+
+  // 应用设置
+  if (gridCheckBox)
+    gridCheckBox->setChecked(gridVisible);
+  if (aspectLockCheckBox)
+    aspectLockCheckBox->setChecked(aspectRatioLocked);
+  if (actions.showGrid)
+    actions.showGrid->setChecked(gridVisible);
+  if (actions.lockAspectRatio)
+    actions.lockAspectRatio->setChecked(aspectRatioLocked);
+
+  onGridToggled(gridVisible);
+  onAspectRatioLocked(aspectRatioLocked);
+  enableAdvancedMode(advancedMode);
+
+  // 加载分隔器位置
+  QByteArray splitterState =
+      settings.value("CropWidget/SplitterPosition").toByteArray();
+  if (!splitterState.isEmpty()) {
+    mainSplitter->restoreState(splitterState);
+  }
+
+  // 加载比例设置
+  if (customRatioWidth && customRatioHeight) {
+    double ratioWidth =
+        settings.value("CropWidget/RatioWidth", 16.0).toDouble();
+    double ratioHeight =
+        settings.value("CropWidget/RatioHeight", 9.0).toDouble();
+
+    customRatioWidth->setValue(ratioWidth);
+    customRatioHeight->setValue(ratioHeight);
+  }
+}
+
+void CropWidget::registerExternalActions(QMap<QString, QAction *> &actions) {
+  // 连接外部提供的操作到我们的功能
+  if (actions.contains("crop")) {
+    connect(actions["crop"], &QAction::triggered, this,
+            &CropWidget::onCropClicked);
+  }
+
+  if (actions.contains("cancel")) {
+    connect(actions["cancel"], &QAction::triggered, this,
+            &CropWidget::onCancelClicked);
+  }
+
+  if (actions.contains("reset")) {
+    connect(actions["reset"], &QAction::triggered, this,
+            &CropWidget::onResetCrop);
+  }
+
+  if (actions.contains("autoDetect")) {
+    connect(actions["autoDetect"], &QAction::triggered, this,
+            &CropWidget::onAutoDetect);
+  }
+
+  if (actions.contains("histogram")) {
+    connect(actions["histogram"], &QAction::triggered, this,
+            &CropWidget::showHistogram);
+  }
+
+  if (actions.contains("copyToClipboard")) {
+    connect(actions["copyToClipboard"], &QAction::triggered, this,
+            &CropWidget::onSaveToClipboard);
+  }
+
+  if (actions.contains("pasteFromClipboard")) {
+    connect(actions["pasteFromClipboard"], &QAction::triggered, this,
+            &CropWidget::onPreviewClipboardImage);
+  }
+}
+
+void CropWidget::setZoomLevel(double level) {
+  if (previewWidget) {
+    previewWidget->setZoom(level);
+  }
+}
+
+void CropWidget::setCropMode(int mode) {
+  if (strategyCombo) {
+    strategyCombo->setCurrentIndex(mode);
+  }
+}
+
+bool CropWidget::hasActiveImage() const { return !sourceImage.empty(); }
+
+void CropWidget::resetImage() {
+  if (!originalImage.empty()) {
+    sourceImage = originalImage.clone();
+    previewWidget->setImage(sourceImage);
+    updatePreview();
+  } else {
+    onResetCrop();
+  }
+}
+
+void CropWidget::savePresetToFile(const QString &filePath) {
+  QFile file(filePath);
+  if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, tr("错误"), tr("无法保存预设文件"));
+    return;
+  }
+
+  QJsonObject root;
+  QJsonArray presetsArray;
+
+  for (auto it = presets.begin(); it != presets.end(); ++it) {
+    QJsonObject preset;
+    preset["name"] = it.key();
+
+    // 这里需要序列化CropStrategy
+    // 简单示例，真实实现需要处理所有类型
+    std::visit(
+        [&](auto &&arg) {
+          using T = std::decay_t<decltype(arg)>;
+
+          if constexpr (std::is_same_v<T, cv::Rect>) {
+            preset["type"] = "rect";
+            preset["x"] = arg.x;
+            preset["y"] = arg.y;
+            preset["width"] = arg.width;
+            preset["height"] = arg.height;
+          } else if constexpr (std::is_same_v<T, CircleCrop>) {
+            preset["type"] = "circle";
+            preset["centerX"] = arg.center.x;
+            preset["centerY"] = arg.center.y;
+            preset["radius"] = arg.radius;
+          } else if constexpr (std::is_same_v<T, EllipseCrop>) {
+            preset["type"] = "ellipse";
+            preset["centerX"] = arg.center.x;
+            preset["centerY"] = arg.center.y;
+            preset["axisWidth"] = arg.axes.width;
+            preset["axisHeight"] = arg.axes.height;
+            preset["angle"] = arg.angle;
+          }
+        },
+        it.value());
+
+    presetsArray.append(preset);
+  }
+
+  root["presets"] = presetsArray;
+
+  QJsonDocument doc(root);
+  file.write(doc.toJson());
+}
+
+void CropWidget::loadPresetFromFile(const QString &filePath) {
+  QFile file(filePath);
+  if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    QMessageBox::warning(this, tr("错误"), tr("无法打开预设文件"));
+    return;
+  }
+
+  QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+  if (doc.isNull() || !doc.isObject()) {
+    QMessageBox::warning(this, tr("错误"), tr("无效的预设文件格式"));
+    return;
+  }
+
+  QJsonObject root = doc.object();
+  QJsonArray presetsArray = root["presets"].toArray();
+
+  QMap<QString, CropStrategy> loadedPresets;
+
+  for (const auto &item : presetsArray) {
+    QJsonObject presetObj = item.toObject();
+    QString name = presetObj["name"].toString();
+    QString type = presetObj["type"].toString();
+
+    CropStrategy strategy;
+
+    if (type == "rect") {
+      int x = presetObj["x"].toInt();
+      int y = presetObj["y"].toInt();
+      int width = presetObj["width"].toInt();
+      int height = presetObj["height"].toInt();
+      strategy = cv::Rect(x, y, width, height);
+    } else if (type == "circle") {
+      int centerX = presetObj["centerX"].toInt();
+      int centerY = presetObj["centerY"].toInt();
+      int radius = presetObj["radius"].toInt();
+      strategy = CircleCrop{cv::Point(centerX, centerY), radius};
+    } else if (type == "ellipse") {
+      int centerX = presetObj["centerX"].toInt();
+      int centerY = presetObj["centerY"].toInt();
+      int axisWidth = presetObj["axisWidth"].toInt();
+      int axisHeight = presetObj["axisHeight"].toInt();
+      double angle = presetObj["angle"].toDouble();
+      strategy = EllipseCrop{cv::Point(centerX, centerY),
+                             cv::Size(axisWidth, axisHeight), angle};
+    }
+
+    loadedPresets[name] = strategy;
+  }
+
+  setPresets(loadedPresets);
+  updateStatus(tr("已加载预设"));
+}
+
+void CropWidget::logOperation(const QString &operation) {
+  // 记录操作到日志
+  qDebug() << "CropWidget: " << operation;
+
+  // 在生产环境可以使用更复杂的日志系统
 }
 
 CropWidget::~CropWidget() = default;

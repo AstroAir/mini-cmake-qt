@@ -28,6 +28,7 @@ class StegoWindow : public QMainWindow {
 
 public:
   explicit StegoWindow(QWidget *parent = nullptr);
+  double compareTextSimilarity(const std::string& text1, const std::string& text2);
 
 signals:
   void onImageLoaded(); // 添加这个信号声明
@@ -160,6 +161,35 @@ private:
   ElaCheckBox *encryptionBox;
   ElaLineEdit *encryptionKeyEdit;
 
+  // 新增统计分析组件
+  QGroupBox *createAnalysisPanel();
+  QLabel *histogramMatrixLabel;    // 直方图矩阵显示
+  QLabel *correlationMatrixLabel;  // 相关性矩阵显示
+  ElaComboBox *analysisMethodBox;  // 分析方法选择
+  
+  // 新增隐写分析设置
+  struct StegAnalysisConfig {
+    bool useDeepLearning = false;  // 是否使用深度学习
+    bool useHistogramAnalysis = true;  // 是否使用直方图分析
+    bool useStatisticalAnalysis = true; // 是否使用统计分析
+    double detectionThreshold = 0.8;    // 检测阈值
+  } stegAnalysisConfig;
+
+  // 新增隐写攻击模拟组件
+  QGroupBox *createAttackSimulationPanel();
+  ElaComboBox *attackTypeBox;     // 攻击类型选择
+  ElaDoubleSpinBox *attackIntensityBox; // 攻击强度
+  ElaPushButton *simulateAttackButton;  // 执行攻击按钮
+  
+  // 新增质量评估指标
+  struct QualityMetrics {
+    double psnr;        // 峰值信噪比
+    double ssim;        // 结构相似度
+    double entropy;     // 信息熵
+    double correlation; // 相关性
+    double robustness; // 鲁棒性得分
+  } currentMetrics;
+
   // 通用控件
   ElaPushButton *loadImageButton;
   ElaPushButton *saveImageButton;
@@ -244,4 +274,18 @@ private:
   bool isPreprocessingEnabled;
   bool isAdaptiveEnabled;
   double currentQualityScore;
+
+  // 新增处理函数
+  void analyzeStegDetection();      // 隐写检测分析
+  void simulateAttack();           // 模拟攻击
+  void updateQualityMetrics();     // 更新质量指标
+  void generateHistogramMatrix();   // 生成直方图矩阵
+  void generateCorrelationMatrix(); // 生成相关性矩阵
+  void optimizeEmbeddingStrategy(); // 优化嵌入策略
+  void adaptChannelSelection();     // 自适应通道选择
+  
+  // 增强的质量监控
+  void monitorEmbeddingQuality();   // 实时监控嵌入质量
+  void suggestOptimalParameters();   // 推荐最优参数
+  void validateEmbeddingCapacity(); // 验证嵌入容量
 };
