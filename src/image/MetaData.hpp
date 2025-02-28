@@ -1,13 +1,17 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <opencv2/opencv.hpp>
 #include <optional>
+#include <span>
 #include <spdlog/spdlog.h>
 #include <string>
+#include <string_view>
 #include <vector>
+
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -17,6 +21,15 @@ using json = nlohmann::json;
  */
 template <typename T>
 concept OpenCVImageType = std::same_as<T, cv::Mat> || std::same_as<T, cv::UMat>;
+
+/**
+ * @brief Concept for JSON-serializable types.
+ */
+template <typename T>
+concept JSONSerializable = requires(T t, json &j) {
+  { j = t } -> std::convertible_to<void>;
+  { t = j.get<T>() } -> std::convertible_to<T>;
+};
 
 /**
  * @struct ImageMetadata
@@ -36,9 +49,13 @@ struct ImageMetadata {
    * @tparam T The type of the value.
    * @param key The key for the tag.
    * @param value The value for the tag.
+   * @throws std::invalid_argument if the key is invalid
    */
-  template <typename T> void add_tag(const std::string &key, T &&value) {
-    custom_data[key] = std::forward<T>(value);
+  template <JSONSerializable T> void add_tag(std::string_view key, T &&value) {
+    if (key.empty()) {
+      throw std::invalid_argument("Tag key cannot be empty");
+    }
+    custom_data[std::string(key)] = std::forward<T>(value);
   }
 
   /**
@@ -83,7 +100,7 @@ struct ImageMetadata {
    */
   void clear_tags() noexcept { custom_data.clear(); }
 
-  json to_json() const {
+  [[nodiscard]] json to_json() const {
     json j;
     j["path"] = path.string();
     j["size"] = {size.width, size.height};
@@ -95,16 +112,21 @@ struct ImageMetadata {
     return j;
   }
 
-  static ImageMetadata from_json(const json &j) {
+  [[nodiscard]] static ImageMetadata from_json(const json &j) {
     ImageMetadata meta;
-    meta.path = j.at("path").get<std::string>();
-    meta.size = {j["size"][0], j["size"][1]};
-    meta.channels = j.at("channels").get<int>();
-    meta.depth = j.at("depth").get<int>();
-    meta.color_space = j.at("color_space").get<std::string>();
-    meta.timestamp =
-        std::chrono::system_clock::from_time_t(j.at("timestamp").get<time_t>());
-    meta.custom_data = j.at("custom_data");
+    try {
+      meta.path = j.at("path").get<std::string>();
+      auto size_array = j.at("size");
+      meta.size = {size_array.at(0).get<int>(), size_array.at(1).get<int>()};
+      meta.channels = j.at("channels").get<int>();
+      meta.depth = j.at("depth").get<int>();
+      meta.color_space = j.at("color_space").get<std::string>();
+      meta.timestamp = std::chrono::system_clock::from_time_t(
+          j.at("timestamp").get<time_t>());
+      meta.custom_data = j.at("custom_data");
+    } catch (const json::exception &e) {
+      throw std::runtime_error(std::string("JSON parsing error: ") + e.what());
+    }
     return meta;
   }
 };
@@ -121,6 +143,31 @@ public:
   ImageProcessor();
 
   /**
+   * @brief Default destructor.
+   */
+  ~ImageProcessor() = default;
+
+  /**
+   * @brief Copy constructor (deleted).
+   */
+  ImageProcessor(const ImageProcessor &) = delete;
+
+  /**
+   * @brief Move constructor.
+   */
+  ImageProcessor(ImageProcessor &&) noexcept = default;
+
+  /**
+   * @brief Copy assignment (deleted).
+   */
+  ImageProcessor &operator=(const ImageProcessor &) = delete;
+
+  /**
+   * @brief Move assignment.
+   */
+  ImageProcessor &operator=(ImageProcessor &&) noexcept = default;
+
+  /**
    * @brief Loads an image and its metadata from a file.
    * @param img_path The path to the image file.
    * @param flags The flags for loading the image (default is
@@ -131,6 +178,16 @@ public:
   [[nodiscard]] std::optional<ImageMetadata>
   load_image(const fs::path &img_path,
              int flags = cv::IMREAD_ANYCOLOR) noexcept;
+
+  /**
+   * @brief Loads multiple images concurrently.
+   * @param img_paths Vector of paths to image files.
+   * @param flags The flags for loading the images.
+   * @return Vector of optional metadata for each image.
+   */
+  [[nodiscard]] std::vector<std::optional<ImageMetadata>>
+  load_images_parallel(std::span<const fs::path> img_paths,
+                       int flags = cv::IMREAD_ANYCOLOR) noexcept;
 
   /**
    * @brief Saves an image and its metadata to a file.
@@ -169,8 +226,8 @@ public:
    * @param value The value for the tag.
    * @return True if the tag was added successfully, false otherwise.
    */
-  template <typename T>
-  bool add_custom_tag(ImageMetadata &meta, const std::string &key,
+  template <JSONSerializable T>
+  bool add_custom_tag(ImageMetadata &meta, std::string_view key,
                       T &&value) noexcept {
     try {
       validate_tag_key(key);
@@ -189,9 +246,9 @@ public:
    * @param tags The vector of key-value pairs representing the tags to add.
    * @return True if the tags were added successfully, false otherwise.
    */
-  bool batch_add_tags(
-      ImageMetadata &meta,
-      const std::vector<std::pair<std::string, json>> &tags) noexcept;
+  bool
+  batch_add_tags(ImageMetadata &meta,
+                 std::span<const std::pair<std::string, json>> tags) noexcept;
 
   /**
    * @brief Imports custom tags from a JSON file.
@@ -203,10 +260,11 @@ public:
                              const fs::path &json_file) noexcept;
 
   /**
-   * @brief 保存图像元数据到JSON文件
-   * @param meta 要保存的元数据
-   * @param output_path 输出路径（可选，默认使用meta.path对应的JSON文件）
-   * @return 保存是否成功
+   * @brief Saves image metadata to a JSON file.
+   * @param meta The metadata to save.
+   * @param output_path Optional output path (defaults to meta.path with .json
+   * extension).
+   * @return True if the metadata was saved successfully, false otherwise.
    */
   bool save_metadata(
       const ImageMetadata &meta,
@@ -238,7 +296,7 @@ private:
    * @brief Validates a custom tag key.
    * @param key The key to validate.
    */
-  void validate_tag_key(const std::string &key) const;
+  void validate_tag_key(std::string_view key) const;
 
   /**
    * @brief Creates metadata for an image.
@@ -305,4 +363,10 @@ private:
    * @param msg The error message.
    */
   void log_error(const std::string &function, const std::string &msg) const;
+
+  /**
+   * @brief Process image metadata using SIMD when applicable.
+   * @param img The image to process.
+   */
+  void process_metadata_simd(cv::Mat &img) const;
 };

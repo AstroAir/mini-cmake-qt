@@ -1,12 +1,16 @@
 #pragma once
 
+#include <concepts>  // C++20 concepts
+#include <coroutine> // C++20 coroutines
+#include <span>      // C++20 span
+#include <stdexcept> // Standard exceptions
 #include <vector>
 
 #include <QFuture>
 #include <QImage>
 #include <QPromise>
 #include <QRect>
-
+#include <QString>
 
 #include <spdlog/spdlog.h>
 
@@ -21,6 +25,12 @@ struct ComparisonResult {
       differenceRegions; ///< The regions where differences were found.
   std::chrono::milliseconds
       duration; ///< The duration of the comparison process.
+
+  // Add validity check
+  [[nodiscard]] bool isValid() const noexcept {
+    return !differenceImage.isNull() && similarityPercent >= 0.0 &&
+           similarityPercent <= 100.0;
+  }
 };
 
 /**
@@ -30,7 +40,10 @@ template <typename T>
 concept ComparisonStrategy = requires(T s, const QImage &a, const QImage &b,
                                       QPromise<ComparisonResult> &p) {
   { s.compare(a, b, p) } -> std::same_as<ComparisonResult>;
-  { s.name() } -> std::same_as<QString>;
+  { s.name() } -> std::convertible_to<QString>;
+  {
+    s.name()
+  } noexcept -> std::convertible_to<QString>; // Ensuring name() is noexcept
 };
 
 /**
@@ -39,7 +52,7 @@ concept ComparisonStrategy = requires(T s, const QImage &a, const QImage &b,
  * @param rgb The QRgb value.
  * @return A tuple containing the red, green, and blue components.
  */
-std::tuple<int, int, int> qUnpack(QRgb rgb);
+[[nodiscard]] constexpr std::tuple<int, int, int> qUnpack(QRgb rgb) noexcept;
 
 namespace ColorSpace {
 
@@ -50,6 +63,18 @@ struct CIELAB {
   double L; ///< Lightness component.
   double a; ///< Green-Red component.
   double b; ///< Blue-Yellow component.
+
+  // Add equality comparison
+  bool operator==(const CIELAB &other) const noexcept {
+    constexpr double epsilon = 1e-6;
+    return std::abs(L - other.L) < epsilon && std::abs(a - other.a) < epsilon &&
+           std::abs(b - other.b) < epsilon;
+  }
+
+  // Add inequality comparison
+  bool operator!=(const CIELAB &other) const noexcept {
+    return !(*this == other);
+  }
 };
 
 /**
@@ -58,9 +83,93 @@ struct CIELAB {
  * @param rgb The RGB color.
  * @return The corresponding CIELAB color.
  */
-CIELAB RGB2LAB(QRgb rgb);
+[[nodiscard]] CIELAB RGB2LAB(QRgb rgb) noexcept;
 
 } // namespace ColorSpace
+
+template <typename T> struct Task {
+  struct promise_type {
+    T result;
+    std::exception_ptr exception;
+
+    Task get_return_object() noexcept {
+      return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    template <std::convertible_to<T> U> void return_value(U &&value) noexcept {
+      result = std::forward<U>(value);
+    }
+  };
+
+  std::coroutine_handle<promise_type> handle;
+
+  Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+  Task(Task &&t) noexcept : handle(t.handle) { t.handle = nullptr; }
+  ~Task() {
+    if (handle)
+      handle.destroy();
+  }
+
+  T result() const {
+    if (handle.promise().exception)
+      std::rethrow_exception(handle.promise().exception);
+    return handle.promise().result;
+  }
+};
+
+// ComparisonResult特化紧跟在通用模板之后
+template <> struct Task<ComparisonResult> {
+  struct promise_type {
+    ComparisonResult result;
+    std::exception_ptr exception;
+
+    Task<ComparisonResult> get_return_object() noexcept {
+      return Task<ComparisonResult>{
+          std::coroutine_handle<promise_type>::from_promise(*this)};
+    }
+
+    std::suspend_never initial_suspend() noexcept { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
+
+    void unhandled_exception() noexcept {
+      exception = std::current_exception();
+    }
+
+    void return_value(ComparisonResult &&value) noexcept {
+      result = std::move(value);
+    }
+
+    void return_value(const ComparisonResult &value) noexcept {
+      result = value;
+    }
+  };
+
+  std::coroutine_handle<promise_type> handle;
+
+  Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+  Task(Task &&t) noexcept : handle(t.handle) { t.handle = nullptr; }
+  ~Task() {
+    if (handle)
+      handle.destroy();
+  }
+
+  Task(const Task &) = delete;
+  Task &operator=(const Task &) = delete;
+
+  [[nodiscard]] ComparisonResult result() const {
+    if (handle.promise().exception) {
+      std::rethrow_exception(handle.promise().exception);
+    }
+    return handle.promise().result;
+  }
+};
 
 /**
  * @brief Class to perform image difference calculations.
@@ -76,14 +185,16 @@ public:
    * @param strategy The comparison strategy.
    * @param promise The promise to report the comparison result.
    * @return The result of the comparison.
+   * @throws std::invalid_argument If images are invalid
+   * @throws std::runtime_error If comparison fails
    */
-  template <typename Strategy>
+  template <ComparisonStrategy Strategy>
   ComparisonResult compare(const QImage &img1, const QImage &img2,
                            Strategy &&strategy,
                            QPromise<ComparisonResult> &promise) {
     if (!validateImages(img1, img2)) {
       promise.future().cancel();
-      return {};
+      throw std::invalid_argument("Invalid images for comparison");
     }
 
     try {
@@ -101,8 +212,16 @@ public:
     } catch (const std::exception &e) {
       spdlog::error("Comparison failed: {}", e.what());
       promise.future().cancel();
-      return {};
+      throw std::runtime_error(std::string("Comparison failed: ") + e.what());
     }
+  }
+
+  // C++20 coroutine task generator for async comparison
+  template <ComparisonStrategy Strategy>
+  [[nodiscard]] Task<ComparisonResult>
+  compareAsync(const QImage &img1, const QImage &img2, Strategy &&strategy,
+               QPromise<ComparisonResult> &promise) {
+    co_return compare(img1, img2, std::forward<Strategy>(strategy), promise);
   }
 
 private:
@@ -113,14 +232,15 @@ private:
    * @param img2 The second image.
    * @return True if the images are valid for comparison, false otherwise.
    */
-  bool validateImages(const QImage &img1, const QImage &img2);
+  [[nodiscard]] bool validateImages(const QImage &img1,
+                                    const QImage &img2) noexcept;
 
   /**
    * @brief Post-processes the comparison result.
    *
    * @param result The comparison result to post-process.
    */
-  void postProcessResult(ComparisonResult &result) const;
+  void postProcessResult(ComparisonResult &result) const noexcept;
 };
 
 /**
@@ -129,31 +249,34 @@ private:
  * @param img The image to process.
  * @param height The height of the image.
  * @param fn The function to apply to each row.
+ * @throws std::invalid_argument If image is invalid
  */
 void processRows(const QImage &img, int height,
                  const std::function<void(int)> &fn);
 
 /**
- * @brief 图像比较策略的基类
+ * @brief Base class for image comparison strategies
  */
 class ComparisonStrategyBase {
 protected:
   static constexpr int BLOCK_SIZE = 16;
   static constexpr int SUBSAMPLE_FACTOR = 2;
 
-  QImage preprocessImage(const QImage &img) const;
-  void compareBlockSIMD(const uchar *block1, const uchar *block2, uchar *dest,
-                        size_t size) const;
-  std::vector<QRect> findDifferenceRegions(const QImage &diffImg) const;
+  [[nodiscard]] QImage preprocessImage(const QImage &img) const;
+  void compareBlockSIMD(std::span<const uchar> block1,
+                        std::span<const uchar> block2,
+                        std::span<uchar> dest) const noexcept;
+  [[nodiscard]] std::vector<QRect>
+  findDifferenceRegions(const QImage &diffImg) const;
 
   class DisjointSet {
     std::vector<int> parent;
     std::vector<int> rank;
 
   public:
-    DisjointSet(int size);
-    int find(int x);
-    void unite(int x, int y);
+    explicit DisjointSet(int size);
+    [[nodiscard]] int find(int x) noexcept;
+    void unite(int x, int y) noexcept;
   };
 };
 
@@ -169,63 +292,78 @@ public:
    * @param img2 The second image.
    * @param promise The promise to report the comparison result.
    * @return The result of the comparison.
+   * @throws std::runtime_error If comparison fails
    */
-  ComparisonResult compare(const QImage &img1, const QImage &img2,
-                           QPromise<ComparisonResult> &promise) const;
+  [[nodiscard]] ComparisonResult
+  compare(const QImage &img1, const QImage &img2,
+          QPromise<ComparisonResult> &promise) const;
 
   /**
    * @brief Gets the name of the strategy.
    *
    * @return The name of the strategy.
    */
-  QString name() const { return "像素差异比较"; }
+  [[nodiscard]] QString name() const noexcept {
+    return "Pixel Difference Comparison";
+  }
 };
 
 /**
- * @brief 使用结构相似性(SSIM)的比较策略
+ * @brief Structural Similarity Index (SSIM) comparison strategy
  */
 class SSIMStrategy : public ComparisonStrategyBase {
 public:
-  ComparisonResult compare(const QImage &img1, const QImage &img2,
-                           QPromise<ComparisonResult> &promise) const;
-  QString name() const { return "结构相似性比较"; }
+  [[nodiscard]] ComparisonResult
+  compare(const QImage &img1, const QImage &img2,
+          QPromise<ComparisonResult> &promise) const;
+  [[nodiscard]] QString name() const noexcept {
+    return "Structural Similarity Comparison";
+  }
 
 private:
   static constexpr double K1 = 0.01;
   static constexpr double K2 = 0.03;
   static constexpr int WINDOW_SIZE = 8;
 
-  double computeSSIM(const QImage &img1, const QImage &img2, int x,
-                     int y) const;
+  [[nodiscard]] double computeSSIM(const QImage &img1, const QImage &img2,
+                                   int x, int y) const noexcept;
 };
 
 /**
- * @brief 使用感知哈希(pHash)的比较策略
+ * @brief Perceptual Hash (pHash) comparison strategy
  */
 class PerceptualHashStrategy : public ComparisonStrategyBase {
 public:
-  ComparisonResult compare(const QImage &img1, const QImage &img2,
-                           QPromise<ComparisonResult> &promise) const;
-  QString name() const { return "感知哈希比较"; }
+  [[nodiscard]] ComparisonResult
+  compare(const QImage &img1, const QImage &img2,
+          QPromise<ComparisonResult> &promise) const;
+  [[nodiscard]] QString name() const noexcept {
+    return "Perceptual Hash Comparison";
+  }
 
 private:
   static constexpr int HASH_SIZE = 64;
-  uint64_t computeHash(const QImage &img) const;
-  int hammingDistance(uint64_t hash1, uint64_t hash2) const;
+  [[nodiscard]] uint64_t computeHash(const QImage &img) const;
+  [[nodiscard]] int hammingDistance(uint64_t hash1,
+                                    uint64_t hash2) const noexcept;
 };
 
 /**
- * @brief 基于颜色直方图的比较策略
+ * @brief Color histogram-based comparison strategy
  */
 class HistogramStrategy : public ComparisonStrategyBase {
 public:
-  ComparisonResult compare(const QImage &img1, const QImage &img2,
-                           QPromise<ComparisonResult> &promise) const;
-  QString name() const { return "颜色直方图比较"; }
+  [[nodiscard]] ComparisonResult
+  compare(const QImage &img1, const QImage &img2,
+          QPromise<ComparisonResult> &promise) const;
+  [[nodiscard]] QString name() const noexcept {
+    return "Color Histogram Comparison";
+  }
 
 private:
   static constexpr int HIST_BINS = 256;
-  std::vector<int> computeHistogram(const QImage &img) const;
-  double compareHistograms(const std::vector<int> &hist1,
-                           const std::vector<int> &hist2) const;
+  [[nodiscard]] std::vector<int> computeHistogram(const QImage &img) const;
+  [[nodiscard]] double
+  compareHistograms(const std::vector<int> &hist1,
+                    const std::vector<int> &hist2) const noexcept;
 };

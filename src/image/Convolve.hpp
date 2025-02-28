@@ -1,6 +1,9 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
+#include <expected>
+#include <future>
 #include <opencv2/opencv.hpp>
 #include <variant>
 
@@ -17,6 +20,23 @@ enum class BorderMode { ZERO_PADDING, MIRROR_REFLECT, REPLICATE, CIRCULAR };
 enum class DeconvMethod { RICHARDSON_LUCY, WIENER, TIKHONOV };
 
 /**
+ * @struct ProcessError
+ * @brief Error codes and descriptions for processing operations
+ */
+struct ProcessError {
+  enum class Code {
+    INVALID_INPUT,
+    INVALID_CONFIG,
+    PROCESSING_FAILED,
+    OUT_OF_MEMORY,
+    UNSUPPORTED_OPERATION
+  };
+
+  Code code;
+  std::string message;
+};
+
+/**
  * @struct ConvolutionConfig
  * @brief Configuration structure for convolution operations.
  */
@@ -27,13 +47,13 @@ struct ConvolutionConfig {
   bool normalize_kernel = true;   ///< Flag to normalize the kernel.
   bool parallel_execution = true; ///< Flag to enable parallel execution.
   bool per_channel = false;       ///< Flag to process each channel separately.
-  bool use_simd = true;           ///< 启用SIMD优化
-  bool use_memory_pool = true;    ///< 使用内存池
-  int tile_size = 256;            ///< 分块处理大小，用于缓存优化
-  bool use_fft = false;           ///< 使用FFT加速大型卷积
-  int thread_count = 0;           ///< 线程数(0表示自动)
-  bool use_avx = true;            ///< 启用AVX指令集
-  int block_size = 32;            ///< 缓存块大小
+  bool use_simd = true;           ///< Enable SIMD optimization
+  bool use_memory_pool = true;    ///< Use memory pool
+  int tile_size = 256;            ///< Tile size for cache optimization
+  bool use_fft = false;           ///< Use FFT for large kernels
+  int thread_count = 0;           ///< Thread count (0 means auto)
+  bool use_avx = true;            ///< Use AVX instruction set
+  int block_size = 32;            ///< Cache block size
 };
 
 /**
@@ -49,14 +69,19 @@ struct DeconvolutionConfig {
       1e-6; ///< Regularization parameter for Tikhonov deconvolution.
   BorderMode border_mode = BorderMode::REPLICATE; ///< Border handling mode.
   bool per_channel = false;    ///< Flag to process each channel separately.
-  bool use_simd = true;        ///< 启用SIMD优化
-  bool use_memory_pool = true; ///< 使用内存池
-  int tile_size = 256;         ///< 分块处理大小
-  bool use_fft = true;         ///< 使用FFT加速
-  int thread_count = 0;        ///< 线程数(0表示自动)
-  bool use_avx = true;         ///< 启用AVX指令集
-  int block_size = 32;         ///< 缓存块大小
+  bool use_simd = true;        ///< Enable SIMD optimization
+  bool use_memory_pool = true; ///< Use memory pool
+  int tile_size = 256;         ///< Tile size for cache optimization
+  bool use_fft = true;         ///< Use FFT acceleration
+  int thread_count = 0;        ///< Thread count (0 means auto)
+  bool use_avx = true;         ///< Use AVX instruction set
+  int block_size = 32;         ///< Cache block size
 };
+
+// C++20 concept for validating config types
+template <typename T>
+concept ConfigType =
+    std::same_as<T, ConvolutionConfig> || std::same_as<T, DeconvolutionConfig>;
 
 /**
  * @class Convolve
@@ -70,11 +95,23 @@ public:
    * @param input The input image.
    * @param config The configuration for processing (convolution or
    * deconvolution).
-   * @return The processed image.
+   * @return The processed image or an error.
    */
-  static cv::Mat
+  static std::expected<cv::Mat, ProcessError>
   process(const cv::Mat &input,
           const std::variant<ConvolutionConfig, DeconvolutionConfig> &config);
+
+  /**
+   * @brief Async version of process that returns a coroutine
+   */
+  static std::future<std::expected<cv::Mat, ProcessError>> processAsync(
+      const cv::Mat &input,
+      const std::variant<ConvolutionConfig, DeconvolutionConfig> &config);
+
+  /**
+   * @brief Cleans up resources used by the Convolve class.
+   */
+  static void cleanup();
 
 private:
   /**
@@ -90,58 +127,64 @@ private:
      * @brief Constructor for ScopedTimer.
      * @param op The name of the operation.
      */
-    ScopedTimer(const std::string &op);
+    explicit ScopedTimer(std::string_view op);
 
     /**
      * @brief Destructor for ScopedTimer.
      */
     ~ScopedTimer();
+
+    // No copy or move
+    ScopedTimer(const ScopedTimer &) = delete;
+    ScopedTimer &operator=(const ScopedTimer &) = delete;
   };
 
   /**
    * @brief Processes each channel of a multi-channel image separately.
    * @param input The input image.
    * @param processor The function to process each channel.
-   * @return The processed image.
+   * @return The processed image or an error.
    */
-  static cv::Mat
-  processMultiChannel(const cv::Mat &input,
-                      const std::function<cv::Mat(const cv::Mat &)> &processor);
+  static std::expected<cv::Mat, ProcessError> processMultiChannel(
+      const cv::Mat &input,
+      const std::function<std::expected<cv::Mat, ProcessError>(const cv::Mat &)>
+          &processor);
 
   /**
    * @brief Performs convolution on an image.
    * @param input The input image.
    * @param cfg The convolution configuration.
-   * @return The convolved image.
+   * @return The convolved image or an error.
    */
-  static cv::Mat convolve(const cv::Mat &input, const ConvolutionConfig &cfg);
+  static std::expected<cv::Mat, ProcessError>
+  convolve(const cv::Mat &input, const ConvolutionConfig &cfg);
 
   /**
    * @brief Performs convolution on a single-channel image.
    * @param input The input image.
    * @param cfg The convolution configuration.
-   * @return The convolved image.
+   * @return The convolved image or an error.
    */
-  static cv::Mat convolveSingleChannel(const cv::Mat &input,
-                                       const ConvolutionConfig &cfg);
+  static std::expected<cv::Mat, ProcessError>
+  convolveSingleChannel(const cv::Mat &input, const ConvolutionConfig &cfg);
 
   /**
    * @brief Performs deconvolution on an image.
    * @param input The input image.
    * @param cfg The deconvolution configuration.
-   * @return The deconvolved image.
+   * @return The deconvolved image or an error.
    */
-  static cv::Mat deconvolve(const cv::Mat &input,
-                            const DeconvolutionConfig &cfg);
+  static std::expected<cv::Mat, ProcessError>
+  deconvolve(const cv::Mat &input, const DeconvolutionConfig &cfg);
 
   /**
    * @brief Performs deconvolution on a single-channel image.
    * @param input The input image.
    * @param cfg The deconvolution configuration.
-   * @return The deconvolved image.
+   * @return The deconvolved image or an error.
    */
-  static cv::Mat deconvolveSingleChannel(const cv::Mat &input,
-                                         const DeconvolutionConfig &cfg);
+  static std::expected<cv::Mat, ProcessError>
+  deconvolveSingleChannel(const cv::Mat &input, const DeconvolutionConfig &cfg);
 
   /**
    * @brief Performs Richardson-Lucy deconvolution.
@@ -149,10 +192,11 @@ private:
    * @param psf The point spread function.
    * @param output The output image.
    * @param cfg The deconvolution configuration.
+   * @return Error code if operation fails.
    */
-  static void richardsonLucyDeconv(const cv::Mat &input, const cv::Mat &psf,
-                                   cv::Mat &output,
-                                   const DeconvolutionConfig &cfg);
+  static std::expected<void, ProcessError>
+  richardsonLucyDeconv(const cv::Mat &input, const cv::Mat &psf,
+                       cv::Mat &output, const DeconvolutionConfig &cfg);
 
   /**
    * @brief Performs Wiener deconvolution.
@@ -160,9 +204,11 @@ private:
    * @param psf The point spread function.
    * @param output The output image.
    * @param cfg The deconvolution configuration.
+   * @return Error code if operation fails.
    */
-  static void wienerDeconv(const cv::Mat &input, const cv::Mat &psf,
-                           cv::Mat &output, const DeconvolutionConfig &cfg);
+  static std::expected<void, ProcessError>
+  wienerDeconv(const cv::Mat &input, const cv::Mat &psf, cv::Mat &output,
+               const DeconvolutionConfig &cfg);
 
   /**
    * @brief Performs Tikhonov regularization deconvolution.
@@ -170,48 +216,54 @@ private:
    * @param psf The point spread function.
    * @param output The output image.
    * @param cfg The deconvolution configuration.
+   * @return Error code if operation fails.
    */
-  static void tikhonovDeconv(const cv::Mat &input, const cv::Mat &psf,
-                             cv::Mat &output, const DeconvolutionConfig &cfg);
+  static std::expected<void, ProcessError>
+  tikhonovDeconv(const cv::Mat &input, const cv::Mat &psf, cv::Mat &output,
+                 const DeconvolutionConfig &cfg);
 
   /**
    * @brief Validates the convolution configuration.
    * @param input The input image.
    * @param cfg The convolution configuration.
+   * @return Error if validation fails.
    */
-  static void validateConvolutionConfig(const cv::Mat &input,
-                                        const ConvolutionConfig &cfg);
+  static std::expected<void, ProcessError>
+  validateConvolutionConfig(const cv::Mat &input, const ConvolutionConfig &cfg);
 
   /**
    * @brief Validates the deconvolution configuration.
    * @param input The input image.
    * @param cfg The deconvolution configuration.
+   * @return Error if validation fails.
    */
-  static void validateDeconvolutionConfig(const cv::Mat &input,
-                                          const DeconvolutionConfig &cfg);
+  static std::expected<void, ProcessError>
+  validateDeconvolutionConfig(const cv::Mat &input,
+                              const DeconvolutionConfig &cfg);
 
   /**
    * @brief Prepares the convolution kernel.
    * @param cfg The convolution configuration.
-   * @return The prepared kernel.
+   * @return The prepared kernel or error.
    */
-  static cv::Mat prepareKernel(const ConvolutionConfig &cfg);
+  static std::expected<cv::Mat, ProcessError>
+  prepareKernel(const ConvolutionConfig &cfg);
 
   /**
    * @brief Converts the border mode to an OpenCV border type.
    * @param mode The border mode.
    * @return The OpenCV border type.
    */
-  static int getOpenCVBorderType(BorderMode mode);
+  static int getOpenCVBorderType(BorderMode mode) noexcept;
 
   /**
    * @brief Estimates the point spread function (PSF).
    * @param imgSize The size of the image.
-   * @return The estimated PSF.
+   * @return The estimated PSF or error.
    */
-  static cv::Mat estimatePSF(cv::Size imgSize);
+  static std::expected<cv::Mat, ProcessError> estimatePSF(cv::Size imgSize);
 
-  // 新增内存池管理
+  // Improved memory pool management with shared pointers
   class MemoryPool {
   public:
     static cv::Mat allocate(int rows, int cols, int type);
@@ -219,17 +271,22 @@ private:
     static void clear();
 
   private:
-    static std::vector<cv::Mat> pool_;
+    static std::vector<std::shared_ptr<cv::Mat>> pool_;
     static std::mutex pool_mutex_;
     static const int max_pool_size_ = 100;
   };
 
-  // 新增优化方法
-  static void optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output, 
-                                  const cv::Mat &kernel, const ConvolutionConfig &cfg);
-  static void fftConvolve(const cv::Mat &input, cv::Mat &output, 
-                         const cv::Mat &kernel);
-  static void blockProcessing(const cv::Mat &input, cv::Mat &output,
-                            const std::function<void(const cv::Mat&, cv::Mat&)>& processor,
-                            int blockSize);
+  // Optimized algorithms
+  static std::expected<void, ProcessError>
+  optimizedConvolveAVX(const cv::Mat &input, cv::Mat &output,
+                       const cv::Mat &kernel, const ConvolutionConfig &cfg);
+
+  static std::expected<void, ProcessError>
+  fftConvolve(const cv::Mat &input, cv::Mat &output, const cv::Mat &kernel);
+
+  static std::expected<void, ProcessError>
+  blockProcessing(const cv::Mat &input, cv::Mat &output,
+                  const std::function<std::expected<void, ProcessError>(
+                      const cv::Mat &, cv::Mat &)> &processor,
+                  int blockSize);
 };

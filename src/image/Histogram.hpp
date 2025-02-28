@@ -3,20 +3,28 @@
 
 #include <opencv2/opencv.hpp>
 #include <vector>
+#include <concepts>
+#include <span>
+#include <array>
+#include <optional>
+#include <type_traits>
+#include <expected>
+#include <source_location>
+#include <string_view>
 
-// 扩展直方图计算的配置结构体
+// Advanced histogram calculation configuration
 struct HistogramConfig {
     int histSize{256};
     bool normalize{true};
     float threshold{4.0f};
     int numThreads{-1};
-    bool useLog{false};      // 是否使用对数尺度
-    double gamma{1.0};       // gamma校正值
-    std::array<float, 2> range{0.0f, 256.0f};  // 添加范围成员
-    int channel{0};                             // 添加通道成员
-    bool useGPU{false};        // 是否使用GPU加速
-    bool useSIMD{true};        // 是否使用SIMD指令
-    size_t blockSize{256};     // 分块处理大小
+    bool useLog{false};      // Use logarithmic scale
+    double gamma{1.0};       // Gamma correction value
+    std::array<float, 2> range{0.0f, 256.0f};  // Value range
+    int channel{0};          // Channel to process
+    bool useGPU{false};      // Use GPU acceleration
+    bool useSIMD{true};      // Use SIMD instructions
+    size_t blockSize{256};   // Block size for processing
 };
 
 struct HistogramStats {
@@ -26,15 +34,36 @@ struct HistogramStats {
     double kurtosis{0.0};
     double entropy{0.0};
     double uniformity{0.0};
+    
+    // C++20 operator overloading with defaulted spaceship operator
+    auto operator<=>(const HistogramStats&) const = default;
 };
 
-// 添加异常处理类
+// Exception hierarchy with source location
 class HistogramException : public std::runtime_error {
+    std::source_location location_;
 public:
-    explicit HistogramException(const std::string& msg) : std::runtime_error(msg) {}
+    explicit HistogramException(const std::string& msg, 
+                              const std::source_location& location = std::source_location::current())
+        : std::runtime_error(msg), location_(location) {}
+    
+    auto source_location() const noexcept -> const std::source_location& {
+        return location_;
+    }
 };
 
-// 添加错误状态枚举
+// More specific exceptions
+class EmptyImageException : public HistogramException {
+public:
+    using HistogramException::HistogramException;
+};
+
+class InvalidChannelException : public HistogramException {
+public:
+    using HistogramException::HistogramException;
+};
+
+// Error status enum
 enum class HistogramStatus {
     Success,
     EmptyImage,
@@ -43,21 +72,44 @@ enum class HistogramStatus {
     ProcessError
 };
 
-// 添加结果包装结构体
+// Result wrapper with C++23 std::expected (could use a backport for C++20)
 template<typename T>
 struct HistogramResult {
-    T value;
-    HistogramStatus status;
+    std::optional<T> value;
+    HistogramStatus status{HistogramStatus::Success};
     std::string message;
+    
+    explicit operator bool() const noexcept {
+        return status == HistogramStatus::Success && value.has_value();
+    }
+    
+    // C++20 implicit conversion to value type when successful
+    operator const T&() const {
+        if (!value.has_value()) {
+            throw HistogramException(message);
+        }
+        return *value;
+    }
 };
 
+// Concept for image types
+template<typename T>
+concept ImageType = requires(T img) {
+    { img.empty() } -> std::convertible_to<bool>;
+    { img.channels() } -> std::convertible_to<int>;
+    { img.rows } -> std::convertible_to<int>;
+    { img.cols } -> std::convertible_to<int>;
+};
+
+// Function declarations with noexcept specifications and concepts
 auto calculateHist(const cv::Mat &img, const HistogramConfig &config = {})
-    -> std::vector<cv::Mat>;
+    -> HistogramResult<std::vector<cv::Mat>>;
 
 auto calculateGrayHist(const cv::Mat &img, const HistogramConfig &config = {})
-    -> cv::Mat;
+    -> HistogramResult<cv::Mat>;
 
-auto calculateCDF(const cv::Mat &hist) -> cv::Mat;
+auto calculateCDF(const cv::Mat &hist) 
+    -> HistogramResult<cv::Mat>;
 
 struct EqualizeConfig {
     bool preserveColor{true};
@@ -66,29 +118,32 @@ struct EqualizeConfig {
 };
 
 auto equalizeHistogram(const cv::Mat &img, const EqualizeConfig &config = {})
-    -> cv::Mat;
+    -> HistogramResult<cv::Mat>;
 
 auto drawHistogram(const cv::Mat &hist, int width, int height,
                   cv::Scalar color = cv::Scalar(255, 0, 0),
-                  bool cumulative = false) -> cv::Mat;
+                  bool cumulative = false) -> HistogramResult<cv::Mat>;
 
-// 添加新的功能接口
-auto calculateHistogramStats(const cv::Mat& hist) -> HistogramStats;
+// Additional functionality with improved signatures
+auto calculateHistogramStats(const cv::Mat& hist) noexcept
+    -> HistogramResult<HistogramStats>;
 
-auto calculateEntropy(const cv::Mat& hist) -> double;
+auto calculateEntropy(const cv::Mat& hist) noexcept
+    -> HistogramResult<double>;
 
-auto calculateUniformity(const cv::Mat& hist) -> double;
+auto calculateUniformity(const cv::Mat& hist) noexcept
+    -> HistogramResult<double>;
 
-// 添加直方图匹配功能
+// Histogram matching with better error handling
 auto matchHistograms(const cv::Mat& source, const cv::Mat& reference,
-                    bool preserveColor = true) -> cv::Mat;
+                    bool preserveColor = true) -> HistogramResult<cv::Mat>;
 
-// 添加直方图反投影
+// Histogram back projection with boundary checks
 auto backProjectHistogram(const cv::Mat& image, const cv::Mat& hist,
-                        const HistogramConfig& config = {}) -> cv::Mat;
+                        const HistogramConfig& config = {}) -> HistogramResult<cv::Mat>;
 
-// 添加新的实用函数
+// Histogram comparison with method validation
 auto compareHistograms(const cv::Mat &hist1, const cv::Mat &hist2,
-                      int method = cv::HISTCMP_CORREL) -> double;
+                      int method = cv::HISTCMP_CORREL) -> HistogramResult<double>;
 
 #endif // HISTOGRAM_H

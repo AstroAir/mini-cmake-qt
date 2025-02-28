@@ -4,10 +4,13 @@
 #include "Convolve.hpp"
 #include "Denoise.hpp"
 #include "Filter.hpp"
+#include <concepts>
+#include <memory>
 #include <opencv2/core/mat.hpp>
+#include <span>
 #include <vector>
 
-enum StackMode {
+enum class StackMode {
   MEAN,
   MEDIAN,
   MAXIMUM,
@@ -24,66 +27,108 @@ enum StackMode {
 };
 
 /**
- * @brief 堆叠前置处理配置
+ * @brief Stack preprocessing configuration
  */
 struct StackPreprocessConfig {
-  // 校准参数
+  // Calibration parameters
   bool enable_calibration{false};
   CalibrationParams calibration_params;
   cv::Mat response_function;
   cv::Mat flat_field;
   cv::Mat dark_frame;
 
-  // 降噪参数
+  // Denoise parameters
   bool enable_denoise{false};
   DenoiseMethod denoise_method{DenoiseMethod::Auto};
   DenoiseParameters denoise_params;
 
-  // 卷积参数
+  // Convolution parameters
   bool enable_convolution{false};
   ConvolutionConfig conv_config;
 
-  // 滤波参数
+  // Filter parameters
   bool enable_filter{false};
   std::vector<std::unique_ptr<IFilterStrategy>> filters;
 
-  // 并行处理配置
+  // Parallel processing configuration
   bool parallel_preprocess{true};
   int thread_count{4};
 };
 
-// 主要堆叠函数
-auto stackImages(const std::vector<cv::Mat> &images, StackMode mode,
-                 float sigma = 2.0f, const std::vector<float> &weights = {})
+// Concept for valid weight containers (C++20)
+template <typename T>
+concept WeightContainer = requires(T container) {
+  { container.size() } -> std::convertible_to<std::size_t>;
+  { container[0] } -> std::convertible_to<float>;
+};
+
+// Main stacking function with C++20 concepts
+template <ImageContainer ImgCont, WeightContainer WCont = std::vector<float>>
+auto stackImages(const ImgCont &images, StackMode mode, float sigma = 2.0f,
+                 const WCont &weights = WCont{}) -> cv::Mat;
+
+// Layered stacking function with C++20 concepts
+template <ImageContainer ImgCont, WeightContainer WCont = std::vector<float>>
+auto stackImagesByLayers(const ImgCont &images, StackMode mode,
+                         float sigma = 2.0f, const WCont &weights = WCont{})
     -> cv::Mat;
 
-// 按图层堆叠函数
-auto stackImagesByLayers(const std::vector<cv::Mat> &images, StackMode mode,
-                         float sigma = 2.0f,
-                         const std::vector<float> &weights = {}) -> cv::Mat;
-
-// 增加带前置处理的堆叠函数声明
-auto stackImagesWithPreprocess(const std::vector<cv::Mat> &images,
-                               StackMode mode,
+// Add preprocessing stacking function with C++20 concepts
+template <ImageContainer ImgCont, WeightContainer WCont = std::vector<float>>
+auto stackImagesWithPreprocess(const ImgCont &images, StackMode mode,
                                const StackPreprocessConfig &preprocess_config,
-                               float sigma = 2.0f,
-                               const std::vector<float> &weights = {})
+                               float sigma = 2.0f, const WCont &weights = WCont{})
     -> cv::Mat;
 
-// 辅助函数声明
-auto computeMeanAndStdDev(const std::vector<cv::Mat> &images)
+// Helper function declarations
+auto computeMeanAndStdDev(std::span<const cv::Mat> images) noexcept(false)
     -> std::pair<cv::Mat, cv::Mat>;
-auto sigmaClippingStack(const std::vector<cv::Mat> &images, float sigma)
-    -> cv::Mat;
-auto computeMode(const std::vector<cv::Mat> &images) -> cv::Mat;
+auto sigmaClippingStack(std::span<const cv::Mat> images,
+                        float sigma) noexcept(false) -> cv::Mat;
+auto computeMode(std::span<const cv::Mat> images) noexcept(false) -> cv::Mat;
 
-// 新增函数声明
-auto computeEntropy(const cv::Mat &image) -> double;
-auto focusStack(const std::vector<cv::Mat> &images) -> cv::Mat;
-auto entropyStack(const std::vector<cv::Mat> &images) -> cv::Mat;
-auto trimmedMeanStack(const std::vector<cv::Mat> &images, float trimRatio)
+// Additional function declarations
+auto computeEntropy(const cv::Mat &image) noexcept -> double;
+auto focusStack(std::span<const cv::Mat> images) noexcept(false) -> cv::Mat;
+auto entropyStack(std::span<const cv::Mat> images) noexcept(false) -> cv::Mat;
+auto trimmedMeanStack(std::span<const cv::Mat> images,
+                      float trimRatio) noexcept(false) -> cv::Mat;
+auto adaptiveFocusStack(std::span<const cv::Mat> images) noexcept(false)
+    -> cv::Mat;
+auto weightedMedianStack(std::span<const cv::Mat> images,
+                         std::span<const float> weights) noexcept(false)
     -> cv::Mat;
 
-auto adaptiveFocusStack(const std::vector<cv::Mat> &images) -> cv::Mat;
-auto weightedMedianStack(const std::vector<cv::Mat> &images,
-  const std::vector<float> &weights) -> cv::Mat;
+// Concept-constrained functions to ensure correct usage
+template <ImageContainer ImgCont>
+auto validateStackInputs(const ImgCont &images, float sigma) {
+  if (sigma < 0.0f) {
+    throw std::invalid_argument("Sigma value must be non-negative");
+  }
+
+  if (images.empty()) {
+    throw std::invalid_argument("Input image collection cannot be empty");
+  }
+
+  for (size_t i = 0; i < images.size(); ++i) {
+    if (images[i].empty()) {
+      throw std::invalid_argument("Image " + std::to_string(i) + " is empty");
+    }
+  }
+
+  return true;
+}
+
+// Helper function to convert any image container to span
+template <ImageContainer ImgCont>
+auto toImagesSpan(const ImgCont &images) -> std::span<const cv::Mat> {
+  return std::span<const cv::Mat>(images.data(), images.size());
+}
+
+template <WeightContainer WCont>
+auto toWeightsSpan(const WCont &weights) -> std::span<const float> {
+  if (weights.empty()) {
+    return {};
+  }
+  return std::span<const float>(weights.data(), weights.size());
+}

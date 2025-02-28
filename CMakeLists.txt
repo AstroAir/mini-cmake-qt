@@ -22,6 +22,7 @@ add_subdirectory(libs)
 set(COMPANY "Example")
 set(COPYRIGHT "Copyright (c) 2014 Vincent Lee. All rights reserved.")
 set(IDENTIFIER "com.example.Example")
+set(CMAKE_CXX_STANDARD 23)
 
 include_directories(src)
 
@@ -99,7 +100,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${OpenCV_INCLUDE_DIRS})
 
 set_target_properties(${PROJECT_NAME}
     PROPERTIES
-        CXX_STANDARD 20
+        CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
 )
 

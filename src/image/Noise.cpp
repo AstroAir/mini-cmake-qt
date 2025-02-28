@@ -1,109 +1,289 @@
 #include "Noise.hpp"
+#include <algorithm>
+#include <execution>
 #include <omp.h>
 #include <random>
 #include <spdlog/spdlog.h>
 
+// Check if we can use SIMD
+#if defined(__AVX__) || defined(__AVX2__) || defined(__SSE__) ||               \
+    defined(__SSE2__)
+#include <immintrin.h>
+#define HAS_SIMD 1
+#else
+#define HAS_SIMD 0
+#endif
 
 namespace {
 
-// Internal helper functions in an anonymous namespace
+// Thread-local random generator with proper seeding
+std::mt19937 &get_random_generator() {
+  static thread_local std::mt19937 gen(
+      std::random_device{}() ^
+      static_cast<unsigned int>(
+          std::hash<std::thread::id>{}(std::this_thread::get_id())));
+  return gen;
+}
 
+// Internal helper functions
 namespace detail {
 
-// Gaussian noise using OpenCV's randn (vectorized)
+// Gaussian noise using OpenCV's randn with optimizations
 void add_gaussian_noise(const cv::Mat &input, cv::Mat &output,
                         const GaussianParams &params) {
-  cv::Mat noise(input.size(), input.type());
-  cv::randn(noise, params.mean, params.stddev);
+  // Use preallocated output if possible
+  cv::Mat noise = cv::Mat::zeros(input.size(), CV_32F);
+
+// Use parallel execution of randn via OpenMP
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      cv::randn(noise, params.mean, params.stddev);
+    }
+  }
+
+  if (output.empty() || output.size() != input.size() ||
+      output.type() != input.type()) {
+    output.create(input.size(), input.type());
+  }
+
+  // Add noise using parallel algorithms
   cv::add(input, noise, output);
   output.convertTo(output, input.type());
 }
 
-// Salt and Pepper noise using random pixel selection
+// Salt and Pepper noise with SIMD and parallel optimizations
 void add_salt_and_pepper(const cv::Mat &input, cv::Mat &output,
                          const SaltAndPepperParams &params) {
   input.copyTo(output);
-  const int num_pixels = input.rows * input.cols * input.channels();
+  const int num_pixels = static_cast<int>(input.total() * input.channels());
   const int num_salt =
       static_cast<int>(num_pixels * params.density * params.salt_prob);
   const int num_pepper =
       static_cast<int>(num_pixels * params.density * (1 - params.salt_prob));
-  static thread_local std::mt19937 gen{std::random_device{}()};
+
+  // Vector of indices for parallel processing
+  std::vector<int> salt_indices(num_salt);
+  std::vector<int> pepper_indices(num_pepper);
+
+  // Generate random indices in parallel
+  auto gen = get_random_generator();
   std::uniform_int_distribution<> dis(0, num_pixels - 1);
 
+#pragma omp parallel for
   for (int i = 0; i < num_salt; ++i) {
-    const int idx = dis(gen);
-    output.data[idx] = 255;
+    auto local_gen = get_random_generator();
+    salt_indices[i] = dis(local_gen);
   }
+
+#pragma omp parallel for
   for (int i = 0; i < num_pepper; ++i) {
-    const int idx = dis(gen);
-    output.data[idx] = 0;
+    auto local_gen = get_random_generator();
+    pepper_indices[i] = dis(local_gen);
+  }
+
+// Apply salt (255) and pepper (0) values in parallel
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      std::for_each(
+          std::execution::par_unseq, salt_indices.begin(), salt_indices.end(),
+          [&output](int idx) {
+            if (idx >= 0 &&
+                idx < static_cast<int>(output.total() * output.channels())) {
+              output.data[idx] = 255;
+            }
+          });
+    }
+
+#pragma omp section
+    {
+      std::for_each(
+          std::execution::par_unseq, pepper_indices.begin(),
+          pepper_indices.end(), [&output](int idx) {
+            if (idx >= 0 &&
+                idx < static_cast<int>(output.total() * output.channels())) {
+              output.data[idx] = 0;
+            }
+          });
+    }
   }
 }
 
-// Poisson noise (simplified version)
-// Note: More advanced simulation would use the actual Poisson distribution.
+// Improved Poisson noise implementation
 void add_poisson_noise(const cv::Mat &input, cv::Mat &output) {
-  cv::Mat noise(input.size(), input.type());
-  cv::randn(noise, 0, 1);
-  noise = noise * 0.5 + 0.5; // Normalize to [0,1)
-  cv::Mat exp_input;
-  cv::exp(-input, exp_input);
-  cv::Mat thresholded;
-  cv::threshold(exp_input, thresholded, 0.5, 255, cv::THRESH_BINARY);
-  cv::multiply(input, thresholded, output);
-  output.convertTo(output, input.type());
+  // Create output if needed
+  if (output.empty() || output.size() != input.size()) {
+    output = cv::Mat(input.size(), input.type());
+  }
+
+  // Convert to float for processing
+  cv::Mat float_input;
+  input.convertTo(float_input, CV_32F);
+
+  // Create a lambda for parallel noise application
+  auto apply_poisson = [](const cv::Mat &src, cv::Mat &dst) {
+    auto gen = get_random_generator();
+
+#pragma omp parallel for collapse(2)
+    for (int i = 0; i < src.rows; ++i) {
+      for (int j = 0; j < src.cols; ++j) {
+        auto local_gen = get_random_generator();
+        for (int c = 0; c < src.channels(); ++c) {
+          float pixel_val = src.at<float>(i, j * src.channels() + c);
+          // Use actual Poisson distribution for better simulation
+          std::poisson_distribution<int> d(std::max(1.0f, pixel_val));
+          dst.at<float>(i, j * dst.channels() + c) =
+              static_cast<float>(d(local_gen));
+        }
+      }
+    }
+  };
+
+  // Apply noise
+  cv::Mat float_output(float_input.size(), CV_32F);
+  apply_poisson(float_input, float_output);
+
+  // Convert back to original type
+  float_output.convertTo(output, input.type());
 }
 
-// Speckle noise using multiplicative noise
+// Optimized speckle noise implementation using SIMD when available
 void add_speckle_noise(const cv::Mat &input, cv::Mat &output,
                        const SpeckleParams &params) {
   cv::Mat noise(input.size(), CV_32F);
   cv::randn(noise, 0, params.intensity);
+
   input.convertTo(output, CV_32F);
+
+#if HAS_SIMD
+  // Use SIMD for multiplication when possible
+  if (input.isContinuous() && noise.isContinuous()) {
+    const int total = static_cast<int>(input.total() * input.channels());
+    const int step = 8; // process 8 floats at a time with AVX
+
+#pragma omp parallel for
+    for (int i = 0; i < total - step + 1; i += step) {
+      __m256 in =
+          _mm256_loadu_ps(reinterpret_cast<const float *>(output.data) + i);
+      __m256 n =
+          _mm256_loadu_ps(reinterpret_cast<const float *>(noise.data) + i);
+      __m256 one = _mm256_set1_ps(1.0f);
+      __m256 result = _mm256_mul_ps(in, _mm256_add_ps(one, n));
+      _mm256_storeu_ps(reinterpret_cast<float *>(output.data) + i, result);
+    }
+
+    // Handle remaining elements
+    for (int i = total - (total % step); i < total; ++i) {
+      reinterpret_cast<float *>(output.data)[i] *=
+          (1.0f + reinterpret_cast<float *>(noise.data)[i]);
+    }
+  } else {
+    output = output.mul(1.0f + noise);
+  }
+#else
   output = output.mul(1.0f + noise);
+#endif
+
   output.convertTo(output, input.type());
 }
 
-// Periodic noise with a sinusoidal pattern (parallelized with OpenMP)
+// Periodic noise with vectorization
 void add_periodic_noise(const cv::Mat &input, cv::Mat &output,
                         const PeriodicParams &params) {
-  output = input.clone();
-#pragma omp parallel for
+  if (output.empty() || output.size() != input.size() ||
+      output.type() != input.type()) {
+    output = input.clone();
+  } else {
+    input.copyTo(output);
+  }
+
+  // Pre-compute sin/cos values for better performance
+  std::vector<float> sin_values(input.rows);
+  std::vector<float> cos_values(input.cols);
+
+#pragma omp parallel sections
+  {
+#pragma omp section
+    {
+      for (int i = 0; i < input.rows; i++) {
+        sin_values[i] =
+            static_cast<float>(std::sin(2 * CV_PI * params.frequency * i));
+      }
+    }
+
+#pragma omp section
+    {
+      for (int j = 0; j < input.cols; j++) {
+        cos_values[j] =
+            static_cast<float>(std::cos(2 * CV_PI * params.frequency * j));
+      }
+    }
+  }
+
+#pragma omp parallel for collapse(2)
   for (int i = 0; i < input.rows; i++) {
     for (int j = 0; j < input.cols; j++) {
-      double noise = params.amplitude *
-                     std::sin(2 * CV_PI * params.frequency * i) *
-                     std::cos(2 * CV_PI * params.frequency * j);
+      float noise =
+          static_cast<float>(params.amplitude * sin_values[i] * cos_values[j]);
       for (int c = 0; c < input.channels(); c++) {
-        int value = cv::saturate_cast<uchar>(
-            input.at<uchar>(i, j * input.channels() + c) + noise);
-        output.at<uchar>(i, j * input.channels() + c) = value;
+        int idx = i * input.step + j * input.elemSize() + c;
+        int value = cv::saturate_cast<uchar>(input.data[idx] + noise);
+        output.data[idx] = static_cast<uchar>(value);
       }
     }
   }
 }
 
-// Laplacian noise using an exponential distribution (parallelized with OpenMP)
+// Laplacian noise with improved random generation
 void add_laplacian_noise(const cv::Mat &input, cv::Mat &output,
                          const LaplacianParams &params) {
-  cv::Mat noise(input.size(), input.type());
-  static thread_local std::mt19937 gen{std::random_device{}()};
-  std::exponential_distribution<> d(1.0 / params.scale);
-#pragma omp parallel for
-  for (int i = 0; i < noise.total(); i++) {
-    noise.data[i] = cv::saturate_cast<uchar>(d(gen));
+  // Create output if needed
+  if (output.empty() || output.size() != input.size() ||
+      output.type() != input.type()) {
+    output = cv::Mat(input.size(), input.type());
   }
-  cv::add(input, noise, output);
+
+  input.copyTo(output);
+
+  // Using a more efficient approach with vectorization
+  const int total_pixels = static_cast<int>(input.total() * input.channels());
+  std::vector<float> noise_values(total_pixels);
+
+// Generate Laplacian noise values
+#pragma omp parallel
+  {
+    auto local_gen = get_random_generator();
+    std::exponential_distribution<float> d(1.0f /
+                                           static_cast<float>(params.scale));
+
+#pragma omp for
+    for (int i = 0; i < total_pixels; ++i) {
+      float r = d(local_gen);
+      noise_values[i] =
+          (rand() % 2 == 0) ? r : -r; // Create Laplacian from exponential
+    }
+  }
+
+// Apply noise
+#pragma omp parallel for
+  for (int i = 0; i < total_pixels; ++i) {
+    int value = cv::saturate_cast<uchar>(input.data[i] + noise_values[i]);
+    output.data[i] = static_cast<uchar>(value);
+  }
 }
 
-// Uniform noise based on a uniform distribution.
+// Uniform noise with parallel processing
 void add_uniform_noise(const cv::Mat &input, cv::Mat &output,
                        const UniformParams &params) {
+  // Create a uniform noise matrix
   cv::Mat noise(input.size(), input.type());
   cv::randu(noise, params.low, params.high);
-  cv::add(input, noise, output);
-  output.convertTo(output, input.type());
+
+  // Add the noise to the input
+  cv::add(input, noise, output, cv::noArray(), input.type());
 }
 
 } // end namespace detail
@@ -112,33 +292,50 @@ void add_uniform_noise(const cv::Mat &input, cv::Mat &output,
 
 namespace imgnoise {
 
+bool validate_params(NoiseType type, const NoiseParams &params) noexcept {
+  try {
+    switch (type) {
+    case NoiseType::GAUSSIAN:
+      return std::get<GaussianParams>(params).is_valid();
+    case NoiseType::SALT_AND_PEPPER:
+      return std::get<SaltAndPepperParams>(params).is_valid();
+    case NoiseType::POISSON:
+      return true; // No parameters to validate
+    case NoiseType::SPECKLE:
+      return std::get<SpeckleParams>(params).is_valid();
+    case NoiseType::PERIODIC:
+      return std::get<PeriodicParams>(params).is_valid();
+    case NoiseType::LAPLACIAN:
+      return std::get<LaplacianParams>(params).is_valid();
+    case NoiseType::UNIFORM:
+      return std::get<UniformParams>(params).is_valid();
+    default:
+      return false;
+    }
+  } catch (const std::bad_variant_access &) {
+    return false;
+  }
+}
+
 void add_image_noise(const cv::Mat &input, cv::Mat &output, NoiseType type,
                      const NoiseParams &params, ProgressCallback progress) {
-  if (input.empty()) {
-    spdlog::error("Input image is empty");
-    throw std::invalid_argument("Input image is empty");
-  }
-  if (input.depth() != CV_8U && input.depth() != CV_32F) {
-    spdlog::error("Unsupported image depth: {}", input.depth());
-    throw std::invalid_argument("Unsupported image depth");
-  }
   try {
+    // Validate input
+    validate_image(input);
+
+    // Validate parameters
+    if (!validate_params(type, params)) {
+      throw NoiseException("Invalid parameters for the specified noise type");
+    }
+
     switch (type) {
     case NoiseType::GAUSSIAN: {
       const auto &p = std::get<GaussianParams>(params);
-      if (p.stddev < 0) {
-        spdlog::error("Invalid standard deviation: {}", p.stddev);
-        throw std::invalid_argument("Negative standard deviation");
-      }
       detail::add_gaussian_noise(input, output, p);
       break;
     }
     case NoiseType::SALT_AND_PEPPER: {
       const auto &p = std::get<SaltAndPepperParams>(params);
-      if (p.density < 0 || p.density > 1) {
-        spdlog::error("Invalid density: {}", p.density);
-        throw std::invalid_argument("Density out of [0,1] range");
-      }
       detail::add_salt_and_pepper(input, output, p);
       break;
     }
@@ -166,80 +363,135 @@ void add_image_noise(const cv::Mat &input, cv::Mat &output, NoiseType type,
       break;
     }
     default:
-      spdlog::error("Unknown noise type: {}", static_cast<int>(type));
-      throw std::invalid_argument("Unknown noise type");
+      throw NoiseException("Unknown noise type");
     }
+
     if (progress) {
       progress(1.0f);
     }
   } catch (const cv::Exception &e) {
-    spdlog::error("OpenCV exception: {}", e.what());
-    throw;
-  } catch (const std::bad_variant_access &) {
+    spdlog::error("OpenCV exception in add_image_noise: {}", e.what());
+    throw NoiseException(std::string("OpenCV error: ") + e.what());
+  } catch (const std::bad_variant_access &e) {
     spdlog::error("Parameter type mismatch for noise type");
-    throw;
-  }
-
-  // Normalize output if output memory differs from input memory.
-  if (input.data != output.data) {
-    cv::normalize(output, output, 0, 255, cv::NORM_MINMAX, input.type());
+    throw NoiseException("Parameter type mismatch for noise type");
+  } catch (const NoiseException &) {
+    throw; // Re-throw our exceptions
+  } catch (const std::exception &e) {
+    spdlog::error("Standard exception in add_image_noise: {}", e.what());
+    throw NoiseException(std::string("Standard error: ") + e.what());
   }
 }
 
 void add_mixed_noise(
     const cv::Mat &input, cv::Mat &output,
-    const std::vector<std::pair<NoiseType, NoiseParams>> &noise_list,
+    std::span<const std::pair<NoiseType, NoiseParams>> noise_list,
     ProgressCallback progress) {
-  if (input.empty()) {
-    spdlog::error("Input image is empty");
-    throw std::invalid_argument("Input image is empty");
-  }
-  cv::Mat temp = input.clone();
-  int total = static_cast<int>(noise_list.size());
-  for (size_t i = 0; i < noise_list.size(); ++i) {
-    NoiseType type = noise_list[i].first;
-    NoiseParams params = noise_list[i].second;
-    add_image_noise(temp, temp, type, params);
-    if (progress) {
-      progress(static_cast<float>(i + 1) / total);
+  try {
+    validate_image(input);
+
+    if (noise_list.empty()) {
+      input.copyTo(output);
+      if (progress)
+        progress(1.0f);
+      return;
     }
+
+    // Create a working copy
+    cv::Mat temp = input.clone();
+    const int total = static_cast<int>(noise_list.size());
+
+    // Apply each noise type sequentially
+    for (size_t i = 0; i < noise_list.size(); ++i) {
+      const auto &[type, params] = noise_list[i];
+
+      if (!validate_params(type, params)) {
+        throw NoiseException("Invalid parameters for noise at index " +
+                             std::to_string(i));
+      }
+
+      // Create a lambda for progress tracking
+      auto sub_progress = [&progress, total, i](float p) {
+        if (progress) {
+          progress((static_cast<float>(i) + p) / total);
+        }
+      };
+
+      add_image_noise(temp, temp, type, params, sub_progress);
+    }
+
+    output = temp;
+  } catch (const cv::Exception &e) {
+    spdlog::error("OpenCV exception in add_mixed_noise: {}", e.what());
+    throw NoiseException(std::string("OpenCV error: ") + e.what());
+  } catch (const NoiseException &) {
+    throw; // Re-throw our exceptions
+  } catch (const std::exception &e) {
+    spdlog::error("Standard exception in add_mixed_noise: {}", e.what());
+    throw NoiseException(std::string("Standard error: ") + e.what());
   }
-  output = temp;
 }
 
-double estimate_noise_level(const cv::Mat &image) {
-  cv::Mat gray;
-  if (image.channels() > 1) {
-    cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
-  } else {
-    gray = image;
+double estimate_noise_level(const cv::Mat &image) noexcept {
+  try {
+    if (image.empty()) {
+      spdlog::warn("Empty image provided to estimate_noise_level");
+      return 0.0;
+    }
+
+    cv::Mat gray;
+    if (image.channels() > 1) {
+      cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    } else {
+      gray = image.clone();
+    }
+
+    cv::Mat laplacian;
+    cv::Laplacian(gray, laplacian, CV_64F);
+
+    cv::Scalar mean, stddev;
+    cv::meanStdDev(laplacian, mean, stddev);
+
+    return stddev[0];
+  } catch (const std::exception &e) {
+    spdlog::error("Error in estimate_noise_level: {}", e.what());
+    return 0.0;
   }
-  cv::Mat laplacian;
-  cv::Laplacian(gray, laplacian, CV_64F);
-  cv::Scalar mean, stddev;
-  cv::meanStdDev(laplacian, mean, stddev);
-  return stddev[0];
 }
 
 void add_roi_noise(const cv::Mat &input, cv::Mat &output, const cv::Rect &roi,
                    NoiseType type, const NoiseParams &params,
                    ProgressCallback progress) {
-  if (input.empty()) {
-    spdlog::error("Input image is empty");
-    throw std::invalid_argument("Input image is empty");
+  try {
+    // Validate input and ROI
+    validate_roi(input, roi);
+
+    // Validate parameters
+    if (!validate_params(type, params)) {
+      throw NoiseException("Invalid parameters for the specified noise type");
+    }
+
+    // Start with a copy of the input
+    input.copyTo(output);
+
+    // Extract ROI from output for processing
+    cv::Mat roiMat = output(roi);
+    cv::Mat noisyRoi;
+
+    // Apply noise only to the ROI
+    add_image_noise(roiMat, noisyRoi, type, params, progress);
+
+    // Copy the noisy ROI back to the output
+    noisyRoi.copyTo(roiMat);
+  } catch (const cv::Exception &e) {
+    spdlog::error("OpenCV exception in add_roi_noise: {}", e.what());
+    throw NoiseException(std::string("OpenCV error: ") + e.what());
+  } catch (const NoiseException &) {
+    throw; // Re-throw our exceptions
+  } catch (const std::exception &e) {
+    spdlog::error("Standard exception in add_roi_noise: {}", e.what());
+    throw NoiseException(std::string("Standard error: ") + e.what());
   }
-  if ((roi.x < 0) || (roi.y < 0) || (roi.x + roi.width > input.cols) ||
-      (roi.y + roi.height > input.rows)) {
-    spdlog::error("ROI is out of image bounds");
-    throw std::invalid_argument("ROI is out of image bounds");
-  }
-  // Start with the full image copy.
-  input.copyTo(output);
-  // Extract ROI from output, apply noise on that area
-  cv::Mat roiMat = output(roi);
-  cv::Mat noisyRoi;
-  add_image_noise(roiMat, noisyRoi, type, params, progress);
-  noisyRoi.copyTo(roiMat);
 }
 
 } // namespace imgnoise
